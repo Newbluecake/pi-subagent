@@ -236,7 +236,14 @@ function terminalUpdate(state: RunState, input: RunInput): { state: RunState; ef
     }
     return { state: { ...state, diag: d }, effects: [] };
   }
-  if (input.kind === "prompt_settled" || input.kind === "deadline_fired" || input.kind === "stop_requested" || input.kind === "phase_entered" || input.kind === "startup_failed" || input.kind === "session_created")
+  if (
+    input.kind === "prompt_settled" ||
+    input.kind === "deadline_fired" ||
+    input.kind === "stop_requested" ||
+    input.kind === "phase_entered" ||
+    input.kind === "startup_failed" ||
+    input.kind === "session_created"
+  )
     return { state: { ...state, diag: d }, effects: [] };
   return illegal(state, input);
 }
@@ -278,7 +285,8 @@ export function reduce(
     // N6-1: reap/settled are terminal-only bookkeeping phases, never a legitimate
     // phase_entered target. Accepting them here previously let a run get stuck in
     // "reap" while still non-terminal (running), with no way out.
-    if (!RUN_PHASES.includes(input.phase) || input.phase === "settled" || input.phase === "reap") return illegal(state, input);
+    if (!RUN_PHASES.includes(input.phase) || input.phase === "settled" || input.phase === "reap")
+      return illegal(state, input);
     if (state.phase === input.phase)
       return {
         state: { ...state, diag: { ...state.diag, phase: input.phase, phaseEnteredAt: input.at } },
@@ -298,19 +306,18 @@ export function reduce(
       input.reason === "queue_timeout" ? { timeoutReason: "queue_timeout" } : {},
     );
   if (input.kind === "stop_requested" && (state.phase === "abort_grace" || state.phase === "reap"))
-    return { state: { ...state, diag: { ...state.diag, stopRequestedAt: input.at, stopCause: input.cause } }, effects: [] };
+    return {
+      state: { ...state, diag: { ...state.diag, stopRequestedAt: input.at, stopCause: input.cause } },
+      effects: [],
+    };
   if (input.kind === "stop_requested") {
     if (state.phase === "queue_wait")
       return finish(state, "aborted", input.at, budget, { stopCause: input.cause, stopRequestedAt: input.at });
     const running = ["model_turn", "tool_exec", "retry_backoff", "compaction"].includes(state.phase);
-    const entered = enter(
-      state,
-      "stopping",
-      "abort_grace",
-      input.at,
-      budget,
-      { stopCause: input.cause, stopRequestedAt: input.at },
-    );
+    const entered = enter(state, "stopping", "abort_grace", input.at, budget, {
+      stopCause: input.cause,
+      stopRequestedAt: input.at,
+    });
     const controls = emit(entered.state, [
       { kind: "cancel_signal", reason: input.cause },
       ...(running ? [{ kind: "soft_steer" as const, text: "wrap up now" }] : []),
@@ -430,14 +437,18 @@ export function reduce(
     if (state.phase === "session_create" || state.phase === "extension_bind")
       return finish(removed, "timed_out", input.at, budget, { timeoutReason: input.reason }, [{ kind: "dispose" }]);
     if (state.phase === "abort_grace") {
-      const status = state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout" ? "timed_out" : "aborted";
+      const status =
+        state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout" ? "timed_out" : "aborted";
       return finish(removed, status, input.at, budget, { timeoutReason: input.reason }, [
         { kind: "request_abort" },
         { kind: "dispose" },
       ]);
     }
     if (state.phase === "retry_backoff" && input.timer === "idle") return { state, effects: [] };
-    const entered = enter(removed, "stopping", "abort_grace", input.at, budget, { timeoutReason: input.reason, stopCause: "timeout" });
+    const entered = enter(removed, "stopping", "abort_grace", input.at, budget, {
+      timeoutReason: input.reason,
+      stopCause: "timeout",
+    });
     const running = ["model_turn", "tool_exec", "retry_backoff", "compaction"].includes(state.phase);
     const controls = emit(entered.state, [
       { kind: "cancel_signal", reason: "timeout" },
@@ -475,7 +486,7 @@ function handleEffectFailed(
   const diag = {
     ...state.diag,
     degraded: [...state.diag.degraded, degraded],
-    ...(isPersist ? { persistStatus: retry ? "retrying" as const : "degraded_final" as const } : {}),
+    ...(isPersist ? { persistStatus: retry ? ("retrying" as const) : ("degraded_final" as const) } : {}),
   };
   const effects: RunEffect[] =
     input.effect === "release_slot"
@@ -485,19 +496,21 @@ function handleEffectFailed(
         : input.effect === "clear_timer" && input.timer
           ? [{ kind: "clear_timer", timer: input.timer }]
           : retry && state.outcome
-            ? [{
-                kind: "persist_snapshot",
-                snapshot: {
-                  runId: state.runId,
-                  generation: state.generation,
-                  status: state.status as RunOutcome["status"],
-                  phase: "settled",
-                  deadlines: state.deadlines,
-                  diag,
-                  outcome: state.outcome,
-                  updatedAt: input.at,
+            ? [
+                {
+                  kind: "persist_snapshot",
+                  snapshot: {
+                    runId: state.runId,
+                    generation: state.generation,
+                    status: state.status as RunOutcome["status"],
+                    phase: "settled",
+                    deadlines: state.deadlines,
+                    diag,
+                    outcome: state.outcome,
+                    updatedAt: input.at,
+                  },
                 },
-              }]
+              ]
             : [];
   const next = {
     ...state,

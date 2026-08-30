@@ -58,9 +58,7 @@ export function idleDueAt(diag: RunDiagnostics, budget: DeadlineBudget): Millis 
   return base + budget.idleMs + (diag.retry?.delayMs ?? 0) + budget.retrySlackMs;
 }
 export type DeadlineResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; reason: "timeout" }
-  | { ok: false; reason: "error"; error: ErrorInfo };
+  { ok: true; value: T } | { ok: false; reason: "timeout" } | { ok: false; reason: "error"; error: ErrorInfo };
 
 /**
  * N6-2: a rejection of `p` is a genuine failure of the underlying operation, not

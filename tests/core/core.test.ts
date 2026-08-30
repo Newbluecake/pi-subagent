@@ -127,7 +127,13 @@ describe("transition contract", () => {
     const r = apply(enqueued(), { kind: "deadline_fired", timer: "queue", reason: "queue_timeout" });
     expect(r.state).toMatchObject({ status: "failed", phase: "settled", slotHeld: false });
     expect(kinds(r)).not.toContain("release_slot");
-    expect(kinds(r)).toEqual(["clear_timer", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]);
+    expect(kinds(r)).toEqual([
+      "clear_timer",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]);
   });
   it("resolve_config timeout is failed and skips recovery", () => {
     const s = apply(enqueued(), { kind: "slot_acquired" }).state;
@@ -139,7 +145,11 @@ describe("transition contract", () => {
   it("settles runtime timeout in the same reduction with accounting effects", () => {
     let s = apply(enqueued(), { kind: "slot_acquired" }).state;
     s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
-    const r = reduce({ ...s, armedTimers: ["idle"] }, { generation: s.generation, input: { kind: "deadline_fired", timer: "idle", reason: "idle", at: 1 } }, budget);
+    const r = reduce(
+      { ...s, armedTimers: ["idle"] },
+      { generation: s.generation, input: { kind: "deadline_fired", timer: "idle", reason: "idle", at: 1 } },
+      budget,
+    );
     expect(r.state.status).toBe("stopping");
     expect(r.state.phase).toBe("abort_grace");
     expect(kinds(r)).toEqual(["arm_timer", "arm_timer", "cancel_signal", "soft_steer"]);
@@ -257,23 +267,44 @@ describe("major recovery and deadline contracts", () => {
   it("arms idle and total timers during retry_backoff", () => {
     let s = apply(enqueued(), { kind: "slot_acquired" }).state;
     s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
-    const r = apply(s, { kind: "session_event", event: { t: "retry_start", attempt: 1, maxAttempts: 2, delayMs: 20 } }, 10);
+    const r = apply(
+      s,
+      { kind: "session_event", event: { t: "retry_start", attempt: 1, maxAttempts: 2, delayMs: 20 } },
+      10,
+    );
     expect(r.state.phase).toBe("retry_backoff");
     expect(r.state.armedTimers).toEqual(["idle", "total"]);
     expect(r.effects.map((e) => e.effect.kind)).toEqual(["clear_timer", "clear_timer", "arm_timer", "arm_timer"]);
-    expect(r.effects.find((e) => e.effect.kind === "arm_timer" && e.effect.timer === "idle")?.effect).toEqual({ kind: "arm_timer", timer: "idle", dueAt: 100 });
+    expect(r.effects.find((e) => e.effect.kind === "arm_timer" && e.effect.timer === "idle")?.effect).toEqual({
+      kind: "arm_timer",
+      timer: "idle",
+      dueAt: 100,
+    });
   });
 
   it("compensates terminal effect failures and caps snapshot retries", () => {
     const terminalState = apply(enqueued(), { kind: "stop_requested", cause: "user_stop" }).state;
-    const release = apply(terminalState, { kind: "effect_failed", effect: "release_slot", error: { kind: "internal", message: "pool", retryable: false } });
+    const release = apply(terminalState, {
+      kind: "effect_failed",
+      effect: "release_slot",
+      error: { kind: "internal", message: "pool", retryable: false },
+    });
     expect(kinds(release)).toEqual(["release_slot"]);
     let state = terminalState;
-    for (let n = 0; n < 4; n++) state = apply(state, { kind: "effect_failed", effect: "persist_snapshot", error: { kind: "internal", message: "journal", retryable: false } }).state;
+    for (let n = 0; n < 4; n++)
+      state = apply(state, {
+        kind: "effect_failed",
+        effect: "persist_snapshot",
+        error: { kind: "internal", message: "journal", retryable: false },
+      }).state;
     expect(state.persistRetryCount).toBe(4);
     expect(state.diag.persistStatus).toBe("degraded_final");
     expect(state.status).toBe("aborted");
-    const bestEffort = apply(terminalState, { kind: "effect_failed", effect: "dispose", error: { kind: "internal", message: "dispose", retryable: false } });
+    const bestEffort = apply(terminalState, {
+      kind: "effect_failed",
+      effect: "dispose",
+      error: { kind: "internal", message: "dispose", retryable: false },
+    });
     expect(kinds(bestEffort)).toEqual([]);
     expect(bestEffort.state.diag.degraded.at(-1)).toMatchObject({ effect: "dispose", compensated: false });
   });
@@ -308,12 +339,26 @@ describe("stopping ladder", () => {
     const stopped = apply(state, { kind: "stop_requested", cause: "user_stop" });
     expect(stopped.state).toMatchObject({ status: "stopping", phase: "abort_grace" });
     expect(kinds(stopped)).toEqual([
-      "clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer",
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
     ]);
-    const settled = apply(stopped.state, { kind: "prompt_settled", error: { kind: "aborted", message: "stop", retryable: false } });
+    const settled = apply(stopped.state, {
+      kind: "prompt_settled",
+      error: { kind: "aborted", message: "stop", retryable: false },
+    });
     expect(settled.state).toMatchObject({ status: "aborted", phase: "settled" });
     expect(kinds(settled)).toEqual([
-      "clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery",
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
     ]);
   });
 
@@ -328,12 +373,20 @@ describe("stopping ladder", () => {
   it("ignores retry idle deadline silently but accepts total deadline", () => {
     let state = apply(enqueued(), { kind: "slot_acquired" }).state;
     state = apply(state, { kind: "phase_entered", phase: "retry_backoff" }).state;
-    const idle = reduce({ ...state, armedTimers: ["idle", "total"] }, { generation: state.generation, input: { kind: "deadline_fired", timer: "idle", reason: "idle", at: 1 } }, budget);
+    const idle = reduce(
+      { ...state, armedTimers: ["idle", "total"] },
+      { generation: state.generation, input: { kind: "deadline_fired", timer: "idle", reason: "idle", at: 1 } },
+      budget,
+    );
     expect(idle.state.phase).toBe("retry_backoff");
     expect(idle.state.armedTimers).toEqual(["idle", "total"]);
     expect(idle.state.diag.lastWarn).toBeUndefined();
     expect(idle.effects).toEqual([]);
-    const total = reduce(idle.state, { generation: state.generation, input: { kind: "deadline_fired", timer: "total", reason: "total", at: 1 } }, budget);
+    const total = reduce(
+      idle.state,
+      { generation: state.generation, input: { kind: "deadline_fired", timer: "total", reason: "total", at: 1 } },
+      budget,
+    );
     expect(total.state.phase).toBe("abort_grace");
   });
 
@@ -351,8 +404,14 @@ describe("stopping ladder", () => {
     const result = apply(state, { kind: "deadline_fired", timer: "abort_grace", reason: "idle" });
     expect(result.state).toMatchObject({ status: "aborted", phase: "settled" });
     expect(kinds(result)).toEqual([
-      "clear_timer", "release_slot", "request_abort", "dispose", "settle_waiters",
-      "emit_lifecycle", "persist_snapshot", "enqueue_delivery",
+      "clear_timer",
+      "release_slot",
+      "request_abort",
+      "dispose",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
     ]);
   });
 
@@ -387,8 +446,16 @@ describe("N6-1: reap/settled can never be entered via phase_entered", () => {
     // phase_entered("reap") attempt; none may succeed. This is the regression guard for the
     // original bug where a running run could be walked into "reap" and then never leave it.
     const reachablePhases: RunPhase[] = [
-      "queue_wait", "resolve_config", "session_create", "extension_bind",
-      "prompt_dispatch", "model_turn", "tool_exec", "retry_backoff", "compaction", "abort_grace",
+      "queue_wait",
+      "resolve_config",
+      "session_create",
+      "extension_bind",
+      "prompt_dispatch",
+      "model_turn",
+      "tool_exec",
+      "retry_backoff",
+      "compaction",
+      "abort_grace",
     ];
     for (const phase of reachablePhases) {
       let state = enqueued();
@@ -578,12 +645,19 @@ function buildInput(phase: RunPhase, kind: RunInput["kind"]): RunInput {
     case "deadline_fired": {
       const timer = timerFor(phase);
       const reason =
-        timer === "queue" ? "queue_timeout" :
-        timer === "startup" ? "session_create" :
-        timer === "bind" ? "extension_bind" :
-        timer === "first_event" ? "no_first_event" :
-        timer === "compaction" ? "compaction" :
-        timer === "total" ? "total" : "idle";
+        timer === "queue"
+          ? "queue_timeout"
+          : timer === "startup"
+            ? "session_create"
+            : timer === "bind"
+              ? "extension_bind"
+              : timer === "first_event"
+                ? "no_first_event"
+                : timer === "compaction"
+                  ? "compaction"
+                  : timer === "total"
+                    ? "total"
+                    : "idle";
       return { kind, at, timer, reason };
     }
     case "stop_requested":
@@ -615,7 +689,8 @@ function fixture(phase: RunPhase): RunState {
   if (phase === "tool_exec")
     return apply(s, { kind: "session_event", event: { t: "tool_start", toolCallId: "a", toolName: "bash" } }, 6).state;
   if (phase === "retry_backoff")
-    return apply(s, { kind: "session_event", event: { t: "retry_start", attempt: 1, maxAttempts: 2, delayMs: 5 } }, 6).state;
+    return apply(s, { kind: "session_event", event: { t: "retry_start", attempt: 1, maxAttempts: 2, delayMs: 5 } }, 6)
+      .state;
   if (phase === "compaction")
     return apply(s, { kind: "session_event", event: { t: "compaction_start", reason: "ctx" } }, 6).state;
   if (phase === "abort_grace") return apply(s, { kind: "stop_requested", cause: "user_stop" }, 6).state;
@@ -636,17 +711,37 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
   queue_wait: {
     enqueued: illegalCell,
     slot_acquired: t("starting", "resolve_config", ["clear_timer", "clear_timer", "arm_timer", "arm_timer"]),
-    slot_denied: t("failed", "settled", ["clear_timer", "clear_timer", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    slot_denied: t("failed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     phase_entered: diagSamePhaseReentry,
     session_created: illegalCell,
     startup_failed: illegalCell,
     session_event: illegalCell,
     prompt_settled: illegalCell,
-    deadline_fired: t("failed", "settled", ["clear_timer", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    deadline_fired: t("failed", "settled", [
+      "clear_timer",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     // Corrected vs. the previous (fraudulent, never-checked) matrix: nothing was ever
     // started from queue_wait, so there is nothing to cancel/abort -- no cancel_signal,
     // no request_abort, and no slot to release (R5).
-    stop_requested: t("aborted", "settled", ["clear_timer", "clear_timer", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    stop_requested: t("aborted", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     escalation_done: illegalCell,
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -657,11 +752,40 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     slot_denied: illegalCell,
     phase_entered: diagSamePhaseReentry,
     session_created: illegalCell,
-    startup_failed: t("failed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    startup_failed: t("failed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     session_event: illegalCell,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("failed", "settled", ["clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("failed", "settled", [
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -672,14 +796,44 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     slot_denied: illegalCell,
     phase_entered: diagSamePhaseReentry,
     session_created: diagSessionCreated,
-    startup_failed: t("failed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    startup_failed: t("failed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     // Real divergence from the doc's original "-" (see §4.4.1 decision note): a structural
     // session event genuinely arriving while the session is still being created is treated
     // as "the session grew up early" and promoted straight to running/model_turn.
     session_event: t("running", "model_turn", ["clear_timer", "clear_timer", "arm_timer", "arm_timer"]),
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("timed_out", "settled", ["clear_timer", "release_slot", "dispose", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("timed_out", "settled", [
+      "clear_timer",
+      "release_slot",
+      "dispose",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -690,11 +844,41 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     slot_denied: illegalCell,
     phase_entered: diagSamePhaseReentry,
     session_created: diagSessionCreated,
-    startup_failed: t("failed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    startup_failed: t("failed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     session_event: t("running", "model_turn", ["clear_timer", "clear_timer", "arm_timer", "arm_timer"]),
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("timed_out", "settled", ["clear_timer", "release_slot", "dispose", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("timed_out", "settled", [
+      "clear_timer",
+      "release_slot",
+      "dispose",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -705,12 +889,34 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     slot_denied: illegalCell,
     phase_entered: diagSamePhaseReentry,
     session_created: diagSessionCreated,
-    startup_failed: t("failed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    startup_failed: t("failed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     session_event: t("running", "model_turn", ["clear_timer", "clear_timer", "arm_timer", "arm_timer"]),
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     // Only "first_event" was armed here (no "startup"/"bind"), so only one clear_timer.
     deadline_fired: t("stopping", "abort_grace", ["clear_timer", "arm_timer", "arm_timer", "cancel_signal"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal"]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -723,9 +929,30 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     session_created: illegalCell,
     startup_failed: illegalCell,
     session_event: diagTextDelta,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("stopping", "abort_grace", ["clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("stopping", "abort_grace", [
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -740,9 +967,30 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     // Representative sub-case is a *mismatched* tool_end; the matching tool_end -> model_turn
     // transition is covered by the dedicated "clears current tool..." test above.
     session_event: illegalCell,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("stopping", "abort_grace", ["clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("stopping", "abort_grace", [
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -755,11 +1003,32 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     session_created: illegalCell,
     startup_failed: illegalCell,
     session_event: diagTextDelta,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     // Representative timer is "total" (B5: idle firing during retry_backoff is a silent-ignore,
     // covered by the dedicated "ignores retry idle deadline..." test above).
-    deadline_fired: t("stopping", "abort_grace", ["clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
+    deadline_fired: t("stopping", "abort_grace", [
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -772,9 +1041,30 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     session_created: illegalCell,
     startup_failed: illegalCell,
     session_event: diagTextDelta,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("stopping", "abort_grace", ["clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
-    stop_requested: t("stopping", "abort_grace", ["clear_timer", "clear_timer", "arm_timer", "arm_timer", "cancel_signal", "soft_steer"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("stopping", "abort_grace", [
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
+    stop_requested: t("stopping", "abort_grace", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "cancel_signal",
+      "soft_steer",
+    ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
     effect_failed: diagEffectFailed,
@@ -787,8 +1077,25 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     session_created: diagAbortGraceSessionCreated,
     startup_failed: diagStartupFailed,
     session_event: diagTextDelta,
-    prompt_settled: t("completed", "settled", ["clear_timer", "clear_timer", "release_slot", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
-    deadline_fired: t("aborted", "settled", ["clear_timer", "release_slot", "request_abort", "dispose", "settle_waiters", "emit_lifecycle", "persist_snapshot", "enqueue_delivery"]),
+    prompt_settled: t("completed", "settled", [
+      "clear_timer",
+      "clear_timer",
+      "release_slot",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
+    deadline_fired: t("aborted", "settled", [
+      "clear_timer",
+      "release_slot",
+      "request_abort",
+      "dispose",
+      "settle_waiters",
+      "emit_lifecycle",
+      "persist_snapshot",
+      "enqueue_delivery",
+    ]),
     stop_requested: diagAbortGraceStopRequested,
     escalation_done: diagEscalation(true),
     reap_finished: diagReapFinished,
@@ -827,7 +1134,9 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
 };
 
 type FlatCase = { phase: RunPhase; kind: RunInput["kind"]; cell: Cell };
-const FLAT_MATRIX: FlatCase[] = RUN_PHASES.flatMap((phase) => INPUT_KINDS.map((kind) => ({ phase, kind, cell: MATRIX[phase][kind] })));
+const FLAT_MATRIX: FlatCase[] = RUN_PHASES.flatMap((phase) =>
+  INPUT_KINDS.map((kind) => ({ phase, kind, cell: MATRIX[phase][kind] })),
+);
 
 describe("executable transition matrix (§4.4.1)", () => {
   it("has an explicit oracle for all 12 phases x 13 inputs = 156 keys", () => {
@@ -837,30 +1146,37 @@ describe("executable transition matrix (§4.4.1)", () => {
     for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(13);
   });
 
-  it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))("enforces %s", (_label, { phase, kind, cell }) => {
-    const before = fixture(phase);
-    const testInput = buildInput(phase, kind);
-    const result = reduce(before, { generation: 1, input: testInput }, budget);
+  it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))(
+    "enforces %s",
+    (_label, { phase, kind, cell }) => {
+      const before = fixture(phase);
+      const testInput = buildInput(phase, kind);
+      const result = reduce(before, { generation: 1, input: testInput }, budget);
 
-    if (cell.kind === "illegal") {
-      expect(result.effects).toEqual([]);
-      expect(result.state.status).toBe(before.status);
-      expect(result.state.phase).toBe(before.phase);
-      expect(result.state.diag.lastWarn).toBe(`illegal:${kind}`);
-      // repeating the same illegal input must stay illegal and not re-warn into a new field
-      const repeated = reduce(result.state, { generation: 1, input: buildInput(phase, kind) }, budget);
-      expect(repeated.effects).toEqual([]);
-      expect(repeated.state.diag.lastWarn).toBe(result.state.diag.lastWarn);
-      return;
-    }
-    if (cell.kind === "transition") {
-      expect(result.state.status).toBe(cell.status);
-      expect(result.state.phase).toBe(cell.phase);
-      expect(result.effects.map((e) => e.effect.kind)).toEqual(cell.effects);
-      return;
-    }
-    cell.check(before, result.state, result.effects.map((e) => e.effect.kind));
-  });
+      if (cell.kind === "illegal") {
+        expect(result.effects).toEqual([]);
+        expect(result.state.status).toBe(before.status);
+        expect(result.state.phase).toBe(before.phase);
+        expect(result.state.diag.lastWarn).toBe(`illegal:${kind}`);
+        // repeating the same illegal input must stay illegal and not re-warn into a new field
+        const repeated = reduce(result.state, { generation: 1, input: buildInput(phase, kind) }, budget);
+        expect(repeated.effects).toEqual([]);
+        expect(repeated.state.diag.lastWarn).toBe(result.state.diag.lastWarn);
+        return;
+      }
+      if (cell.kind === "transition") {
+        expect(result.state.status).toBe(cell.status);
+        expect(result.state.phase).toBe(cell.phase);
+        expect(result.effects.map((e) => e.effect.kind)).toEqual(cell.effects);
+        return;
+      }
+      cell.check(
+        before,
+        result.state,
+        result.effects.map((e) => e.effect.kind),
+      );
+    },
+  );
 });
 
 /* ------------------------------------------------------------------------- *
@@ -879,22 +1195,50 @@ describe("P1-P10 property invariants", () => {
     const causes = ["parent_abort", "user_stop", "shutdown", "parent_gone"] as const;
     const effects = ["dispose", "release_slot", "clear_timer", "persist_snapshot", "kill_handles"] as const;
     if (state.phase === "queue_wait" && next() < 0.2) return { kind: "slot_acquired", at };
-    if (state.phase === "queue_wait" && next() < 0.4) return { kind: "slot_denied", at, reason: next() < 0.5 ? "queue_timeout" : "aborted" };
+    if (state.phase === "queue_wait" && next() < 0.4)
+      return { kind: "slot_denied", at, reason: next() < 0.5 ? "queue_timeout" : "aborted" };
     if (state.armedTimers.length && next() < 0.25) {
       const timer = state.armedTimers[Math.floor(next() * state.armedTimers.length)];
-      return { kind: "deadline_fired", at, timer, reason: timer === "queue" ? "queue_timeout" : timer === "total" ? "total" : "idle" };
+      return {
+        kind: "deadline_fired",
+        at,
+        timer,
+        reason: timer === "queue" ? "queue_timeout" : timer === "total" ? "total" : "idle",
+      };
     }
     if (next() < 0.2) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
-    if (next() < 0.2) return { kind: "effect_failed", at, effect: effects[Math.floor(next() * effects.length)], error: { kind: next() < 0.5 ? "internal" : "model", message: `e${Math.floor(next() * 9)}`, retryable: next() < 0.5 } };
-    if (next() < 0.2) return { kind: "escalation_done", at, level: (["L0", "L1", "L2", "L3"] as const)[Math.floor(next() * 4)], ok: next() < 0.8 };
+    if (next() < 0.2)
+      return {
+        kind: "effect_failed",
+        at,
+        effect: effects[Math.floor(next() * effects.length)],
+        error: {
+          kind: next() < 0.5 ? "internal" : "model",
+          message: `e${Math.floor(next() * 9)}`,
+          retryable: next() < 0.5,
+        },
+      };
+    if (next() < 0.2)
+      return {
+        kind: "escalation_done",
+        at,
+        level: (["L0", "L1", "L2", "L3"] as const)[Math.floor(next() * 4)],
+        ok: next() < 0.8,
+      };
     return { kind: "phase_entered", at, phase: state.phase };
   }
   const terminalStatuses = ["completed", "failed", "timed_out", "aborted"];
 
   it.each([
-    ["P1 release_slot at most once", 1], ["P2 terminal reachability", 2], ["P3 no timers after terminal", 3],
-    ["P4 terminal effects empty", 4], ["P5 deterministic same input", 5], ["P6 immutable deadline", 6],
-    ["P7 total-product no throw", 7], ["P9 effect ids unique", 9], ["P10 delivery key unique", 10],
+    ["P1 release_slot at most once", 1],
+    ["P2 terminal reachability", 2],
+    ["P3 no timers after terminal", 3],
+    ["P4 terminal effects empty", 4],
+    ["P5 deterministic same input", 5],
+    ["P6 immutable deadline", 6],
+    ["P7 total-product no throw", 7],
+    ["P9 effect ids unique", 9],
+    ["P10 delivery key unique", 10],
   ])("%s, 1000 random sequences", (name, property) => {
     for (let seed = 1; seed <= 1000; seed++) {
       const next = random(seed + property * 10000);
@@ -904,13 +1248,14 @@ describe("P1-P10 property invariants", () => {
       const deliveries = new Set<string>();
       let releaseAttempts = 0;
       for (let step = 0; step < 25; step++) {
-        const event = property === 2 && step === 0
-          ? ({ kind: "prompt_settled", at: step + 1 } as RunInput)
-          : property === 2 && step === 1
-            ? ({ kind: "phase_entered", at: step + 1, phase: "model_turn" } as RunInput)
-            : property === 2 && step === 2
-              ? ({ kind: "prompt_settled", at: step + 1 } as RunInput)
-              : randomInput(state, next);
+        const event =
+          property === 2 && step === 0
+            ? ({ kind: "prompt_settled", at: step + 1 } as RunInput)
+            : property === 2 && step === 1
+              ? ({ kind: "phase_entered", at: step + 1, phase: "model_turn" } as RunInput)
+              : property === 2 && step === 2
+                ? ({ kind: "prompt_settled", at: step + 1 } as RunInput)
+                : randomInput(state, next);
         const result = reduce(state, { generation: state.generation, input: event }, budget);
         if (property === 5) {
           const repeat = reduce(state, { generation: state.generation, input: event }, budget);
@@ -927,8 +1272,10 @@ describe("P1-P10 property invariants", () => {
           }
         }
         if (property === 1) expect(releaseAttempts).toBeLessThanOrEqual(1);
-        if (property === 3 && terminalStatuses.includes(result.state.status)) expect(result.state.armedTimers).toEqual([]);
-        if (property === 4 && terminalStatuses.includes(state.status) && event.kind !== "effect_failed") expect(result.effects).toEqual([]);
+        if (property === 3 && terminalStatuses.includes(result.state.status))
+          expect(result.state.armedTimers).toEqual([]);
+        if (property === 4 && terminalStatuses.includes(state.status) && event.kind !== "effect_failed")
+          expect(result.effects).toEqual([]);
         if (property === 6) expect(result.state.deadlines.deadlineAt).toBe(deadline);
         state = result.state;
       }
@@ -936,7 +1283,11 @@ describe("P1-P10 property invariants", () => {
       if (property === 7) {
         const cases = FLAT_MATRIX.filter((c) => c.cell.kind === "illegal");
         const sample = cases[(seed - 1) % cases.length];
-        const sampled = reduce(fixture(sample.phase), { generation: 1, input: buildInput(sample.phase, sample.kind) }, budget);
+        const sampled = reduce(
+          fixture(sample.phase),
+          { generation: 1, input: buildInput(sample.phase, sample.kind) },
+          budget,
+        );
         expect(Array.isArray(sampled.effects)).toBe(true);
         expect(sampled.effects).toEqual([]);
       }
@@ -977,7 +1328,7 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
    * prompt_settled/session_created/reap_finished -- not just a convenient subset. */
   function randomInputComprehensive(next: () => number): RunInput {
     const at = Math.floor(next() * 500) + 1;
-    const pick = <T,>(arr: readonly T[]): T => arr[Math.floor(next() * arr.length)] as T;
+    const pick = <T>(arr: readonly T[]): T => arr[Math.floor(next() * arr.length)] as T;
     const kind = pick(INPUT_KINDS);
     switch (kind) {
       case "enqueued":
@@ -1003,8 +1354,18 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
         };
       case "session_event": {
         const eventKind = pick([
-          "turn_start", "turn_end", "message_end", "tool_start", "tool_end", "tool_update",
-          "retry_start", "retry_end", "compaction_start", "compaction_end", "settled", "text_delta",
+          "turn_start",
+          "turn_end",
+          "message_end",
+          "tool_start",
+          "tool_end",
+          "tool_update",
+          "retry_start",
+          "retry_end",
+          "compaction_start",
+          "compaction_end",
+          "settled",
+          "text_delta",
         ] as const);
         switch (eventKind) {
           case "turn_start":
@@ -1020,7 +1381,11 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           case "tool_update":
             return { kind, at, event: { t: "tool_update", toolCallId: "a" } };
           case "retry_start":
-            return { kind, at, event: { t: "retry_start", attempt: 1, maxAttempts: 3, delayMs: Math.floor(next() * 50) } };
+            return {
+              kind,
+              at,
+              event: { t: "retry_start", attempt: 1, maxAttempts: 3, delayMs: Math.floor(next() * 50) },
+            };
           case "retry_end":
             return { kind, at, event: { t: "retry_end", success: next() < 0.7 } };
           case "compaction_start":
@@ -1036,9 +1401,40 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
       case "prompt_settled":
         return next() < 0.5
           ? { kind, at }
-          : { kind, at, error: { kind: pick(["timeout", "aborted", "internal", "model"] as const), message: "x", retryable: false } };
+          : {
+              kind,
+              at,
+              error: {
+                kind: pick(["timeout", "aborted", "internal", "model"] as const),
+                message: "x",
+                retryable: false,
+              },
+            };
       case "deadline_fired":
-        return { kind, at, timer: pick(["queue", "startup", "bind", "first_event", "idle", "tool", "compaction", "abort_grace", "total"] as const), reason: pick(["queue_timeout", "session_create", "extension_bind", "no_first_event", "idle", "compaction", "total"] as const) };
+        return {
+          kind,
+          at,
+          timer: pick([
+            "queue",
+            "startup",
+            "bind",
+            "first_event",
+            "idle",
+            "tool",
+            "compaction",
+            "abort_grace",
+            "total",
+          ] as const),
+          reason: pick([
+            "queue_timeout",
+            "session_create",
+            "extension_bind",
+            "no_first_event",
+            "idle",
+            "compaction",
+            "total",
+          ] as const),
+        };
       case "stop_requested":
         return { kind, at, cause: pick(["parent_abort", "user_stop", "timeout", "shutdown", "parent_gone"] as const) };
       case "escalation_done":
@@ -1049,7 +1445,21 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
         return {
           kind,
           at,
-          effect: pick(["arm_timer", "clear_timer", "cancel_signal", "soft_steer", "request_abort", "dispose", "kill_handles", "register_orphan", "release_slot", "settle_waiters", "emit_lifecycle", "enqueue_delivery", "persist_snapshot"] as const),
+          effect: pick([
+            "arm_timer",
+            "clear_timer",
+            "cancel_signal",
+            "soft_steer",
+            "request_abort",
+            "dispose",
+            "kill_handles",
+            "register_orphan",
+            "release_slot",
+            "settle_waiters",
+            "emit_lifecycle",
+            "enqueue_delivery",
+            "persist_snapshot",
+          ] as const),
           error: { kind: "internal", message: "e", retryable: false },
         };
     }
@@ -1075,67 +1485,74 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
     return { state, slotReleaseCount };
   }
 
-  it.each(Array.from({ length: 300 }, (_, i) => i + 1))("sequence %i survives duplication/reorder/stale-generation", (seed) => {
-    const rnd = mulberry32(seed);
-    const RUN_GENERATION = 1;
+  it.each(Array.from({ length: 300 }, (_, i) => i + 1))(
+    "sequence %i survives duplication/reorder/stale-generation",
+    (seed) => {
+      const rnd = mulberry32(seed);
+      const RUN_GENERATION = 1;
 
-    // 1) canonical sequence
-    const canonicalInputs: RunInput[] = [];
-    const length = 8 + Math.floor(rnd() * 10);
-    for (let i = 0; i < length; i++) canonicalInputs.push(randomInputComprehensive(rnd));
-    const canonicalEntries = canonicalInputs.map((input) => ({ generation: RUN_GENERATION, input }));
-    const canonical = run(enqueued(), canonicalEntries);
-    expect(canonical.slotReleaseCount).toBeLessThanOrEqual(1);
+      // 1) canonical sequence
+      const canonicalInputs: RunInput[] = [];
+      const length = 8 + Math.floor(rnd() * 10);
+      for (let i = 0; i < length; i++) canonicalInputs.push(randomInputComprehensive(rnd));
+      const canonicalEntries = canonicalInputs.map((input) => ({ generation: RUN_GENERATION, input }));
+      const canonical = run(enqueued(), canonicalEntries);
+      expect(canonical.slotReleaseCount).toBeLessThanOrEqual(1);
 
-    // 2a) repeat each canonical entry 1-3 times ("repeat 0-2 EXTRA times"). Every canonical
-    // entry must still occur at least once and in its original relative order -- dropping an
-    // entry would not be "duplication", it would be a different (shorter) run.
-    const transformed: { generation: number; input: RunInput }[] = [];
-    const groupBounds: Array<[number, number]> = []; // [start, end) index ranges of same-value duplicate runs
-    for (const entry of canonicalEntries) {
-      const copies = 1 + Math.floor(rnd() * 3); // 1, 2 or 3
-      const start = transformed.length;
-      for (let r = 0; r < copies; r++) transformed.push(entry);
-      groupBounds.push([start, start + copies]);
-    }
+      // 2a) repeat each canonical entry 1-3 times ("repeat 0-2 EXTRA times"). Every canonical
+      // entry must still occur at least once and in its original relative order -- dropping an
+      // entry would not be "duplication", it would be a different (shorter) run.
+      const transformed: { generation: number; input: RunInput }[] = [];
+      const groupBounds: Array<[number, number]> = []; // [start, end) index ranges of same-value duplicate runs
+      for (const entry of canonicalEntries) {
+        const copies = 1 + Math.floor(rnd() * 3); // 1, 2 or 3
+        const start = transformed.length;
+        for (let r = 0; r < copies; r++) transformed.push(entry);
+        groupBounds.push([start, start + copies]);
+      }
 
-    // 2b) randomly swap adjacent entries a few times. Swaps are restricted to positions *within*
-    // the same duplicate-run (both sides are literally the same RunInput value) -- swapping two
-    // equal adjacent entries is representationally a real "reorder" but semantically a no-op, so
-    // it cannot change the outcome. Swapping across genuinely different, causally-ordered events
-    // (e.g. a stop_requested before a prompt_settled) can legitimately change which terminal
-    // branch a run takes -- that would be a different, equally valid run, not a bug, so it is
-    // deliberately out of scope for this invariant.
-    const eligibleSwapPositions = groupBounds.filter(([start, end]) => end - start >= 2).flatMap(([start, end]) => {
-      const positions: number[] = [];
-      for (let i = start; i < end - 1; i++) positions.push(i);
-      return positions;
-    });
-    const swaps = Math.min(eligibleSwapPositions.length, Math.floor(rnd() * 5));
-    for (let s = 0; s < swaps; s++) {
-      const idx = eligibleSwapPositions[Math.floor(rnd() * eligibleSwapPositions.length)];
-      if (idx === undefined) continue;
-      const a = transformed[idx];
-      const b = transformed[idx + 1];
-      if (a === undefined || b === undefined) continue;
-      transformed[idx] = b;
-      transformed[idx + 1] = a;
-    }
+      // 2b) randomly swap adjacent entries a few times. Swaps are restricted to positions *within*
+      // the same duplicate-run (both sides are literally the same RunInput value) -- swapping two
+      // equal adjacent entries is representationally a real "reorder" but semantically a no-op, so
+      // it cannot change the outcome. Swapping across genuinely different, causally-ordered events
+      // (e.g. a stop_requested before a prompt_settled) can legitimately change which terminal
+      // branch a run takes -- that would be a different, equally valid run, not a bug, so it is
+      // deliberately out of scope for this invariant.
+      const eligibleSwapPositions = groupBounds
+        .filter(([start, end]) => end - start >= 2)
+        .flatMap(([start, end]) => {
+          const positions: number[] = [];
+          for (let i = start; i < end - 1; i++) positions.push(i);
+          return positions;
+        });
+      const swaps = Math.min(eligibleSwapPositions.length, Math.floor(rnd() * 5));
+      for (let s = 0; s < swaps; s++) {
+        const idx = eligibleSwapPositions[Math.floor(rnd() * eligibleSwapPositions.length)];
+        if (idx === undefined) continue;
+        const a = transformed[idx];
+        const b = transformed[idx + 1];
+        if (a === undefined || b === undefined) continue;
+        transformed[idx] = b;
+        transformed[idx + 1] = a;
+      }
 
-    // 2c) insert 5 stale-generation inputs at random positions. generation 0 never matches the
-    // run's real generation (1), so R6 guarantees these are dropped outright regardless of where
-    // they land.
-    const staleCount = 5;
-    for (let s = 0; s < staleCount; s++) {
-      const staleInput = randomInputComprehensive(rnd);
-      const position = Math.floor(rnd() * (transformed.length + 1));
-      transformed.splice(position, 0, { generation: RUN_GENERATION - 1, input: staleInput });
-    }
+      // 2c) insert 5 stale-generation inputs at random positions. generation 0 never matches the
+      // run's real generation (1), so R6 guarantees these are dropped outright regardless of where
+      // they land.
+      const staleCount = 5;
+      for (let s = 0; s < staleCount; s++) {
+        const staleInput = randomInputComprehensive(rnd);
+        const position = Math.floor(rnd() * (transformed.length + 1));
+        transformed.splice(position, 0, { generation: RUN_GENERATION - 1, input: staleInput });
+      }
 
-    const perturbed = run(enqueued(), transformed);
-    expect(perturbed.slotReleaseCount).toBeLessThanOrEqual(1);
-    expect(tuple(perturbed.state, perturbed.slotReleaseCount)).toEqual(tuple(canonical.state, canonical.slotReleaseCount));
-  });
+      const perturbed = run(enqueued(), transformed);
+      expect(perturbed.slotReleaseCount).toBeLessThanOrEqual(1);
+      expect(tuple(perturbed.state, perturbed.slotReleaseCount)).toEqual(
+        tuple(canonical.state, canonical.slotReleaseCount),
+      );
+    },
+  );
 });
 
 describe("seeded property invariants", () => {
@@ -1163,15 +1580,21 @@ describe("seeded property invariants", () => {
       let previousStatus = state.status;
       for (let n = 0; n < 40; n++) {
         const event = input(INPUT_KINDS[Math.floor(random() * INPUT_KINDS.length)]);
-        const result = reduce(state, { generation: state.generation, input: { ...event, at: n + 1 } as RunInput }, budget);
+        const result = reduce(
+          state,
+          { generation: state.generation, input: { ...event, at: n + 1 } as RunInput },
+          budget,
+        );
         for (const effect of result.effects) {
           expect(ids.has(effect.effectId)).toBe(false);
           ids.add(effect.effectId);
         }
         expect(result.state.deadlines.deadlineAt).toBe(deadline);
         expect(result.state.generation).toBeGreaterThanOrEqual(state.generation);
-        if (["completed", "failed", "timed_out", "aborted"].includes(previousStatus)) expect(result.state.status).toBe(previousStatus);
-        if (["completed", "failed", "timed_out", "aborted"].includes(result.state.status)) expect(result.state.armedTimers).toEqual([]);
+        if (["completed", "failed", "timed_out", "aborted"].includes(previousStatus))
+          expect(result.state.status).toBe(previousStatus);
+        if (["completed", "failed", "timed_out", "aborted"].includes(result.state.status))
+          expect(result.state.armedTimers).toEqual([]);
         previousStatus = result.state.status;
         state = result.state;
       }
