@@ -1,0 +1,41 @@
+{
+  "name": "pi-subagent",
+  "version": "0.1.0",
+  "description": "Anti-hang subagent extension for pi — drop-in replacement for @tintinweb/pi-subagents core (Agent / get_subagent_result / steer_subagent)",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "subagent",
+    "agent"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0 <0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0 <0.86.0",
+    "@earendil-works/pi-tui": ">=0.84.0 <0.86.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.49"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  }
+}
