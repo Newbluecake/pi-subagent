@@ -3,10 +3,8 @@ import type {
   AgentTypeConfig,
   DriverEvent,
   LifecycleEvent,
-  RunDeadlines,
   RunId,
   RunOutcome,
-  RunPhase,
   RunSnapshot,
   SpawnRequest,
   StopCause,
@@ -27,7 +25,15 @@ export interface SlotPool {
   readonly stats?: { limit: number; inUse: number; queued: number; slotless: number };
 }
 
-export interface SessionSpec {
+/**
+ * Service-layer spec passed to Runner.run(): the fully resolved spawn
+ * context (agent type config + original request + budget). Distinct from
+ * core.SessionSpec (the narrower pi-session-shaped config the SessionDriver
+ * actually consumes) — the two used to share the name "SessionSpec" even
+ * though they are different concepts at different layers; renamed here to
+ * remove that ambiguity (see the M1 wiring seam-consolidation notes).
+ */
+export interface RunnerSpec {
   readonly runId: RunId;
   readonly type: AgentTypeConfig;
   readonly request: SpawnRequest;
@@ -41,7 +47,7 @@ export interface RunnerCallbacks {
   onSnapshot?(snapshot: RunSnapshot): void;
 }
 export interface Runner {
-  run(spec: SessionSpec, callbacks?: RunnerCallbacks): Promise<RunOutcome>;
+  run(spec: RunnerSpec, callbacks?: RunnerCallbacks): Promise<RunOutcome>;
   abort?(runId: RunId, cause?: StopCause): Promise<{ ok: boolean; escalatedTo: "L2" | "L3" | "L4" }>;
   steer?(runId: RunId, text: string): Promise<void>;
 }
@@ -49,12 +55,6 @@ export interface RunRegistry {
   get(runId: RunId): RunSnapshot | undefined;
   list(filter?: { status?: RunSnapshot["status"][]; parentRunId?: RunId }): RunSnapshot[];
   put?(snapshot: RunSnapshot): void;
-}
-export interface ResolvedSpawnRequest extends SpawnRequest {
-  readonly runId: RunId;
-  readonly typeConfig: AgentTypeConfig;
-  readonly budget: DeadlineBudget;
-  readonly deadlines: RunDeadlines;
 }
 export interface LifecycleSink {
   (event: LifecycleEvent): void;

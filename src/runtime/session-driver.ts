@@ -1,27 +1,13 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { DriverEvent, RunOutcome } from "../core/types.js";
+import type { DriverEvent, KillableHandle, RunOutcome, SessionSpec } from "../core/types.js";
 
-export interface KillableHandle {
-  readonly kind: "process" | "socket" | "fd" | "timer";
-  readonly id: string;
-  kill(): void;
-}
+export type { KillableHandle, SessionSpec } from "../core/types.js";
 export interface DisposeReport {
   returned: boolean;
   error?: RunOutcome["error"];
   killed: number;
   unkillable: ReadonlyArray<{ kind: string; id: string }>;
-}
-export interface SessionSpec {
-  cwd?: string;
-  agentDir?: string;
-  model?: unknown;
-  thinkingLevel?: string;
-  tools?: string[];
-  excludeTools?: string[];
-  noTools?: "all" | "builtin";
-  prompt?: string;
 }
 export interface SessionHandle {
   readonly sessionId: string;

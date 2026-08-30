@@ -5,6 +5,14 @@ export interface Clock {
   setTimer(delayMs: Millis, fn: () => void): TimerHandle;
   clearTimer(h: TimerHandle): void;
 }
+
+/** The real wall-clock Clock implementation, backed by setTimeout (index.ts wiring; FakeClock is test-only). */
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  setTimer: (delayMs, fn) => ({ id: setTimeout(fn, Math.max(0, delayMs)) as unknown as number }),
+  clearTimer: (h) => clearTimeout(h.id as unknown as ReturnType<typeof setTimeout>),
+};
+
 type Entry = { due: Millis; fn: () => void; cancelled: boolean };
 export class FakeClock implements Clock {
   private time: Millis;

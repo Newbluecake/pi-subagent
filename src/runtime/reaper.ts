@@ -1,18 +1,9 @@
 import type { Clock } from "../core/clock.js";
-import type { DeadlineBudget, Millis, RunId, RunPhase, StopCause, TimeoutReason } from "../core/types.js";
+import type { DeadlineBudget, Millis, OrphanRecord, RunId, RunPhase, StopCause, TimeoutReason } from "../core/types.js";
 import type { CancelHandle } from "./runner.js";
 import type { DisposeReport, SessionHandle } from "./session-driver.js";
 
-interface OrphanRecord {
-  runId: RunId;
-  sessionId?: string;
-  phase: RunPhase;
-  reason: TimeoutReason | StopCause;
-  lastEventAt?: Millis;
-  registeredAt: Millis;
-  unkillable: Array<{ kind: string; id: string }>;
-  lateArrival: boolean;
-}
+export type { OrphanRecord } from "../core/types.js";
 export interface OrphanRegistry {
   register(r: OrphanRecord): void;
   recordLateRecovered(runId: RunId, generation: number): void;

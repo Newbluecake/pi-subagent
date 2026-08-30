@@ -77,7 +77,7 @@ function makeDiag(at: number, generation: number): RunDiagnostics {
     unkillable: [],
   };
 }
-export function createInitialState(runId: string, generation = 1, at = 0): RunState {
+export function createInitialState(runId: string, generation = 1, at = 0, parentRunId?: string): RunState {
   return {
     runId,
     generation,
@@ -89,6 +89,7 @@ export function createInitialState(runId: string, generation = 1, at = 0): RunSt
     slotHeld: false,
     effectSeq: 0,
     persistRetryCount: 0,
+    ...(parentRunId === undefined ? {} : { parentRunId }),
   };
 }
 function envelope(state: RunState, seq: number, effect: RunEffect): EffectEnvelope {
@@ -179,6 +180,7 @@ function finish(
     diag: d,
     outcome,
     updatedAt: at,
+    ...(state.parentRunId === undefined ? {} : { parentRunId: state.parentRunId }),
   };
   const effects = [
     ...state.armedTimers.map((timer) => ({ kind: "clear_timer", timer }) as RunEffect),
@@ -425,7 +427,15 @@ export function reduce(
           : input.error.kind === "timeout"
             ? "timed_out"
             : "failed";
-    return finish(state, status, input.at, budget, input.error?.kind === "timeout" ? { timeoutReason: "total" } : {});
+    // Final text from SessionHandle.getLastAssistantText() (passed by the
+    // runner alongside prompt_settled) only fills in when no text_delta
+    // events already accumulated diag.text — deltas are the more granular,
+    // already-observed source of truth when both are present.
+    const textPatch = input.text !== undefined && state.diag.text === undefined ? { text: input.text } : {};
+    return finish(state, status, input.at, budget, {
+      ...textPatch,
+      ...(input.error?.kind === "timeout" ? { timeoutReason: "total" as const } : {}),
+    });
   }
   if (input.kind === "deadline_fired") {
     if (!state.armedTimers.includes(input.timer)) return illegal(state, input);
@@ -512,9 +522,17 @@ function handleEffectFailed(
                 },
               ]
             : [];
+  // G5a (architecture 5.6.1 / 11): once persist_snapshot gives up for good
+  // (degraded_final), the outcome itself must carry persistFailed so any
+  // caller reading it later (query-service, delivery, /agent status) can see
+  // the journal channel never confirmed landing, without re-deriving it from
+  // diag.persistStatus every time.
+  const outcome =
+    isPersist && !retry && state.outcome ? { ...state.outcome, diag, persistFailed: true as const } : state.outcome;
   const next = {
     ...state,
     diag,
+    ...(outcome ? { outcome } : {}),
     persistRetryCount: isPersist ? state.persistRetryCount + 1 : state.persistRetryCount,
   };
   return effects.length ? emit(next, effects) : { state: next, effects: [] };

@@ -7,11 +7,13 @@ import type {
   EffectEnvelope,
   ErrorInfo,
   LifecycleEvent,
+  RunEffect,
   RunInput,
   RunOutcome,
   RunSnapshot,
   RunState,
   StampedInput,
+  StopCause,
 } from "../core/types.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "./session-driver.js";
@@ -90,17 +92,19 @@ export interface EffectAuditRecord {
   ms: number;
   error?: string;
 }
+export type EffectFailureHandler = (runId: string, generation: number, kind: RunEffect["kind"], error: Error) => void;
 export class BasicEffectInterpreter implements EffectInterpreter {
   private seen = new Set<string>();
   private records: EffectAuditRecord[] = [];
   constructor(
     private readonly handlers: Partial<Record<RunInput["kind"] | string, (e: EffectEnvelope["effect"]) => void>> = {},
+    private readonly onFailure?: EffectFailureHandler,
   ) {}
   get audit() {
     return this.records;
   }
-  apply(_runId: string, _generation: number, batch: readonly EffectEnvelope[]) {
-    for (const e of batch) this.one(e);
+  apply(runId: string, generation: number, batch: readonly EffectEnvelope[]) {
+    for (const e of batch) this.one(runId, generation, e);
   }
   applyCriticalSync(runId: string, generation: number, batch: readonly EffectEnvelope[]) {
     this.apply(
@@ -114,7 +118,7 @@ export class BasicEffectInterpreter implements EffectInterpreter {
       snapshotPersisted: batch.some((e) => e.effect.kind === "persist_snapshot"),
     };
   }
-  private one(e: EffectEnvelope) {
+  private one(runId: string, generation: number, e: EffectEnvelope) {
     if (this.seen.has(e.effectId)) return;
     this.seen.add(e.effectId);
     const at = Date.now();
@@ -122,13 +126,24 @@ export class BasicEffectInterpreter implements EffectInterpreter {
       this.handlers[e.effect.kind]?.(e.effect);
       this.records.push({ effectId: e.effectId, kind: e.effect.kind, ok: true, ms: Date.now() - at });
     } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
       this.records.push({
         effectId: e.effectId,
         kind: e.effect.kind,
         ok: false,
         ms: Date.now() - at,
-        error: err instanceof Error ? err.message : String(err),
+        error: error.message,
       });
+      // Major 4 (5.6.1): a failed effect must be fed back into the state
+      // machine as `effect_failed` so critical effects get compensated and
+      // persist_snapshot gets its bounded durable-retry loop (R9). Without
+      // this callback the audit record would be the only trace and the run
+      // would never see diag.degraded / outcome.persistFailed.
+      try {
+        this.onFailure?.(runId, generation, e.effect.kind, error);
+      } catch {
+        /* onFailure must never break the interpreter's own error isolation */
+      }
     }
     if (this.seen.size > 1024) this.seen.delete(this.seen.values().next().value as string);
   }
@@ -155,19 +170,58 @@ const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => (
 export class RuntimeRunner implements Runner {
   private readonly states = new Map<string, RunState>();
   private generation = new Map<string, number>();
+  private readonly dispatchers = new Map<string, { gen: number; fn: (input: RunInput) => void }>();
+  private readonly activeCancels = new Map<string, { gen: number; cancel: CancelHandle }>();
+  private readonly activeHandles = new Map<string, { gen: number; handle: SessionHandle }>();
   constructor(private readonly d: RunnerDeps) {}
+  /** Public dispatch entry so external drivers (watchdog ticks, effect-failure feedback) can feed inputs into a specific, still-running (runId, generation) without touching another concurrent run (fixes the single-field-clobber hazard when limit > 1). */
+  dispatchExternal(runId: string, generation: number, input: RunInput): void {
+    const entry = this.dispatchers.get(runId);
+    if (entry && entry.gen === generation) entry.fn(input);
+  }
+  /** Read-only snapshot of a run's internal RunState, for watchdog tick() / diagnostics. */
+  getRunState(runId: string, generation?: number): RunState | undefined {
+    const s = this.states.get(runId);
+    return generation === undefined || s?.generation === generation ? s : undefined;
+  }
+  /** Feed a failed effect back into the state machine (5.6.1 R9 compensation / persist retry loop). */
+  notifyEffectFailed(runId: string, generation: number, effect: RunEffect["kind"], err: Error): void {
+    this.dispatchExternal(runId, generation, {
+      kind: "effect_failed",
+      at: this.d.clock.now(),
+      effect,
+      error: error(err),
+    });
+  }
+  /** L2 escalation trigger for QueryService.stop(): request cooperative + bounded abort of an active run. */
+  async abortRun(
+    runId: string,
+    cause: StopCause = "user_stop",
+  ): Promise<{ ok: boolean; escalatedTo: "L2" | "L3" | "L4" }> {
+    const entry = this.activeCancels.get(runId);
+    if (!entry) return { ok: false, escalatedTo: "L4" };
+    entry.cancel.cancel(cause);
+    return { ok: true, escalatedTo: "L2" };
+  }
+  /** Best-effort steer of an active run's session (QueryService.steer()); rejects if none is running. */
+  async steerRun(runId: string, text: string): Promise<void> {
+    const entry = this.activeHandles.get(runId);
+    if (!entry) throw new Error(`no active session for run ${runId}`);
+    await entry.handle.steer(text);
+  }
   async run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome> {
     const gen = (this.generation.get(req.runId) ?? 0) + 1;
     this.generation.set(req.runId, gen);
     let state = createInitialState(req.runId, gen, this.d.clock.now());
     this.states.set(req.runId, state);
     const cancel = createCancelHandle(req.runId, gen, req.signal, (reason) =>
-      this.dispatch(req.runId, gen, {
+      this.dispatchExternal(req.runId, gen, {
         kind: "stop_requested",
         at: this.d.clock.now(),
         cause: reason === "external" ? "parent_abort" : "user_stop",
       }),
     );
+    this.activeCancels.set(req.runId, { gen, cancel });
     let ticket: SlotTicket | undefined;
     let handle: SessionHandle | undefined;
     let createP: Promise<SessionHandle> | undefined;
@@ -177,9 +231,7 @@ export class RuntimeRunner implements Runner {
       this.states.set(req.runId, state);
       this.d.effects.apply(req.runId, gen, out.effects);
     };
-    this.dispatch = (id, g, input) => {
-      if (id === req.runId && g === gen) dispatch(input);
-    };
+    this.dispatchers.set(req.runId, { gen, fn: dispatch });
     try {
       dispatch({ kind: "enqueued", at: this.d.clock.now(), budget });
       const acq = await this.guard(
@@ -218,6 +270,7 @@ export class RuntimeRunner implements Runner {
         return state.outcome!;
       }
       handle = created.value;
+      this.activeHandles.set(req.runId, { gen, handle });
       createP = undefined;
       dispatch({ kind: "session_created", at: this.d.clock.now(), sessionId: handle.sessionId });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
@@ -238,12 +291,14 @@ export class RuntimeRunner implements Runner {
       }
       this.d.watchdog.arm(req.runId, gen);
       const prompted = await this.guard(handle.prompt(req.prompt), budget.totalMs, cancel, "prompt");
+      const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
       dispatch({
         kind: "prompt_settled",
         at: this.d.clock.now(),
         ...(prompted.ok
           ? {}
           : { error: error(prompted.reason, prompted.reason === "cancelled" ? "aborted" : "timeout") }),
+        ...(finalText === undefined ? {} : { text: finalText }),
       });
       return state.outcome!;
     } catch (e) {
@@ -264,9 +319,14 @@ export class RuntimeRunner implements Runner {
         budget,
       };
       void this.d.reaper.reap(reap).catch(() => undefined);
+      const dEntry = this.dispatchers.get(req.runId);
+      if (dEntry && dEntry.gen === gen) this.dispatchers.delete(req.runId);
+      const cEntry = this.activeCancels.get(req.runId);
+      if (cEntry && cEntry.gen === gen) this.activeCancels.delete(req.runId);
+      const hEntry = this.activeHandles.get(req.runId);
+      if (hEntry && hEntry.gen === gen) this.activeHandles.delete(req.runId);
     }
   }
-  private dispatch = (_id: string, _generation: number, _input: RunInput) => undefined;
   private async guard<T>(
     p: Promise<T>,
     ms: number,

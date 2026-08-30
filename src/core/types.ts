@@ -113,6 +113,13 @@ export interface RunOutcome {
   turns: number;
   durationMs: Millis;
   diag: RunDiagnostics;
+  /**
+   * G5a: set when persist_snapshot exhausted its durable-retry budget
+   * (diag.persistStatus === "degraded_final"). The terminal record itself is
+   * never lost (see the fallback JSONL path), but callers must be able to see
+   * that the append-entry journal channel did not confirm it landed.
+   */
+  persistFailed?: boolean;
 }
 export interface RunDiagnostics {
   createdAt: Millis;
@@ -178,6 +185,8 @@ export interface RunSnapshot {
   diag: RunDiagnostics;
   outcome?: RunOutcome;
   updatedAt: Millis;
+  /** Set when the run was spawned as a nested/child run (X3 slotless nesting). */
+  parentRunId?: RunId;
 }
 
 export type RunInput =
@@ -193,7 +202,7 @@ export type RunInput =
       error: ErrorInfo;
     }
   | { kind: "session_event"; at: Millis; event: DriverEvent }
-  | { kind: "prompt_settled"; at: Millis; error?: ErrorInfo }
+  | { kind: "prompt_settled"; at: Millis; error?: ErrorInfo; text?: string }
   | { kind: "deadline_fired"; at: Millis; timer: TimerId; reason: TimeoutReason }
   | { kind: "stop_requested"; at: Millis; cause: StopCause }
   | { kind: "escalation_done"; at: Millis; level: "L0" | "L1" | "L2" | "L3" | "L3p"; ok: boolean }
@@ -235,4 +244,59 @@ export interface RunState {
   readonly outcome?: RunOutcome;
   readonly effectSeq: number;
   readonly persistRetryCount: number;
+  readonly parentRunId?: RunId;
+}
+
+// ── Canonical shapes shared across runtime/service adapters (single source of
+// truth; downstream modules import these instead of redeclaring them) ──
+
+/**
+ * Input to SessionDriver.create(): the minimal, pi-shaped session
+ * configuration. This is the *execution-layer* spec (what the driver needs to
+ * start a session) — distinct from the service-layer RunnerSpec
+ * (service/ports.ts), which additionally carries the resolved AgentTypeConfig,
+ * the original SpawnRequest and the DeadlineBudget.
+ */
+export interface SessionSpec {
+  cwd?: string;
+  agentDir?: string;
+  model?: unknown;
+  thinkingLevel?: string;
+  tools?: string[];
+  excludeTools?: string[];
+  noTools?: "all" | "builtin";
+  prompt?: string;
+}
+
+/** A resource an injected tool holds that reaper can synchronously, idempotently kill (2.2.2). */
+export interface KillableHandle {
+  readonly kind: "process" | "socket" | "fd" | "timer";
+  readonly id: string;
+  kill(): void;
+}
+
+/** L4 registry entry for a run whose physical resources could not be fully reclaimed (4.3.2). */
+export interface OrphanRecord {
+  runId: RunId;
+  sessionId?: string;
+  phase: RunPhase;
+  reason: TimeoutReason | StopCause;
+  lastEventAt?: Millis;
+  registeredAt: Millis;
+  unkillable: Array<{ kind: string; id: string }>;
+  lateArrival: boolean;
+}
+
+/**
+ * The four documented extension hooks (architecture §7.1). Only-read observer
+ * (onLifecycle/onDelivery) and bounded pre/post hooks (resolveSessionSpec/
+ * beforeReap). Not deeply wired in M1; the index.ts assembly forwards
+ * onLifecycle today, the rest are reserved extension points for later
+ * milestones (X1/X3/X9 etc.).
+ */
+export interface SubagentExtensionPoints {
+  onLifecycle?(e: LifecycleEvent): void;
+  resolveSessionSpec?(spec: SessionSpec, req: SpawnRequest): Promise<SessionSpec> | SessionSpec;
+  beforeReap?(outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }): Promise<void> | void;
+  onDelivery?(p: DeliveryPayload, state: string): void;
 }

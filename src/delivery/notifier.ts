@@ -1,4 +1,5 @@
 import type { Clock } from "../core/clock.js";
+import type { OutboxStore as CoreOutboxStore } from "../core/store.js";
 import type { DeliveryPayload, RunOutcome } from "../core/types.js";
 
 export type DeliveryKey = string;
@@ -16,11 +17,10 @@ export interface ReconcileReport {
   suppressed: DeliveryKey[];
   abandoned: DeliveryKey[];
 }
-export interface OutboxStore {
-  put(record: PersistedDelivery): void;
-  update(key: DeliveryKey, patch: Partial<PersistedDelivery>): void;
-  list(): readonly PersistedDelivery[];
-}
+// Canonical put/update/list outbox contract now lives in core/store.ts (single
+// source of truth); re-exported under the historical name so existing
+// importers (tests, adapters) keep working unchanged.
+export type OutboxStore = CoreOutboxStore<PersistedDelivery>;
 export interface MessageSender {
   sendMessage(payload: DeliveryPayload): void;
 }

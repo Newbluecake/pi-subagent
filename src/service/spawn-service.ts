@@ -11,7 +11,7 @@ import type {
   SpawnRequest,
   StopCause,
 } from "../core/types.js";
-import type { LifecycleSink, Runner, SessionSpec, SlotPool } from "./ports.js";
+import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
 
 export interface SpawnService {
   spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
@@ -69,7 +69,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   ) => {
     running.add(runId);
     try {
-      const spec: SessionSpec = {
+      const spec: RunnerSpec = {
         runId,
         type: config,
         request: req,

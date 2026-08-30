@@ -1,20 +1,11 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis, RunId } from "../core/types.js";
+import type { SlotPool, SlotTicket } from "../service/ports.js";
 
-export interface SlotTicket {
-  readonly runId: RunId;
-  release(): void;
-}
-
-export interface SlotPool {
-  acquire(
-    runId: RunId,
-    opts: { slotless?: boolean; queueWaitMs: Millis; signal?: AbortSignal },
-  ): Promise<{ ok: true; ticket: SlotTicket } | { ok: false; reason: "queue_timeout" | "aborted" }>;
-  setLimit(n: number): void;
-  readonly stats: { limit: number; inUse: number; queued: number; slotless: number };
-  audit(liveRunIds: ReadonlySet<RunId>): { leaked: RunId[]; fixed: number };
-}
+// SlotPool / SlotTicket are the service-layer DI contract (service/ports.ts is
+// the single source of truth for this shape); re-exported here so existing
+// importers of runtime/slot-pool.js keep working unchanged.
+export type { SlotPool, SlotTicket };
 
 type Waiter = {
   runId: RunId;
@@ -67,12 +58,12 @@ export class SingleSlotPool implements SlotPool {
       if (opts.queueWaitMs > 0)
         waiter.timer = this.clock.setTimer(opts.queueWaitMs, () => {
           finish({ ok: false, reason: "queue_timeout" });
-          this.drain();
+          this.drainQueue();
         });
       if (opts.signal) {
         const onAbort = () => {
           finish({ ok: false, reason: "aborted" });
-          this.drain();
+          this.drainQueue();
         };
         opts.signal.addEventListener("abort", onAbort, { once: true });
         const old = waiter.resolve;
@@ -82,13 +73,13 @@ export class SingleSlotPool implements SlotPool {
         };
       }
       this.queue.push(waiter);
-      this.drain();
+      this.drainQueue();
     });
   }
   setLimit(n: number) {
     if (!Number.isInteger(n) || n < 0) throw new RangeError("limit must be a non-negative integer");
     this.limit = n;
-    queueMicrotask(() => this.drain());
+    queueMicrotask(() => this.drainQueue());
   }
   audit(liveRunIds: ReadonlySet<RunId>) {
     const leaked = [...this.held].filter((id) => !liveRunIds.has(id));
@@ -96,7 +87,7 @@ export class SingleSlotPool implements SlotPool {
       this.held.delete(id);
       this.inUse = Math.max(0, this.inUse - 1);
     }
-    if (leaked.length) queueMicrotask(() => this.drain());
+    if (leaked.length) queueMicrotask(() => this.drainQueue());
     return { leaked, fixed: leaked.length };
   }
   private ticket(runId: RunId, isSlotless: boolean): SlotTicket {
@@ -111,11 +102,11 @@ export class SingleSlotPool implements SlotPool {
           this.held.delete(runId);
           this.inUse = Math.max(0, this.inUse - 1);
         }
-        queueMicrotask(() => this.drain());
+        queueMicrotask(() => this.drainQueue());
       },
     });
   }
-  private drain() {
+  private drainQueue() {
     try {
       while ((this.limit === 0 || this.inUse < this.limit) && this.queue.length) {
         const w = this.queue.shift();
@@ -125,7 +116,7 @@ export class SingleSlotPool implements SlotPool {
         w.resolve({ ok: true, ticket: this.ticket(w.runId, false) });
       }
     } catch {
-      queueMicrotask(() => this.drain());
+      queueMicrotask(() => this.drainQueue());
     }
   }
 }
