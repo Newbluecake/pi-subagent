@@ -4,7 +4,7 @@ import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
-import { formatDuration } from "../ui/fleet-panel.js";
+import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
 
 export interface StatusCommandDeps {
   query: QueryService;
@@ -98,7 +98,7 @@ export function renderRunDetail(query: QueryService, idArg: string): string {
   const head = [
     `Run ${s.runId.slice(0, 8)}${d.label ? ` (${d.label})` : ""}`,
     d.agentType ?? undefined,
-    d.model?.id ?? undefined,
+    formatModelRef(d.model),
     `${s.status}/${s.phase}`,
     formatDuration(Math.max(0, elapsed)),
     `${d.turns} turn${d.turns === 1 ? "" : "s"}`,
@@ -149,7 +149,7 @@ export function renderCosts(query: QueryService): string {
       s.runId.slice(0, 8),
       (d.label ?? "·").slice(0, 24).padEnd(24),
       (d.agentType ?? "·").padEnd(12),
-      (d.model?.id ?? "·").padEnd(14),
+      (formatModelRef(d.model) ?? "·").padEnd(24),
       `${d.turns}t`,
       d.settledAt !== undefined ? formatDuration(Math.max(0, d.settledAt - d.createdAt)) : "running",
     ];

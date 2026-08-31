@@ -87,7 +87,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect kimi-k3 🧠思考 1s");
+    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🧠思考 1s");
   });
 
   it("tool trail: prefers diag.toolHistory trail; falls back to ▸currentTool", () => {

@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
-import { formatDuration, phaseLabel } from "../ui/fleet-panel.js";
+import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 
@@ -55,7 +55,7 @@ export interface AgentToolDetails {
 export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3): string[] {
   const d = snap.diag;
   const header = `⏳ ${[
-    d.model?.id ?? d.agentType ?? snap.status,
+    formatModelRef(d.model) ?? d.agentType ?? snap.status,
     phaseLabel(snap.phase, d),
     `turn ${d.turns + 1}`,
     formatDuration(Math.max(0, now - d.createdAt)),
@@ -81,7 +81,8 @@ export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3)
 export function formatOutcomeSummary(outcome: RunOutcome): string {
   const d = outcome.diag;
   const parts: string[] = [];
-  if (d.model?.id) parts.push(d.model.id);
+  const model = formatModelRef(d.model);
+  if (model) parts.push(model);
   parts.push(`${outcome.turns} turn${outcome.turns === 1 ? "" : "s"}`);
   const counts = Object.entries(d.toolCounts ?? {});
   if (counts.length) {
@@ -204,7 +205,7 @@ export function createAgentTool(deps: {
       const title = theme.fg("toolTitle", theme.bold(`Agent: ${args?.description ?? "…"}`));
       const meta = [
         args?.subagent_type ? `type: ${args.subagent_type}` : undefined,
-        args?.model ? `model: ${args.model.split("/").pop()}` : undefined,
+        args?.model ? `model: ${args.model}` : undefined,
         args?.run_in_background ? "background" : undefined,
         args?.resume ? `resume: ${args.resume}` : undefined,
         args?.isolation ? `isolation: ${args.isolation}` : undefined,
@@ -303,7 +304,7 @@ export function createAgentTool(deps: {
           durationMs: outcome.durationMs,
           // M-B/M-D: presentation stats (renderResult summary line + history replay).
           summary: formatOutcomeSummary(outcome),
-          ...(outcome.diag.model?.id ? { model: outcome.diag.model.id } : {}),
+          ...(outcome.diag.model ? { model: formatModelRef(outcome.diag.model)! } : {}),
           ...(outcome.diag.toolCounts ? { toolCounts: outcome.diag.toolCounts } : {}),
           ...(outcome.usage ? { costUsd: outcome.usage.costUsd } : {}),
           ...(outcome.structuredResult !== undefined ? { structuredResult: outcome.structuredResult } : {}),

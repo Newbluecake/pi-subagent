@@ -62,7 +62,7 @@ describe("M-B: buildProgressLines", () => {
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.0412 },
       }),
     });
-    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ kimi-k3 · 🧠思考 · turn 3 · 42s · $0.04");
+    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ p/kimi-k3 · 🧠思考 · turn 3 · 42s · $0.04");
   });
 
   it("falls back to agentType then status when no model is known", () => {
@@ -101,7 +101,9 @@ describe("M-B: buildProgressLines", () => {
 
 describe("M-B/M-D: formatOutcomeSummary", () => {
   it("renders model · turns · tools breakdown · cost · duration", () => {
-    expect(formatOutcomeSummary(completed())).toBe("kimi-k3 · 5 turns · 6 tools (bash×3 read×2 edit) · $0.16 · 1m18s");
+    expect(formatOutcomeSummary(completed())).toBe(
+      "copilot-completion/kimi-k3 · 5 turns · 6 tools (bash×3 read×2 edit) · $0.16 · 1m18s",
+    );
   });
   it("omits absent parts and uses singular forms", () => {
     const bare = completed({
@@ -159,13 +161,13 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
       await vi.advanceTimersByTimeAsync(2_100); // immediate push + 2 ticks
       expect(updates.length).toBeGreaterThanOrEqual(3);
       expect(updates[0]!.runId).toBe("run-1");
-      expect(updates[0]!.progress![0]).toContain("kimi-k3");
+      expect(updates[0]!.progress![0]).toContain("p/kimi-k3");
       expect(updates[0]!.progress![1]).toContain("▸ bash ls");
       release(final);
       const result = await pending;
       const details = result.details as AgentToolDetails;
       expect(details.summary).toBe(formatOutcomeSummary(final));
-      expect(details.model).toBe("kimi-k3");
+      expect(details.model).toBe("copilot-completion/kimi-k3");
       expect(details.toolCounts).toEqual({ bash: 3, read: 2, edit: 1 });
       expect(details.costUsd).toBeCloseTo(0.156);
       expect(result.content[0]).toEqual({ type: "text", text: "done" });

@@ -77,6 +77,11 @@ export interface FleetViewOptions {
   typeOf?: (runId: RunId) => string | undefined;
 }
 
+/** M12: canonical display form for a model reference — always `provider/id` (the id alone is ambiguous: the same model is often served by several providers with different pricing/quota). */
+export function formatModelRef(model: { provider: string; id: string } | undefined): string | undefined {
+  return model ? `${model.provider}/${model.id}` : undefined;
+}
+
 /**
  * M11: human-friendly phase label for the presentation surfaces (tree rows,
  * foreground card). Diagnostic surfaces (/agent status) keep the raw
@@ -209,7 +214,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     shortRunId: snapshot.runId.slice(0, 8),
     type: opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType,
     label: snapshot.diag.label,
-    model: snapshot.diag.model?.id,
+    model: formatModelRef(snapshot.diag.model),
     toolTrail: toolTrailOf(snapshot.diag),
     parentRunId: snapshot.parentRunId,
     phaseLabel: phaseLabel(snapshot.phase, snapshot.diag),

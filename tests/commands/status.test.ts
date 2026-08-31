@@ -151,7 +151,7 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
   it("renders header, timeline with offsets/marks/durations, tool counts and usage", async () => {
     const { renderRunDetail } = await import("../../src/commands/status.js");
     const text = renderRunDetail(deps([detailed()]).query as never, "223b8f1e");
-    expect(text).toContain("Run 223b8f1e (重构用户模块) · architect · kimi-k3 · running/tool_exec");
+    expect(text).toContain("Run 223b8f1e (重构用户模块) · architect · p/kimi-k3 · running/tool_exec");
     expect(text).toContain("2 turns");
     expect(text).toContain("✓ bash");
     expect(text).toContain("ls -la");
