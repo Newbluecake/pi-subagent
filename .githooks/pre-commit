@@ -1,0 +1,9 @@
+#!/bin/sh
+# Versioned pre-commit hook (enabled via: git config core.hooksPath .githooks)
+# Formats staged files with prettier before commit — prevents style drift
+# without a heavyweight husky/lint-staged dependency.
+set -e
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|js|json|md)$' || true)
+[ -z "$files" ] && exit 0
+echo "$files" | xargs npx prettier --write --ignore-unknown
+echo "$files" | xargs git add
