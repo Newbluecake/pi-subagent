@@ -1,9 +1,10 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import type { UsageDelta } from "../core/types.js";
+import type { RunSnapshot, UsageDelta } from "../core/types.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
+import { formatDuration } from "../ui/fleet-panel.js";
 import { createFleetCommand, type FleetCommandDeps } from "../ui/fleet-command.js";
 
 export interface StatusCommandDeps {
@@ -30,17 +31,24 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent fleet` opens the live panel.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent fleet` opens the live panel.",
     getArgumentCompletions: (argumentPrefix: string) =>
       [
         { value: "status", label: "status", description: "Text diagnostics (default)" },
         { value: "fleet", label: "fleet", description: "Live fleet panel (X7)" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim())),
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const sub = args.trim().split(/\s+/, 1)[0];
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const sub = tokens[0];
       if (sub === "fleet") {
         const command = createFleetCommand({ query: deps.query, ...deps.fleet });
         return command.handler(args.trim().slice(sub.length).trim(), ctx);
+      }
+      // M-C4: `/agent status <runId-or-prefix>` (or `/agent <runId>`) — one run's tool timeline.
+      const idArg = sub === "status" ? tokens[1] : sub;
+      if (idArg) {
+        ctx.ui.notify(renderRunDetail(deps.query, idArg), "info");
+        return;
       }
       ctx.ui.notify(renderStatus(deps), "info");
     },
@@ -69,6 +77,57 @@ function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | unde
     }),
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
   );
+}
+
+/**
+ * M-C4: one run's detail view — header (label/type/model/status/elapsed) plus
+ * a tool timeline from diag.toolHistory (start offsets relative to createdAt,
+ * per-call durations, ✓/✗/▸ marks, args previews) and the error, if any.
+ * Accepts a full runId, a unique prefix, or an exact label.
+ */
+export function renderRunDetail(query: QueryService, idArg: string): string {
+  const runs = query.list();
+  const matches = runs.filter(
+    (s) => s.runId === idArg || s.runId.startsWith(idArg) || s.diag.label === idArg,
+  );
+  if (matches.length === 0) return `No run matches "${idArg}".`;
+  if (matches.length > 1)
+    return `Ambiguous "${idArg}" — matches: ${matches.map((s) => s.runId.slice(0, 8)).join(", ")}`;
+  const s: RunSnapshot = matches[0]!;
+  const d = s.diag;
+  const elapsed = (d.settledAt ?? Date.now()) - d.createdAt;
+  const head = [
+    `Run ${s.runId.slice(0, 8)}${d.label ? ` (${d.label})` : ""}`,
+    d.agentType ?? undefined,
+    d.model?.id ?? undefined,
+    `${s.status}/${s.phase}`,
+    formatDuration(Math.max(0, elapsed)),
+    `${d.turns} turn${d.turns === 1 ? "" : "s"}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const lines = [head];
+  if (d.toolHistory?.length) {
+    lines.push("  Timeline:");
+    for (const r of d.toolHistory) {
+      const offset = formatDuration(Math.max(0, r.startedAt - d.createdAt)).padStart(7);
+      const mark = r.endedAt === undefined ? "▸" : r.isError ? "✗" : "✓";
+      const dur = r.endedAt === undefined ? "running…" : formatDuration(r.endedAt - r.startedAt);
+      lines.push(`  +${offset}  ${mark} ${r.name.padEnd(10)} ${(r.argsPreview ?? "").slice(0, 60).padEnd(60)} ${dur}`);
+    }
+    const counts = Object.entries(d.toolCounts ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, n]) => (n > 1 ? `${name}×${n}` : name))
+      .join(" ");
+    if (counts) lines.push(`  Tools: ${counts}`);
+  } else {
+    lines.push("  Timeline: (no tool calls observed)");
+  }
+  if (d.usage) lines.push(`  Usage:${formatUsage(d.usage)}`);
+  if (d.error) lines.push(`  Error: [${d.error.kind}] ${d.error.message.slice(0, 300)}`);
+  if (d.timeoutReason) lines.push(`  Timeout: ${d.timeoutReason}`);
+  if (d.sessionFile) lines.push(`  Session: ${d.sessionFile}`);
+  return lines.join("\n");
 }
 
 export function renderStatus(deps: StatusCommandDeps): string {

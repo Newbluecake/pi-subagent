@@ -140,12 +140,21 @@ export function buildSessionStack(
       const outcome = snapshot?.outcome;
       const stats = outcome ? formatOutcomeSummary(outcome) : undefined;
       const label = snapshot?.diag.label;
+      // Non-completed runs: textPreview is usually empty — surface the actual
+      // failure reason instead (observed in the wild: a config-failed run's
+      // notification said nothing beyond "failed", the reason required a
+      // manual get_subagent_result round-trip).
+      const failReason =
+        payload.status !== "completed"
+          ? (outcome?.error?.message ?? outcome?.timeoutReason ?? snapshot?.diag.error?.message)
+          : undefined;
+      const tail = failReason ?? (payload.textPreview || undefined);
       pi.sendMessage({
         customType: "subagent:notification",
         content:
           `Subagent run ${payload.runId}${label ? ` (${label})` : ""} ${payload.status}` +
           (stats ? ` — ${stats}` : "") +
-          (payload.textPreview ? `: ${payload.textPreview.slice(0, 200)}` : ""),
+          (tail ? `: ${tail.slice(0, 200)}` : ""),
         display: true,
         details: payload,
       });

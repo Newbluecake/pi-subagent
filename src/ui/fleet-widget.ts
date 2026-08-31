@@ -1,4 +1,5 @@
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
 import type { QueryService } from "../service/query-service.js";
 import {
@@ -213,7 +214,12 @@ export class FleetWidgetController {
 
   private push(lines: string[] | undefined): void {
     try {
-      this.setWidget!(FLEET_WIDGET_KEY, lines, { placement: "aboveEditor" });
+      // M-C fix: setWidget lines are plain strings — a long label + tool trail
+      // would wrap and grow the widget by extra lines. Truncate to the live
+      // terminal width (ANSI-safe), falling back to a conservative 120 cols.
+      const width = Math.max(20, (process.stdout?.columns ?? 120) - 1);
+      const truncated = lines?.map((line) => truncateToWidth(line, width));
+      this.setWidget!(FLEET_WIDGET_KEY, truncated, { placement: "aboveEditor" });
     } catch {
       // Non-interactive/degenerate host: go inert silently (never throw out of a UI observer).
       this.uiDead = true;

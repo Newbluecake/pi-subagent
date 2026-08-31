@@ -123,3 +123,65 @@ describe("M3.6 /agent status workflow section", () => {
     expect(text).toContain("Workflows: 0 active");
   });
 });
+
+describe("M-C4 renderRunDetail (tool timeline)", () => {
+  const detailed = (): RunSnapshot =>
+    snapshot({
+      runId: "223b8f1e-aaaa-bbbb-cccc-000000000000",
+      status: "running",
+      phase: "tool_exec",
+      diag: {
+        ...snapshot().diag,
+        createdAt: 1_000,
+        phase: "tool_exec",
+        turns: 2,
+        label: "重构用户模块",
+        agentType: "architect",
+        model: { provider: "p", id: "kimi-k3" },
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, costUsd: 0.05 },
+        toolHistory: [
+          { name: "bash", toolCallId: "a", startedAt: 2_200, endedAt: 3_400, isError: false, argsPreview: "ls -la" },
+          { name: "bash", toolCallId: "b", startedAt: 5_000, endedAt: 13_100, isError: true, argsPreview: "npm test" },
+          { name: "edit", toolCallId: "c", startedAt: 14_000, argsPreview: "src/x.ts" },
+        ],
+        toolCounts: { bash: 2, edit: 1 },
+      },
+    });
+
+  it("renders header, timeline with offsets/marks/durations, tool counts and usage", async () => {
+    const { renderRunDetail } = await import("../../src/commands/status.js");
+    const text = renderRunDetail(deps([detailed()]).query as never, "223b8f1e");
+    expect(text).toContain("Run 223b8f1e (重构用户模块) · architect · kimi-k3 · running/tool_exec");
+    expect(text).toContain("2 turns");
+    expect(text).toContain("✓ bash");
+    expect(text).toContain("ls -la");
+    expect(text).toContain("1s"); // 1.2s call rendered as 1s
+    expect(text).toContain("✗ bash");
+    expect(text).toContain("▸ edit");
+    expect(text).toContain("running…");
+    expect(text).toContain("Tools: bash×2 edit");
+    expect(text).toContain("cost:$0.0500");
+  });
+
+  it("matches by unique prefix or exact label; reports unknown and ambiguous args", async () => {
+    const { renderRunDetail } = await import("../../src/commands/status.js");
+    const a = detailed();
+    const q = deps([a]).query as never;
+    expect(renderRunDetail(q, "重构用户模块")).toContain("Run 223b8f1e");
+    expect(renderRunDetail(q, "nope")).toContain('No run matches');
+    const twin = detailed();
+    twin.runId = "223b8f1e-aaaa-bbbb-cccc-111111111111";
+    const q2 = deps([a, twin]).query as never;
+    expect(renderRunDetail(q2, "223b8f1e")).toContain("Ambiguous");
+  });
+
+  it("shows the error and timeout reason for failed runs", async () => {
+    const { renderRunDetail } = await import("../../src/commands/status.js");
+    const failed = detailed();
+    failed.status = "failed";
+    failed.diag.error = { kind: "model", message: "reasoning_effort medium not supported", retryable: false };
+    failed.diag.timeoutReason = undefined as never;
+    const text = renderRunDetail(deps([failed]).query as never, "223b8f1e");
+    expect(text).toContain("Error: [model] reasoning_effort medium not supported");
+  });
+});
