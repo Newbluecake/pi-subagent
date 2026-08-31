@@ -36,11 +36,9 @@ import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
  * worktree, X10 schema tools, etc.) push their SubagentExtensionPoints here
  * instead of inventing new mount points (I7: index.ts stays assembly-only).
  */
-const extensionPoints: SubagentExtensionPoints[] = [];
-
 /** X1: worktree isolation (H2 rewrite cwd + H3 commit/remove). Default off; enable via settings worktree.enabled. Throws (→ failed(config)) when explicitly requested but unavailable — never silently falls back. */
-function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): void {
-  extensionPoints.push(createPiWorktreeExtension(pi, settings.worktree));
+function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtensionPoints {
+  return createPiWorktreeExtension(pi, settings.worktree);
 }
 
 /**
@@ -53,7 +51,12 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): void {
  */
 export default function activate(pi: ExtensionAPI): void {
   const settings = loadSettingsFromFile();
-  wireWorktree(pi, settings);
+  // Built FRESH per activate(): pi may re-run activate on the same cached
+  // module (its /reload does not bust Node's module cache). A module-level
+  // mutable array would accumulate duplicate entries across activations —
+  // the stale ones closing over an invalidated pi (observed in the wild:
+  // H2 fan-out hit a dead worktree extension and crashed the run).
+  const extensionPoints: SubagentExtensionPoints[] = [wireWorktree(pi, settings)];
   const types = createAgentTypeRegistry();
   const caps = detectPiCapabilities(pi);
   const compat = assertCompatible(caps);
