@@ -184,3 +184,18 @@ describe("runner hang bounds", () => {
     expect(result.escalation.some((e) => e.level === "L2" && !e.ok)).toBe(true);
   });
 });
+
+describe("turn error surfacing (regression: empty success)", () => {
+  it("maps a settled session with stopReason=error to failed(model), not completed", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ getTurnError: () => "Cannot read properties of undefined (reading 'includes')" }),
+      bind: async () => undefined,
+    };
+    const runner = new RuntimeRunner(deps(clock, driver));
+    const outcome = await runner.run({ ...request, runId: "r-err" }, budget);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error?.kind).toBe("model");
+    expect(outcome.error?.message).toContain("includes");
+  });
+});

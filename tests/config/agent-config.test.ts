@@ -35,11 +35,21 @@ describe("built-in agent types", () => {
     expect(registry.get("Plan")).toBeDefined();
   });
   it("file-defined types shadow built-ins", async () => {
-    // The real home dir has agent files (Explore.md etc.) but no
-    // general-purpose.md; built-ins must still fill the gap.
-    const registry = createAgentTypeRegistry("/nonexistent-cwd");
+    const { mkdtemp, writeFile, mkdir } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-cfg-"));
+    const home = join(root, "home");
+    await mkdir(join(home, ".pi/agent/agents"), { recursive: true });
+    await writeFile(
+      join(home, ".pi/agent/agents/general-purpose.md"),
+      "---\nname: general-purpose\ndescription: custom override\n---\ncustom prompt\n",
+    );
+    const registry = createAgentTypeRegistry(root, home);
     await registry.reload();
     const gp = registry.get("general-purpose");
-    expect(gp?.sourcePath).toBeUndefined(); // built-in, not file-backed
+    expect(gp?.description).toBe("custom override"); // file wins
+    expect(gp?.sourcePath).toBeDefined();
+    expect(registry.get("Plan")?.sourcePath).toBeUndefined(); // still built-in
   });
 });

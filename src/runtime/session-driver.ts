@@ -21,6 +21,7 @@ export interface SessionHandle {
   setActiveTools(names: string[]): void;
   getActiveTools(): string[];
   getLastAssistantText(): string | undefined;
+  getTurnError?(): string | undefined;
   getUsage(): RunOutcome["usage"];
 }
 export interface SessionDriver {
@@ -102,26 +103,63 @@ class PiSessionHandle implements SessionHandle {
   getLastAssistantText() {
     return this.session.getLastAssistantText();
   }
+  /** pi resolves prompt() even when the final turn died (stopReason
+   *  "error", e.g. provider crash) — without this check a dead turn looks
+   *  like an empty success. Surface it so the run becomes failed(model). */
+  getTurnError(): string | undefined {
+    for (let i = this.session.messages.length - 1; i >= 0; i--) {
+      const m = this.session.messages[i] as { role?: string; stopReason?: string; errorMessage?: string };
+      if (m?.role === "assistant")
+        return m.stopReason === "error" ? (m.errorMessage ?? "unknown model error") : undefined;
+    }
+    return undefined;
+  }
   getUsage() {
     return undefined;
   }
 }
 
+export type ModelResolver = (provider: string, id: string) => unknown | undefined;
+
 export class PiSessionDriver implements SessionDriver {
-  constructor(private readonly rememberAgents = true) {}
+  constructor(
+    private readonly rememberAgents = true,
+    private readonly resolveModel?: ModelResolver,
+  ) {}
+
+  /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
+   *  needs a real Model object from the registry. Passing the pair through
+   *  crashes pi's provider call site (reading properties of undefined) and —
+   *  worse — the session then settles with stopReason "error" and zero
+   *  turns, looking like an empty success. Resolve eagerly and fail fast. */
+  private withResolvedModel(spec: SessionSpec): SessionSpec {
+    const m = spec.model as { provider?: unknown; id?: unknown } | undefined;
+    if (m === undefined) return spec;
+    if (typeof m.provider !== "string" || typeof m.id !== "string")
+      throw new Error("model must be a {provider, id} pair");
+    if (!this.resolveModel)
+      throw new Error(`model override ${m.provider}/${m.id} requested but no model registry is wired`);
+    const resolved = this.resolveModel(m.provider, m.id);
+    if (!resolved)
+      throw new Error(`unknown model: ${m.provider}/${m.id} (not in pi's model registry — check provider/auth)`);
+    return { ...spec, model: resolved };
+  }
+
   create(spec: SessionSpec) {
-    const cwd = spec.cwd ?? process.cwd();
-    const persist = spec.persist ?? this.rememberAgents;
+    const resolved = this.withResolvedModel(spec);
+    const cwd = resolved.cwd ?? process.cwd();
+    const persist = resolved.persist ?? this.rememberAgents;
     const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
     return createAgentSession({
-      ...spec,
+      ...resolved,
       sessionManager,
       ...(persist ? {} : { persist: false }),
     } as Parameters<typeof createAgentSession>[0]).then(({ session }) => new PiSessionHandle(session));
   }
   resume(sessionFile: string, spec: SessionSpec) {
-    const sessionManager = SessionManager.open(sessionFile, undefined, spec.cwd);
-    return createAgentSession({ ...spec, sessionManager } as Parameters<typeof createAgentSession>[0]).then(
+    const resolved = this.withResolvedModel(spec);
+    const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
+    return createAgentSession({ ...resolved, sessionManager } as Parameters<typeof createAgentSession>[0]).then(
       ({ session }) => new PiSessionHandle(session),
     );
   }

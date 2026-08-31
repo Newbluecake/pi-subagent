@@ -489,6 +489,7 @@ export function reduce(
     const textPatch = input.text !== undefined && state.diag.text === undefined ? { text: input.text } : {};
     return finish(state, status, input.at, budget, {
       ...textPatch,
+      ...(input.error === undefined ? {} : { error: input.error }),
       ...(input.error?.kind === "timeout" ? { timeoutReason: "total" as const } : {}),
     });
   }

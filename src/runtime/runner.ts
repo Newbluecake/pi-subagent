@@ -354,11 +354,17 @@ export class RuntimeRunner implements Runner {
       const promptBudget = remainingFor(budget.totalMs, this.d.clock.now(), state.deadlines);
       const prompted = await this.guard(handle.prompt(req.prompt), promptBudget.ms, cancel, "prompt");
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
+      // pi resolves prompt() even when the final turn errored (stopReason
+      // "error" surfaces only on the message). Without this, a provider
+      // crash looks like "completed with empty text".
+      const turnError = prompted.ok ? handle.getTurnError?.() : undefined;
       dispatch({
         kind: "prompt_settled",
         at: this.d.clock.now(),
         ...(prompted.ok
-          ? {}
+          ? turnError === undefined
+            ? {}
+            : { error: error(turnError, "model") }
           : { error: error(prompted.reason, prompted.reason === "cancelled" ? "aborted" : "timeout") }),
         ...(finalText === undefined ? {} : { text: finalText }),
       });

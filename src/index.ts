@@ -110,7 +110,7 @@ export default function activate(pi: ExtensionAPI): void {
     const spawnRef: { current?: SpawnService } = {};
     const runner = createRuntimeRunnerAdapter({
       clock: systemClock,
-      driver: new PiSessionDriver(settings.rememberAgents),
+      driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
       pool,
       store,
       watchdog,
