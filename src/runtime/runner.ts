@@ -13,6 +13,7 @@ import type {
   RunOutcome,
   RunSnapshot,
   RunState,
+  RunDisplayMeta,
   StampedInput,
   StopCause,
 } from "../core/types.js";
@@ -38,6 +39,8 @@ export interface ResolvedSpawnRequest extends SessionSpec {
    * for the compile-time guard against exactly that.
    */
   deadlineAt?: Millis;
+  /** M-A: display-only spawn metadata (model/label/agent type) folded into diag at enqueue time for the presentation layer (fleet tree / Agent tool card). */
+  displayMeta?: RunDisplayMeta;
   /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
   toolScope?: { policy: ToolScopePolicy; enforcer: ToolScopeEnforcer };
 }
@@ -291,6 +294,7 @@ export class RuntimeRunner implements Runner {
         at: this.d.clock.now(),
         budget,
         ...(req.deadlineAt === undefined ? {} : { deadlineCapAt: req.deadlineAt }),
+        ...(req.displayMeta === undefined ? {} : { meta: req.displayMeta }),
       });
       // CC4/CP3: an already-expired deadlineAt cap settles the run as
       // failed(config) directly inside the `enqueued` reducer branch, before

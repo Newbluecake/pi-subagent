@@ -102,7 +102,18 @@ export default function activate(pi: ExtensionAPI): void {
     return;
   }
 
-  pi.registerTool(createAgentTool({ spawn: forwardSpawn(holder) }));
+  pi.registerTool(
+    createAgentTool({
+      spawn: forwardSpawn(holder),
+      // M-B: live foreground progress — snapshot reads from the query service,
+      // terminal wait through the spawn service's own waiter (no unknown-run
+      // race for a just-spawned id, unlike QueryService.wait).
+      progress: {
+        getSnapshot: (runId) => holder.current?.query.get(runId),
+        waitOutcome: async (runId) => (await requireStack(holder).spawn.waitAll({ runIds: [runId] })).settled[0],
+      },
+    }),
+  );
   pi.registerTool(createResultTool({ query: forwardQuery(holder) }));
   pi.registerTool(createSteerTool({ query: forwardQuery(holder) }));
   // Inject the registered agent types into the system prompt: the model has

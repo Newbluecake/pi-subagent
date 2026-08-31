@@ -11,6 +11,7 @@ import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import type { AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
@@ -123,9 +124,17 @@ export function buildSessionStack(
     sender: (payload) => {
       // G5b: sendMessage has no ack (arch. §2.5); failures stay inside
       // Notifier's own retry/backoff loop, never surfaced to run status.
+      // M-D: append a one-line stats summary (model · turns · tools · cost ·
+      // duration) from the terminal snapshot so the parent session sees the
+      // execution profile at a glance.
+      const outcome = store.get(payload.runId)?.outcome;
+      const stats = outcome ? formatOutcomeSummary(outcome) : undefined;
       pi.sendMessage({
         customType: "subagent:notification",
-        content: `Subagent run ${payload.runId} ${payload.status}${payload.textPreview ? `: ${payload.textPreview.slice(0, 200)}` : ""}`,
+        content:
+          `Subagent run ${payload.runId} ${payload.status}` +
+          (stats ? ` — ${stats}` : "") +
+          (payload.textPreview ? `: ${payload.textPreview.slice(0, 200)}` : ""),
         display: true,
         details: payload,
       });
@@ -133,6 +142,8 @@ export function buildSessionStack(
   });
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
   const spawnRef: { current?: SpawnService } = {};
+  // M-D: runIds whose "subagent:started" event has already been emitted (once per run).
+  const announcedStarts = new Set<string>();
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
     driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
@@ -157,8 +168,14 @@ export function buildSessionStack(
     maxNestedDepth: settings.maxNestedDepth,
     onLabel: (label, target) => mentionRef.current?.register(label, target),
     onSnapshot: (snapshot) => {
-      if (snapshot.diag.startedAt !== undefined && snapshot.diag.startedAt === snapshot.diag.enqueuedAt)
+      // M-D: announce a run exactly once, as soon as it has actually started
+      // (diag.startedAt set on slot_acquired). The previous heuristic
+      // (startedAt === enqueuedAt) silently never fired for any run that
+      // waited ≥1ms in the queue — consumers like pi-hud saw zero events.
+      if (snapshot.diag.startedAt !== undefined && !announcedStarts.has(snapshot.runId)) {
+        announcedStarts.add(snapshot.runId);
         pi.events.emit("subagent:started", { runId: snapshot.runId, at: snapshot.updatedAt });
+      }
     },
   });
   spawnRef.current = spawn;

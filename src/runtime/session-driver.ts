@@ -59,6 +59,34 @@ function errorInfo(error: unknown): NonNullable<RunOutcome["error"]> {
   const e = error instanceof Error ? error : new Error(String(error));
   return { kind: "internal", message: e.message, ...(e.stack ? { stack: e.stack } : {}), retryable: false };
 }
+/**
+ * M-A: single-line, truncated preview of a tool call's arguments for the
+ * live trail UI. Picks the most informative scalar (bash command, file path,
+ * pattern…) and falls back to compact JSON. Display-only — never fed back to
+ * a model — and hard-capped so a huge prompt/file body cannot bloat diag.
+ */
+export function previewToolArgs(args: unknown, max = 80): string | undefined {
+  if (args === null || args === undefined) return undefined;
+  let text: string;
+  if (typeof args === "string") text = args;
+  else if (typeof args === "object") {
+    const r = args as Record<string, unknown>;
+    const preferred = ["command", "path", "file_path", "pattern", "query", "description", "prompt", "url"];
+    const key = preferred.find((k) => typeof r[k] === "string" && (r[k] as string).length > 0);
+    if (key) text = r[key] as string;
+    else {
+      try {
+        text = JSON.stringify(r) ?? "";
+      } catch {
+        return undefined;
+      }
+    }
+  } else text = String(args);
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 function mapEvent(e: any): DriverEvent | undefined {
   if (!e || typeof e.type !== "string") return undefined;
   const t = e.type;
@@ -69,8 +97,15 @@ function mapEvent(e: any): DriverEvent | undefined {
     const usage = mapUsage(e.message?.usage);
     return usage ? { t: "message_end", usage } : { t: "message_end" };
   }
-  if (t === "tool_execution_start")
-    return { t: "tool_start", toolCallId: String(e.toolCallId), toolName: String(e.toolName) };
+  if (t === "tool_execution_start") {
+    const argsPreview = previewToolArgs(e.args);
+    return {
+      t: "tool_start",
+      toolCallId: String(e.toolCallId),
+      toolName: String(e.toolName),
+      ...(argsPreview === undefined ? {} : { argsPreview }),
+    };
+  }
   if (t === "tool_execution_end")
     return {
       t: "tool_end",

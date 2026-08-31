@@ -16,9 +16,15 @@ import {
  * ctx.ui.setWidget(placement: "aboveEditor") whenever subagent runs are
  * active; hidden (setWidget(key, undefined)) when the fleet is idle.
  *
+ * M-C upgrade: the widget is now the primary background presentation — a
+ * compact *agent tree*. One header line (worst-highlight bullet, active
+ * count, live cost, overflow) followed by one line per run, children
+ * indented under their parent (↳) via FleetRow.parentRunId, each row showing
+ * label · type · model · phase · elapsed · tool trail.
+ *
  * Same two-layer split as the panel:
  *  1. Pure line builders (`buildFleetWidgetLines`, `formatWidgetCost`) —
- *     FleetViewModel in, ≤3 plain-text lines (or undefined) out. Coloring is
+ *     FleetViewModel in, plain-text lines (or undefined) out. Coloring is
  *     injected, so the layer is fully unit-testable without a terminal.
  *  2. `FleetWidgetController` — owns the 1s refresh timer (injected Clock),
  *     the ui capability probe (non-interactive print/rpc modes may lack
@@ -37,6 +43,10 @@ export const FLEET_WIDGET_KEY = "pi-subagent:fleet";
 
 const WIDGET_MARK: Record<FleetHighlight, string> = { none: " ", warn: "!", crit: "✗" };
 
+/** M-C: default / hard cap on run rows (excluding the header line). */
+export const WIDGET_DEFAULT_ROWS = 5;
+export const WIDGET_MAX_ROWS = 8;
+
 /**
  * Compact cost for the widget: 4 decimals below half a cent (subagent runs
  * are typically sub-cent — same concern as formatUsage), 2 decimals at/above
@@ -47,32 +57,54 @@ export function formatWidgetCost(costUsd: number): string {
 }
 
 export interface FleetWidgetRenderOptions {
-  /** Runs shown (one inline in the summary line + one per extra line). Default 2 → ≤2 lines; hard cap 3 keeps the widget ≤3 lines. */
+  /** Run rows shown below the header line. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** Color injector, same tones as the panel (warn/crit/muted); default plain text. */
   color?: FleetColorize;
 }
 
-/** One run's compact detail: "8m32s architect model_turn bash $1.05" (nested runs get a ↳ prefix). */
+/** M-C: one run's tree-row detail: "重构用户模块 architect kimi-k3 tool_exec 8m32s bash×3 ▸edit $1.05". */
 function widgetRowDetail(row: FleetRow): string {
-  const parts = [formatDuration(row.elapsedMs), row.type ?? "·", row.phase];
-  if (row.currentTool) parts.push(row.currentTool);
+  const parts = [row.label ?? row.shortRunId, row.type ?? "·"];
+  if (row.model) parts.push(row.model);
+  parts.push(row.phase, formatDuration(row.elapsedMs));
+  const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
+  if (trail) parts.push(trail);
   if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
-  const detail = parts.join(" ");
-  return row.nested ? `↳ ${detail}` : detail;
+  return parts.join(" ");
+}
+
+/** M-C: order active rows as a forest — severity-ordered roots, each followed by its children (depth-first). */
+export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; depth: number }> {
+  const present = new Set(rows.map((r) => r.runId));
+  const children = new Map<string, FleetRow[]>();
+  const roots: FleetRow[] = [];
+  for (const row of rows) {
+    if (row.parentRunId !== undefined && present.has(row.parentRunId)) {
+      const list = children.get(row.parentRunId) ?? [];
+      list.push(row);
+      children.set(row.parentRunId, list);
+    } else roots.push(row);
+  }
+  const out: Array<{ row: FleetRow; depth: number }> = [];
+  const visit = (row: FleetRow, depth: number) => {
+    out.push({ row, depth });
+    for (const child of children.get(row.runId) ?? []) visit(child, depth + 1);
+  };
+  for (const root of roots) visit(root, 0);
+  return out;
 }
 
 /**
- * Build the widget lines from the (shared) fleet view model.
+ * Build the agent-tree widget lines from the (shared) fleet view model.
  *
  * - Returns undefined when no runs are active → the controller hides the
  *   widget (terminal-only history is panel material, not widget material).
- * - Line 1: `<bullet> N active · <top run detail>[ · +M more]` — the bullet
+ * - Line 1 (header): `<bullet> N active[ · $cost][ · +M more]` — the bullet
  *   is colored by the worst active highlight (rows arrive pre-sorted
- *   crit→warn→none from buildFleetViewModel, so the top run IS the worst).
- * - Lines 2..maxRows: remaining runs in the same highlight-priority order,
- *   each prefixed with the panel's mark (! warn / ✗ crit) and colored with
- *   the same tone semantics as the panel rows.
+ *   crit→warn→none from buildFleetViewModel).
+ * - Lines 2..: one per run in tree order — mark (! warn / ✗ crit), depth
+ *   indent, `↳` for nested rows, then label/type/model/phase/elapsed/trail.
  */
 export function buildFleetWidgetLines(
   model: FleetViewModel,
@@ -80,16 +112,21 @@ export function buildFleetWidgetLines(
 ): string[] | undefined {
   if (model.activeCount === 0) return undefined;
   const color: FleetColorize = opts.color ?? ((_tone, text) => text);
-  const maxRows = Math.min(3, Math.max(1, opts.maxRows ?? 2));
+  const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
   const activeRows = model.rows.filter((r) => !r.terminal);
   if (activeRows.length === 0) return undefined; // defensive: activeCount/rows disagree
-  const shown = activeRows.slice(0, maxRows);
-  const worst = shown[0]!.highlight;
-  const hidden = model.activeCount - shown.length;
-  const summary = `${color(worst, "●")} ${model.activeCount} active · ${widgetRowDetail(shown[0]!)}`;
-  const lines = [hidden > 0 ? `${summary} · +${hidden} more` : summary];
-  for (const row of shown.slice(1)) {
-    lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${widgetRowDetail(row)}`));
+  const worst = activeRows[0]!.highlight;
+  const ordered = treeOrder(activeRows).slice(0, maxRows);
+  const hidden = model.activeCount - ordered.length;
+  const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
+  const header =
+    `${color(worst, "●")} ${model.activeCount} active` +
+    (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
+    (hidden > 0 ? ` · +${hidden} more` : "");
+  const lines = [header];
+  for (const { row, depth } of ordered) {
+    const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
+    lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`));
   }
   return lines;
 }
@@ -117,6 +154,7 @@ export interface FleetWidgetDeps {
   refreshMs?: Millis;
   /** settings.budget.idleMs — same half-idle warn semantics as the panel. */
   idleBudgetMs?: Millis;
+  /** Run rows below the header. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   typeOf?: (runId: RunId) => string | undefined;
   color?: FleetColorize;
@@ -159,7 +197,7 @@ export class FleetWidgetController {
     const model = buildFleetViewModel(this.deps.query.list(), {
       now: this.clock.now(),
       recentTerminal: 0, // widget shows active runs only
-      maxActiveRows: Math.min(3, Math.max(1, this.deps.maxRows ?? 2)),
+      maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
       ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
       ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
     });

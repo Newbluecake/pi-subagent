@@ -353,6 +353,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           prompt: buildPrompt(spec),
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
           toolScope,
+          // M-A: display-only metadata for the presentation layer (diag.model/
+          // label/agentType). spec.model is already the merged
+          // modelOverride-or-type-default pair; undefined means "pi session
+          // default", which the UI renders as such.
+          displayMeta: {
+            ...(spec.model === undefined ? {} : { model: spec.model }),
+            ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
+            agentType: spec.type.name,
+          },
         };
         let outcome = await runtime.run(req, spec.budget);
         // X10 host-side re-validation (second of the two mandatory checks).

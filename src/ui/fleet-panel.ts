@@ -37,6 +37,14 @@ export interface FleetRow {
   runId: RunId;
   shortRunId: string;
   type: string | undefined;
+  /** M-C: SpawnRequest.label (the Agent tool's `description`), from diag.label. */
+  label: string | undefined;
+  /** M-C: model id from diag.model (display only; undefined = session default). */
+  model: string | undefined;
+  /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "bash×3→read ▸edit". */
+  toolTrail: string | undefined;
+  /** M-C: parent link for tree grouping in the widget (undefined = top-level). */
+  parentRunId: RunId | undefined;
   status: RunStatus;
   phase: RunPhase;
   /** now - diag.createdAt, clamped ≥ 0. */
@@ -124,6 +132,39 @@ export function formatUsage(u: UsageDelta): string {
   return `in:${u.input} out:${u.output} $${u.costUsd.toFixed(4)}`;
 }
 
+/**
+ * M-C: compact trail of a run's recent tool calls for the agent-tree widget
+ * and the Agent tool card. Adjacent completed calls of the same tool collapse
+ * into `name×k` (failed ones render `name✗`), only the last `maxTokens`
+ * tokens are kept, and an in-flight call is appended as `▸name`.
+ */
+export function toolTrailOf(
+  diag: Pick<RunDiagnostics, "toolHistory">,
+  maxTokens = 4,
+): string | undefined {
+  const history = diag.toolHistory;
+  if (!history?.length) return undefined;
+  const tokens: Array<{ key: string; name: string; failed: boolean; count: number }> = [];
+  let running: string | undefined;
+  for (const r of history) {
+    if (r.endedAt === undefined) {
+      running = r.name; // keep the latest in-flight call
+      continue;
+    }
+    const failed = r.isError === true;
+    const key = `${r.name}${failed ? "!" : ""}`;
+    const last = tokens[tokens.length - 1];
+    if (last && last.key === key) last.count++;
+    else tokens.push({ key, name: r.name, failed, count: 1 });
+  }
+  const shown = tokens
+    .slice(-maxTokens)
+    .map((t) => `${t.name}${t.failed ? "✗" : ""}${t.count > 1 ? `×${t.count}` : ""}`);
+  const done = shown.join("→");
+  if (running === undefined) return done || undefined;
+  return done ? `${done} ▸${running}` : `▸${running}`;
+}
+
 function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {
   const present = items.filter((u): u is UsageDelta => u !== undefined);
   if (!present.length) return undefined;
@@ -145,7 +186,11 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
   return {
     runId: snapshot.runId,
     shortRunId: snapshot.runId.slice(0, 8),
-    type: opts.typeOf?.(snapshot.runId),
+    type: opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType,
+    label: snapshot.diag.label,
+    model: snapshot.diag.model?.id,
+    toolTrail: toolTrailOf(snapshot.diag),
+    parentRunId: snapshot.parentRunId,
     status: snapshot.status,
     phase: snapshot.phase,
     elapsedMs: Math.max(0, opts.now - snapshot.diag.createdAt),

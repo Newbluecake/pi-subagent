@@ -1,0 +1,263 @@
+import { describe, expect, it, vi } from "vitest";
+import { Text } from "@earendil-works/pi-tui";
+import {
+  buildProgressLines,
+  createAgentTool,
+  formatOutcomeSummary,
+  type AgentToolDetails,
+  type ForegroundProgressPort,
+  type NestedSpawnPort,
+} from "../../src/tools/agent-tool.js";
+import type { RunDiagnostics, RunOutcome, RunSnapshot } from "../../src/core/types.js";
+
+function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
+  return {
+    createdAt: 0,
+    phase: "model_turn",
+    phaseEnteredAt: 0,
+    pendingTools: 0,
+    turns: 2,
+    escalation: [],
+    orphaned: false,
+    generation: 1,
+    degraded: [],
+    staleInputs: 0,
+    unkillable: [],
+    ...overrides,
+  };
+}
+function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
+  return {
+    runId: "run-1",
+    generation: 1,
+    status: "running",
+    phase: "model_turn",
+    deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+    diag: diag(),
+    updatedAt: 0,
+    ...overrides,
+  };
+}
+function completed(overrides: Partial<RunOutcome> = {}): RunOutcome {
+  return {
+    runId: "run-1",
+    status: "completed",
+    text: "done",
+    turns: 5,
+    durationMs: 78_000,
+    usage: { input: 4204, output: 590, cacheRead: 0, cacheWrite: 0, costUsd: 0.156 },
+    diag: diag({
+      model: { provider: "copilot-completion", id: "kimi-k3" },
+      toolCounts: { bash: 3, read: 2, edit: 1 },
+    }),
+    ...overrides,
+  };
+}
+
+describe("M-B: buildProgressLines", () => {
+  it("renders the status header with model, phase, turn, elapsed and cost", () => {
+    const snap = snapshot({
+      diag: diag({
+        model: { provider: "p", id: "kimi-k3" },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.0412 },
+      }),
+    });
+    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ kimi-k3 · model_turn · turn 3 · 42s · $0.04");
+  });
+
+  it("falls back to agentType then status when no model is known", () => {
+    expect(buildProgressLines(snapshot({ diag: diag({ agentType: "architect" }) }), 1_000)[0]).toContain("architect");
+    expect(buildProgressLines(snapshot(), 1_000)[0]).toContain("running");
+  });
+
+  it("shows the last N tool calls with ✓/✗/▸ marks, args preview and durations", () => {
+    const snap = snapshot({
+      diag: diag({
+        toolHistory: [
+          { name: "bash", toolCallId: "a", startedAt: 0, endedAt: 1_200, isError: false, argsPreview: "ls -la" },
+          { name: "bash", toolCallId: "b", startedAt: 2_000, endedAt: 10_100, isError: true, argsPreview: "npm test" },
+          { name: "edit", toolCallId: "c", startedAt: 11_000, argsPreview: "src/x.ts" },
+        ],
+      }),
+    });
+    const lines = buildProgressLines(snap, 12_000);
+    expect(lines.slice(1)).toEqual([
+      "✓ bash ls -la (1s)",
+      "✗ bash npm test (8s)",
+      "▸ edit src/x.ts (running…)",
+    ]);
+  });
+
+  it("caps the trail at maxTools (most recent kept)", () => {
+    const history = Array.from({ length: 6 }, (_, i) => ({
+      name: `t${i}`,
+      toolCallId: `c${i}`,
+      startedAt: i,
+      endedAt: i + 1,
+      isError: false,
+    }));
+    const lines = buildProgressLines(snapshot({ diag: diag({ toolHistory: history }) }), 100, 3);
+    expect(lines).toHaveLength(4);
+    expect(lines[1]).toContain("t3");
+    expect(lines[3]).toContain("t5");
+  });
+});
+
+describe("M-B/M-D: formatOutcomeSummary", () => {
+  it("renders model · turns · tools breakdown · cost · duration", () => {
+    expect(formatOutcomeSummary(completed())).toBe("kimi-k3 · 5 turns · 6 tools (bash×3 read×2 edit) · $0.16 · 1m18s");
+  });
+  it("omits absent parts and uses singular forms", () => {
+    const bare = completed({
+      turns: 1,
+      durationMs: 900,
+      diag: diag({ toolCounts: { bash: 1 } }),
+    });
+    delete (bare as { usage?: unknown }).usage;
+    expect(formatOutcomeSummary(bare)).toBe("1 turn · 1 tool (bash) · 900ms");
+  });
+});
+
+describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () => {
+  function ports(snap: RunSnapshot, settled: RunOutcome) {
+    const spawn: NestedSpawnPort = {
+      async spawn() {
+        return { runId: settled.runId };
+      },
+      async spawnAndWait() {
+        throw new Error("progress path must not call spawnAndWait");
+      },
+    };
+    let release!: (o: RunOutcome) => void;
+    const gate = new Promise<RunOutcome>((r) => {
+      release = r;
+    });
+    const progress: ForegroundProgressPort = {
+      getSnapshot: () => snap,
+      waitOutcome: () => gate,
+    };
+    return { spawn, progress, release };
+  }
+
+  it("streams partial updates while waiting, then returns the enriched final result", async () => {
+    vi.useFakeTimers();
+    try {
+      const snap = snapshot({
+        diag: diag({ model: { provider: "p", id: "kimi-k3" }, toolHistory: [
+          { name: "bash", toolCallId: "a", startedAt: 0, argsPreview: "ls" },
+        ] }),
+      });
+      const final = completed();
+      const { spawn, progress, release } = ports(snap, final);
+      const tool = createAgentTool({ spawn, progress });
+      const updates: AgentToolDetails[] = [];
+      const onUpdate = (u: { details?: unknown }) => updates.push((u.details ?? {}) as AgentToolDetails);
+      const pending = tool.execute(
+        "tc1",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        onUpdate as never,
+        {} as never,
+      );
+      await vi.advanceTimersByTimeAsync(2_100); // immediate push + 2 ticks
+      expect(updates.length).toBeGreaterThanOrEqual(3);
+      expect(updates[0]!.runId).toBe("run-1");
+      expect(updates[0]!.progress![0]).toContain("kimi-k3");
+      expect(updates[0]!.progress![1]).toContain("▸ bash ls");
+      release(final);
+      const result = await pending;
+      const details = result.details as AgentToolDetails;
+      expect(details.summary).toBe(formatOutcomeSummary(final));
+      expect(details.model).toBe("kimi-k3");
+      expect(details.toolCounts).toEqual({ bash: 3, read: 2, edit: 1 });
+      expect(details.costUsd).toBeCloseTo(0.156);
+      expect(result.content[0]).toEqual({ type: "text", text: "done" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throws (not silently completes) when the waited outcome is non-completed", async () => {
+    const snap = snapshot();
+    const final = completed({ status: "timed_out", timeoutReason: "total" });
+    const { spawn, progress, release } = ports(snap, final);
+    release(final);
+    const tool = createAgentTool({ spawn, progress });
+    await expect(
+      tool.execute(
+        "tc1",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        (() => undefined) as never,
+        {} as never,
+      ),
+    ).rejects.toThrow(/did not complete successfully: total/);
+  });
+
+  it("without onUpdate the tool falls back to spawnAndWait (non-interactive parity)", async () => {
+    const calls: string[] = [];
+    const spawn: NestedSpawnPort = {
+      async spawn() {
+        calls.push("spawn");
+        return { runId: "x" };
+      },
+      async spawnAndWait() {
+        calls.push("spawnAndWait");
+        return completed();
+      },
+    };
+    const progress: ForegroundProgressPort = {
+      getSnapshot: () => undefined,
+      waitOutcome: async () => undefined,
+    };
+    const tool = createAgentTool({ spawn, progress });
+    const result = await tool.execute(
+      "tc1",
+      { description: "demo", prompt: "p", subagent_type: "general" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(calls).toEqual(["spawnAndWait"]);
+    expect((result.details as AgentToolDetails).summary).toBeDefined();
+  });
+});
+
+describe("M-B: renderResult", () => {
+  const theme = { fg: (tone: string, text: string) => `[${tone}]${text}`, bold: (t: string) => t } as never;
+  const ctx = { lastComponent: undefined } as never;
+
+  it("partial: colors the trail by mark (✗ error, ▸ accent, ✓ muted)", () => {
+    const tool = createAgentTool({ spawn: {} as NestedSpawnPort });
+    const component = tool.renderResult!(
+      {
+        content: [{ type: "text", text: "ignored for partials" }],
+        details: { progress: ["⏳ kimi-k3 · model_turn", "✓ bash ls (1s)", "✗ bash x (2s)", "▸ edit y (running…)"] },
+      } as never,
+      { expanded: false, isPartial: true },
+      theme,
+      ctx,
+    ) as Text;
+    const rendered = component.text;
+    expect(rendered).toContain("⏳ kimi-k3");
+    expect(rendered).toContain("[muted]✓ bash ls (1s)");
+    expect(rendered).toContain("[error]✗ bash x (2s)");
+    expect(rendered).toContain("[accent]▸ edit y (running…)");
+  });
+
+  it("final: muted summary line + body, collapsed past 6 lines unless expanded", () => {
+    const tool = createAgentTool({ spawn: {} as NestedSpawnPort });
+    const body = Array.from({ length: 9 }, (_, i) => `line${i}`).join("\n");
+    const result = {
+      content: [{ type: "text", text: body }],
+      details: { summary: "kimi-k3 · 5 turns · $0.16 · 1m18s" },
+    } as never;
+    const collapsed = (tool.renderResult!(result, { expanded: false, isPartial: false }, theme, ctx) as Text).text;
+    expect(collapsed).toContain("[muted]✓ kimi-k3 · 5 turns");
+    expect(collapsed).toContain("line5");
+    expect(collapsed).not.toContain("line6");
+    expect(collapsed).toContain("[muted]… +3 more lines");
+    const expanded = (tool.renderResult!(result, { expanded: true, isPartial: false }, theme, ctx) as Text).text;
+    expect(expanded).toContain("line8");
+  });
+});

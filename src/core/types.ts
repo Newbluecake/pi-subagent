@@ -132,6 +132,29 @@ export interface SpawnRequest {
    */
   deadlineAt?: Millis;
 }
+/**
+ * M-A (presentation): one observed tool call of a run, kept in
+ * RunDiagnostics.toolHistory (bounded ring, TOOL_HISTORY_CAP) so both the
+ * foreground Agent tool card and the fleet/agent-tree widget can render a
+ * live execution trail without re-reading the child session file.
+ */
+export interface ToolCallRecord {
+  name: string;
+  toolCallId: string;
+  startedAt: Millis;
+  endedAt?: Millis;
+  isError?: boolean;
+  /** Truncated single-line preview of the tool arguments (display only). */
+  argsPreview?: string;
+}
+
+/** M-A (presentation): display-only spawn metadata threaded into diag at enqueue time. */
+export interface RunDisplayMeta {
+  model?: { provider: string; id: string };
+  label?: string;
+  agentType?: string;
+}
+
 export interface UsageDelta {
   input: number;
   output: number;
@@ -143,7 +166,7 @@ export type DriverEvent =
   | { t: "turn_start" }
   | { t: "turn_end"; toolResults: number }
   | { t: "message_end"; usage?: UsageDelta }
-  | { t: "tool_start"; toolCallId: string; toolName: string }
+  | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
   | { t: "tool_end"; toolCallId: string; toolName: string; isError: boolean }
   | { t: "tool_update"; toolCallId: string }
   | { t: "retry_start"; attempt: number; maxAttempts: number; delayMs: Millis }
@@ -196,6 +219,14 @@ export interface RunDiagnostics {
    * stats by design (architecture §7.2 X9).
    */
   usage?: UsageDelta;
+  /** M-A: display-only spawn metadata (model/label/type), set once at enqueue. */
+  model?: { provider: string; id: string };
+  label?: string;
+  agentType?: string;
+  /** M-A: bounded ring of observed tool calls (cap: state-machine TOOL_HISTORY_CAP). */
+  toolHistory?: ToolCallRecord[];
+  /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */
+  toolCounts?: Record<string, number>;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;
@@ -252,7 +283,7 @@ export interface RunSnapshot {
 }
 
 export type RunInput =
-  | { kind: "enqueued"; at: Millis; budget: DeadlineBudget; deadlineCapAt?: Millis }
+  | { kind: "enqueued"; at: Millis; budget: DeadlineBudget; deadlineCapAt?: Millis; meta?: RunDisplayMeta }
   | { kind: "slot_acquired"; at: Millis }
   | { kind: "slot_denied"; at: Millis; reason: "queue_timeout" | "aborted" }
   | { kind: "phase_entered"; at: Millis; phase: RunPhase }

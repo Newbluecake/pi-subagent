@@ -13,6 +13,7 @@ import type {
   RunStatus,
   StampedInput,
   TimerId,
+  ToolCallRecord,
   UsageDelta,
 } from "./types.js";
 
@@ -36,6 +37,50 @@ function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undef
     cacheWrite: add(base.cacheWrite, delta.cacheWrite),
     costUsd: add(base.costUsd, delta.costUsd),
   };
+}
+
+/**
+ * M-A: bounded ring cap for RunDiagnostics.toolHistory. Big enough to show a
+ * meaningful trail in the UI, small enough that persist_snapshot stays cheap.
+ */
+export const TOOL_HISTORY_CAP = 30;
+
+/**
+ * M-A: fold a tool_start/tool_end driver event into the diag's tool trail.
+ * Runs for *every* observed tool event regardless of phase (parallel tool
+ * calls can start while the run is already in tool_exec, which the phase
+ * transition branches below deliberately treat as a no-op update).
+ */
+function toolTrailPatch(
+  diag: RunDiagnostics,
+  e: Extract<RunInput, { kind: "session_event" }>["event"],
+  at: number,
+): Partial<RunDiagnostics> {
+  if (e.t === "tool_start") {
+    const record: ToolCallRecord = {
+      name: e.toolName,
+      toolCallId: e.toolCallId,
+      startedAt: at,
+      ...(e.argsPreview === undefined ? {} : { argsPreview: e.argsPreview }),
+    };
+    const history = [...(diag.toolHistory ?? []), record].slice(-TOOL_HISTORY_CAP);
+    const counts = { ...(diag.toolCounts ?? {}) };
+    counts[e.toolName] = (counts[e.toolName] ?? 0) + 1;
+    return { toolHistory: history, toolCounts: counts };
+  }
+  if (e.t === "tool_end") {
+    const history = diag.toolHistory;
+    if (!history) return {};
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i]!.toolCallId === e.toolCallId && history[i]!.endedAt === undefined) {
+        const next = [...history];
+        next[i] = { ...next[i]!, endedAt: at, isError: e.isError };
+        return { toolHistory: next };
+      }
+    }
+    return {}; // record evicted by the ring cap — counts still hold the truth
+  }
+  return {};
 }
 
 export const RUN_PHASES: readonly RunPhase[] = [
@@ -336,7 +381,15 @@ export function reduce(
     const next: RunState = {
       ...state,
       deadlines: { enqueuedAt: input.at, deadlineAt, queueDeadlineAt },
-      diag: { ...state.diag, enqueuedAt: input.at, ...(deadlineAt === undefined ? {} : { deadlineAt }) },
+      diag: {
+        ...state.diag,
+        enqueuedAt: input.at,
+        ...(deadlineAt === undefined ? {} : { deadlineAt }),
+        // M-A: display-only spawn metadata, set exactly once here.
+        ...(input.meta?.model === undefined ? {} : { model: input.meta.model }),
+        ...(input.meta?.label === undefined ? {} : { label: input.meta.label }),
+        ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
+      },
       armedTimers,
     };
     return emit(next, effects);
@@ -436,6 +489,8 @@ export function reduce(
       // so the accumulator is updated regardless of which phase/branch handles this event
       // (including the abort_grace/reap early-return branch immediately below).
       ...(usage === undefined ? {} : { usage }),
+      // M-A: tool trail (toolHistory/toolCounts) — same threading rationale as usage.
+      ...toolTrailPatch(state.diag, e, input.at),
     };
     if (state.phase === "abort_grace" || state.phase === "reap") {
       const diag = {
