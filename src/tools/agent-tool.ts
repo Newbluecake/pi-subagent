@@ -27,7 +27,9 @@ export const AgentToolParams = Type.Object({
   description: Type.String({ description: "Short (3-5 word) description of the task, shown while it runs." }),
   prompt: Type.String({ description: "The task for the subagent to perform, described in detail." }),
   subagent_type: Type.String({
-    description: "The type of specialized subagent to use, matching a registered agent type name.",
+    description:
+      "The type of specialized subagent to use, matching a registered agent type name. " +
+      "Registered types are listed in the system prompt under 'Available subagent types' — pass one of those exact names; an unknown name is rejected with a config error.",
   }),
   model: Type.Optional(
     Type.String({

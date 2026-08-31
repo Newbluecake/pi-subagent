@@ -5,7 +5,7 @@ import type { SubagentExtensionPoints } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
-import { createAgentTypeRegistry } from "./config/agent-types.js";
+import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
 import { loadSettingsFromFile, type AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
@@ -89,6 +89,16 @@ export default function activate(pi: ExtensionAPI): void {
   pi.registerTool(createAgentTool({ spawn: forwardSpawn(holder) }));
   pi.registerTool(createResultTool({ query: forwardQuery(holder) }));
   pi.registerTool(createSteerTool({ query: forwardQuery(holder) }));
+  // Inject the registered agent types into the system prompt: the model has
+  // no other way to learn valid `subagent_type` values and otherwise burns
+  // turns on trial-and-error "unknown agent type" failures. `types` reloads
+  // on every session_start; list() is read at event time so .md edits are
+  // picked up on the next turn. Child sessions never see this hook — their
+  // activate() returns early on the HOST_KEY guard above.
+  pi.on("before_agent_start", (event) => {
+    const systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list());
+    return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
+  });
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
   // error message) unless settings.workflow.enabled — decided once here
   // rather than per-session, since `settings` itself is loaded once.

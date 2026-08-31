@@ -180,4 +180,37 @@ export function createAgentTypeRegistry(cwd = process.cwd(), home = homedir()): 
     },
   };
 }
+
+/**
+ * Render the registered agent types as a system-prompt section. Injected via
+ * pi's before_agent_start hook (index.ts): the model has no other way to
+ * learn valid `subagent_type` values and otherwise burns turns on
+ * trial-and-error "unknown agent type" failures. Descriptions are flattened
+ * to one line and clipped so a verbose .md description cannot blow up the
+ * prompt. Returns "" when no types are registered (nothing to inject).
+ */
+export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): string {
+  if (types.length === 0) return "";
+  const lines = types.map((t) => {
+    const desc = t.description.replace(/\s+/g, " ").trim();
+    const clipped = desc.length > 200 ? `${desc.slice(0, 197)}...` : desc;
+    return `- ${t.name}: ${clipped}`;
+  });
+  return [
+    "## Available subagent types (pi-subagent)",
+    "When calling the Agent tool, pass one of these exact names as `subagent_type`:",
+    ...lines,
+  ].join("\n");
+}
+
+/**
+ * before_agent_start body (kept here so index.ts stays assembly-only, D7/I7):
+ * append the type section to pi's assembled system prompt. Returns the input
+ * unchanged when there is nothing to inject, so the caller can detect "no
+ * change" by identity and skip pi's systemPrompt-override path entirely.
+ */
+export function appendAgentTypesToSystemPrompt(systemPrompt: string, types: readonly AgentTypeConfig[]): string {
+  const section = formatAgentTypesForPrompt(types);
+  return section ? `${systemPrompt}\n\n${section}` : systemPrompt;
+}
 export { parseFile as parseAgentType };

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentTypeRegistry } from "../../src/config/agent-types.js";
+import { createAgentTypeRegistry, formatAgentTypesForPrompt } from "../../src/config/agent-types.js";
 import { DEFAULT_SETTINGS, DEFAULT_WORKFLOW_BUDGET, loadSettings, mergeBudget } from "../../src/config/settings.js";
 
 describe("agent config", () => {
@@ -152,5 +152,34 @@ describe("configHashOf sensitivity (X4 replay safety)", () => {
     expect(r3.configHashOf("worker")).not.toBe(hashA);
 
     expect(r3.configHashOf("nonexistent")).toBeUndefined();
+  });
+});
+
+describe("formatAgentTypesForPrompt (system-prompt injection)", () => {
+  const type = (name: string, description: string) =>
+    ({ name, description, systemPrompt: "x", promptMode: "append" }) as const;
+
+  it("renders one '- name: description' line per type under a fixed header", () => {
+    const out = formatAgentTypesForPrompt([
+      type("general-purpose", "Autonomous general-purpose agent."),
+      type("Explore", "Fast read-only search agent."),
+    ]);
+    expect(out).toContain("## Available subagent types (pi-subagent)");
+    expect(out).toContain("pass one of these exact names as `subagent_type`");
+    expect(out).toContain("- general-purpose: Autonomous general-purpose agent.");
+    expect(out).toContain("- Explore: Fast read-only search agent.");
+  });
+
+  it("flattens multi-line descriptions and clips pathological lengths", () => {
+    const out = formatAgentTypesForPrompt([type("verbose", `line one\nline two\t ${"x".repeat(300)}`)]);
+    const lines = out.split("\n");
+    const row = lines.find((l) => l.startsWith("- verbose:"))!;
+    expect(row).toContain("line one line two"); // whitespace collapsed
+    expect(row!.length).toBeLessThan(230); // "- verbose: " + ≤200 chars
+    expect(row).toMatch(/\.\.\.$/);
+  });
+
+  it("returns an empty string when no types are registered (nothing to inject)", () => {
+    expect(formatAgentTypesForPrompt([])).toBe("");
   });
 });
