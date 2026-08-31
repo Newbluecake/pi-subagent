@@ -39,7 +39,10 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
         const text = snapshot.outcome
           ? formatOutcome(snapshot.outcome)
           : `Run ${params.run_id} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
-        return { content: [{ type: "text" as const, text }], details: { status: snapshot.status } };
+        return {
+          content: [{ type: "text" as const, text }],
+          details: { status: snapshot.status, usage: snapshot.diag.usage },
+        };
       }
       const waited = await deps.query.wait(params.run_id, {
         ...(params.wait_ms === undefined ? {} : { waitMs: params.wait_ms }),
@@ -56,7 +59,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
       }
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
-        details: { status: waited.outcome.status },
+        details: { status: waited.outcome.status, usage: waited.outcome.usage },
       };
     },
   } satisfies ToolDefinition<typeof ResultToolParams>;
@@ -67,8 +70,12 @@ function formatOutcome(outcome: {
   text?: string;
   error?: { message: string };
   timeoutReason?: string;
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
 }): string {
-  if (outcome.status === "completed") return outcome.text ?? "(subagent completed with no text output)";
+  const usage = outcome.usage
+    ? `\n\n(usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
+    : "";
+  if (outcome.status === "completed") return (outcome.text ?? "(subagent completed with no text output)") + usage;
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
-  return `Subagent run ${outcome.status}: ${reason}`;
+  return `Subagent run ${outcome.status}: ${reason}${usage}`;
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { createNotifier } from "../../src/delivery/notifier.js";
 import type { PersistedDelivery, OutboxStore } from "../../src/delivery/notifier.js";
@@ -67,5 +67,46 @@ describe("Notifier", () => {
     const report = notifier.reconcile();
     expect(report.suppressed).toContain("old:1:completed");
     expect(sent).toContain(payload.key);
+  });
+
+  it("H4: invokes onDelivery with the full payload for every state transition (delivered/consumed/abandoned)", () => {
+    const clock = new FakeClock(100);
+    const store = new FakeOutbox();
+    const seen: Array<{ key: string; state: string }> = [];
+    const notifier = createNotifier({
+      store,
+      clock,
+      reconcileTtlMs: 10,
+      sender: () => undefined,
+      onDelivery: (p, state) => seen.push({ key: p.key, state }),
+    });
+    notifier.enqueue(payload);
+    expect(seen).toContainEqual({ key: payload.key, state: "delivered" });
+    notifier.consume(payload.key);
+    expect(seen).toContainEqual({ key: payload.key, state: "consumed" });
+    const stale = { ...payload, key: "old:1:completed", createdAt: 0, state: "dropped" as const };
+    store.put(stale);
+    notifier.reconcile();
+    expect(seen).toContainEqual({ key: "old:1:completed", state: "abandoned" });
+  });
+
+  it("H4: a throwing onDelivery is isolated and does not break the notifier's own delivery/retry flow", () => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    const sent: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const notifier = createNotifier({
+      store,
+      clock,
+      sender: (p) => sent.push(p.key),
+      onDelivery: () => {
+        throw new Error("webhook down");
+      },
+    });
+    expect(() => notifier.enqueue(payload)).not.toThrow();
+    expect(sent).toContain(payload.key);
+    expect(notifier.stats.delivered).toBe(1);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

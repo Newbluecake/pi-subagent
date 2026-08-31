@@ -7,6 +7,7 @@ import type {
   EffectEnvelope,
   ErrorInfo,
   LifecycleEvent,
+  Millis,
   RunEffect,
   RunInput,
   RunOutcome,
@@ -158,6 +159,18 @@ export interface RunnerDeps {
   effects: EffectInterpreter;
   emit: (e: LifecycleEvent) => void;
   deliver: (p: DeliveryPayload) => void;
+  /**
+   * H3 (architecture §7.1): bounded, post-terminal, pre-physical-reclaim hook
+   * (worktree commit/gate is the intended M2 consumer). Wired here — not at
+   * the L3 service seam — because reap() is fire-and-forget from the
+   * runner's own `finally` block; by the time `Runner.run()`'s promise
+   * resolves back up at L3, physical reclaim may already be in flight or
+   * finished. This is the only point in the call graph that is reliably
+   * "after logical settle, before dispose".
+   */
+  beforeReap?: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => Promise<void> | void;
+  /** Diagnostics-only sink for extension hook failures/timeouts (H3); never affects run outcome or settle timing beyond reapMs bound. */
+  onExtensionError?: (hook: "beforeReap", runId: string, error: string) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -318,7 +331,24 @@ export class RuntimeRunner implements Runner {
         phase: state.phase,
         budget,
       };
-      void this.d.reaper.reap(reap).catch(() => undefined);
+      const beforeReap = this.d.beforeReap;
+      const outcomeForHook = state.outcome;
+      const runReap = async () => {
+        if (beforeReap && outcomeForHook) {
+          try {
+            await this.withTimeout(
+              Promise.resolve().then(() =>
+                beforeReap(outcomeForHook, { cwd: req.cwd ?? "", deadlineMs: budget.reapMs }),
+              ),
+              budget.reapMs,
+            );
+          } catch (e) {
+            this.d.onExtensionError?.("beforeReap", req.runId, e instanceof Error ? e.message : String(e));
+          }
+        }
+        return this.d.reaper.reap(reap);
+      };
+      void runReap().catch(() => undefined);
       const dEntry = this.dispatchers.get(req.runId);
       if (dEntry && dEntry.gen === gen) this.dispatchers.delete(req.runId);
       const cEntry = this.activeCancels.get(req.runId);
@@ -326,6 +356,31 @@ export class RuntimeRunner implements Runner {
       const hEntry = this.activeHandles.get(req.runId);
       if (hEntry && hEntry.gen === gen) this.activeHandles.delete(req.runId);
     }
+  }
+  /** Bounded generic await, no cancel signal (H3 beforeReap only needs a timeout, not abort-linkage). */
+  private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const timer = this.d.clock.setTimer(Math.max(0, ms), () => {
+        if (done) return;
+        done = true;
+        reject(new Error(`timed out after ${ms}ms`));
+      });
+      p.then(
+        (v) => {
+          if (done) return;
+          done = true;
+          this.d.clock.clearTimer(timer);
+          resolve(v);
+        },
+        (e) => {
+          if (done) return;
+          done = true;
+          this.d.clock.clearTimer(timer);
+          reject(e instanceof Error ? e : new Error(String(e)));
+        },
+      );
+    });
   }
   private async guard<T>(
     p: Promise<T>,

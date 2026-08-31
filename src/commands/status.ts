@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import type { UsageDelta } from "../core/types.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
@@ -25,6 +26,30 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
   };
 }
 
+/**
+ * X9: render a lifetime usage accumulator (architecture §7.2). Costs are
+ * formatted to 4 decimal places since subagent runs are typically cheap
+ * (fractions of a cent) and truncating to 2 would print "$0.00" for most.
+ */
+function formatUsage(u: UsageDelta | undefined): string {
+  if (!u) return "";
+  return ` usage=in:${u.input} out:${u.output} cache_r:${u.cacheRead} cache_w:${u.cacheWrite} cost:$${u.costUsd.toFixed(4)}`;
+}
+function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {
+  const present = items.filter((u): u is UsageDelta => u !== undefined);
+  if (!present.length) return undefined;
+  return present.reduce(
+    (acc, u) => ({
+      input: acc.input + u.input,
+      output: acc.output + u.output,
+      cacheRead: acc.cacheRead + u.cacheRead,
+      cacheWrite: acc.cacheWrite + u.cacheWrite,
+      costUsd: acc.costUsd + u.costUsd,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
+  );
+}
+
 export function renderStatus(deps: StatusCommandDeps): string {
   const runs = deps.query.list();
   const active = runs.filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
@@ -37,8 +62,12 @@ export function renderStatus(deps: StatusCommandDeps): string {
     const escalation = s.diag.escalation.length
       ? ` escalation=[${s.diag.escalation.map((e) => `${e.level}:${e.ok ? "ok" : "fail"}`).join(",")}]`
       : "";
-    lines.push(`  ${s.runId} status=${s.status} phase=${s.phase}${currentTool}${lastEvent}${escalation}`);
+    lines.push(
+      `  ${s.runId} status=${s.status} phase=${s.phase}${currentTool}${lastEvent}${escalation}${formatUsage(s.diag.usage)}`,
+    );
   }
+  const totalUsage = sumUsage(runs.map((s) => s.diag.usage));
+  if (totalUsage) lines.push(`Usage (all runs):${formatUsage(totalUsage)}`);
   const orphans = deps.orphans;
   lines.push(
     `Orphans: ${orphans.totalCount} total (retained ${orphans.recent.length}, late-recovered ${orphans.lateRecoveredCount})`,

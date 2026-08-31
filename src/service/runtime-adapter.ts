@@ -1,7 +1,15 @@
 import type { Clock } from "../core/clock.js";
 import type { SnapshotStore } from "../core/store.js";
-import type { RunEffect } from "../core/types.js";
+import type {
+  ErrorInfo,
+  RunDiagnostics,
+  RunEffect,
+  RunOutcome,
+  SessionSpec,
+  SubagentExtensionPoints,
+} from "../core/types.js";
 import type { Notifier } from "../delivery/notifier.js";
+import { mergeExtensionPoints } from "../extensions/registry.js";
 import {
   BasicEffectInterpreter,
   RuntimeRunner,
@@ -24,6 +32,75 @@ export interface RuntimeAdapterDeps {
   notifier: Notifier;
   /** Global lifecycle sink (e.g. forwarded to pi.events); per-run callbacks are additionally invoked. */
   onLifecycle?: LifecycleSink;
+  /** M2 Wave 1: the four documented extension hooks (architecture §7.1), pre-merged or raw — mergeExtensionPoints() is idempotent over a single already-merged entry. */
+  extensions?: readonly SubagentExtensionPoints[];
+}
+
+/**
+ * Bounded await for H2 (resolveSessionSpec): distinct from RuntimeRunner's
+ * internal `guard()` (which races an AbortSignal too) because this hook has
+ * no cancel-linkage requirement in the architecture, only a startupMs-scale
+ * timeout ("调用方施加 startupMs 超时") — and because a thrown/timed-out hook
+ * must surface its *real* message (used for G4 diagnosability), which
+ * guard()'s generic "cancelled" reason would otherwise erase.
+ */
+function withStartupTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  clock: Clock,
+): Promise<{ ok: true; value: T } | { ok: false; error: ErrorInfo }> {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = clock.setTimer(Math.max(0, ms), () => {
+      if (done) return;
+      done = true;
+      resolve({
+        ok: false,
+        error: { kind: "config", message: `resolveSessionSpec timed out after ${ms}ms`, retryable: false },
+      });
+    });
+    p.then(
+      (value) => {
+        if (done) return;
+        done = true;
+        clock.clearTimer(timer);
+        resolve({ ok: true, value });
+      },
+      (err) => {
+        if (done) return;
+        done = true;
+        clock.clearTimer(timer);
+        resolve({
+          ok: false,
+          error: { kind: "config", message: err instanceof Error ? err.message : String(err), retryable: false },
+        });
+      },
+    );
+  });
+}
+
+/**
+ * H2 failure path ("钩子抛错/超时 → run failed(config)，不得静默继续"): the hook
+ * runs before any slot is acquired or session created, so there is no
+ * RuntimeRunner state to finish through — build the terminal RunOutcome
+ * directly instead of faking a state-machine run.
+ */
+function failedConfigOutcome(runId: string, error: ErrorInfo, now: number): RunOutcome {
+  const diag: RunDiagnostics = {
+    createdAt: now,
+    phase: "resolve_config",
+    phaseEnteredAt: now,
+    pendingTools: 0,
+    turns: 0,
+    escalation: [],
+    orphaned: false,
+    generation: 1,
+    degraded: [],
+    staleInputs: 0,
+    unkillable: [],
+    error,
+  };
+  return { runId, status: "failed", error, turns: 0, durationMs: 0, diag };
 }
 
 /**
@@ -52,6 +129,7 @@ function buildPrompt(spec: RunnerSpec): string {
  * makes `outcome.persistFailed` observable (G5a).
  */
 export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
+  const merged = mergeExtensionPoints(deps.extensions ?? []);
   const perRun = new Map<string, RunnerCallbacks>();
   let runtime!: RuntimeRunner;
   const effects = new BasicEffectInterpreter(
@@ -69,6 +147,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         if (e.kind !== "emit_lifecycle") return;
         perRun.get(e.event.runId)?.onLifecycle?.(e.event);
         deps.onLifecycle?.(e.event);
+        merged.onLifecycle?.(e.event); // H1: run lifecycle bypass observer
       },
     },
     (runId, generation, kind, err) => runtime.notifyEffectFailed(runId, generation, kind as RunEffect["kind"], err),
@@ -85,22 +164,42 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     // through `effects` above); kept as inert no-ops to satisfy RunnerDeps.
     emit: () => undefined,
     deliver: () => undefined,
+    ...(merged.beforeReap ? { beforeReap: merged.beforeReap } : {}), // H3
+    onExtensionError: (hook, runId, error) =>
+      console.warn(`[pi-subagent] extension hook ${hook} failed for run ${runId} (ignored): ${error}`),
   };
   runtime = new RuntimeRunner(runnerDeps);
   return {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
-      const req: ResolvedSpawnRequest = {
-        runId: spec.runId,
-        prompt: buildPrompt(spec),
-        ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
-        ...(spec.model === undefined ? {} : { model: spec.model }),
-        ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
-        ...(spec.type.thinkingLevel === undefined ? {} : { thinkingLevel: spec.type.thinkingLevel }),
-        ...(spec.request.signal === undefined ? {} : { signal: spec.request.signal }),
-        ...(spec.request.slotless === undefined ? {} : { slotless: spec.request.slotless }),
-      };
       try {
+        let sessionSpec: SessionSpec = {
+          ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
+          ...(spec.model === undefined ? {} : { model: spec.model }),
+          ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
+          ...(spec.type.thinkingLevel === undefined ? {} : { thinkingLevel: spec.type.thinkingLevel }),
+        };
+        // H2: resolveSessionSpec runs before any slot/session resource is
+        // acquired and is bounded by startupMs; a throw or timeout fails the
+        // run outright ("failed(config)", not a silent fallback to the
+        // unmodified spec).
+        if (merged.resolveSessionSpec) {
+          const hook = merged.resolveSessionSpec;
+          const resolved = await withStartupTimeout(
+            Promise.resolve().then(() => hook(sessionSpec, spec.request)),
+            spec.budget.startupMs,
+            deps.clock,
+          );
+          if (!resolved.ok) return failedConfigOutcome(spec.runId, resolved.error, deps.clock.now());
+          sessionSpec = resolved.value;
+        }
+        const req: ResolvedSpawnRequest = {
+          runId: spec.runId,
+          ...sessionSpec,
+          prompt: buildPrompt(spec),
+          ...(spec.request.signal === undefined ? {} : { signal: spec.request.signal }),
+          ...(spec.request.slotless === undefined ? {} : { slotless: spec.request.slotless }),
+        };
         return await runtime.run(req, spec.budget);
       } finally {
         perRun.delete(spec.runId);

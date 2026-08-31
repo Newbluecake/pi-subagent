@@ -13,7 +13,27 @@ import type {
   RunStatus,
   StampedInput,
   TimerId,
+  UsageDelta,
 } from "./types.js";
+
+/**
+ * X9: sum a message_end usage delta into the run's lifetime accumulator.
+ * Every message_end event carries the usage of *that* message only (not a
+ * running session total), so plain summation is correct across compaction
+ * (pi's own session-level stats reset post-compaction; this accumulator
+ * never reads them and is therefore unaffected — architecture §7.2 X9).
+ */
+function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undefined): UsageDelta | undefined {
+  if (!delta) return prev;
+  const base = prev ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+  return {
+    input: base.input + delta.input,
+    output: base.output + delta.output,
+    cacheRead: base.cacheRead + delta.cacheRead,
+    cacheWrite: base.cacheWrite + delta.cacheWrite,
+    costUsd: base.costUsd + delta.costUsd,
+  };
+}
 
 export const RUN_PHASES: readonly RunPhase[] = [
   "queue_wait",
@@ -164,6 +184,7 @@ function finish(
     runId: state.runId,
     status: status as RunOutcome["status"],
     ...(d.text === undefined ? {} : { text: d.text }),
+    ...(d.usage === undefined ? {} : { usage: d.usage }),
     turns: d.turns,
     durationMs: Math.max(0, at - state.deadlines.enqueuedAt),
     ...(d.timeoutReason ? { timeoutReason: d.timeoutReason } : {}),
@@ -233,6 +254,24 @@ function terminalUpdate(state: RunState, input: RunInput): { state: RunState; ef
       if (state.outcome)
         return {
           state: { ...state, diag: d, outcome: { ...state.outcome, text: d.text, diag: d } },
+          effects: [],
+        };
+    }
+    // X9: usage must keep accumulating even after the run has settled (a
+    // trailing message_end can still arrive while abort/reap teardown is in
+    // flight) so outcome.usage reflects the true lifetime total, not a
+    // snapshot frozen at the moment `finish()` ran.
+    if (input.event.t === "message_end") {
+      const nextUsage = accumulateUsage(d.usage, input.event.usage);
+      if (nextUsage === undefined) delete d.usage;
+      else d.usage = nextUsage;
+      if (state.outcome)
+        return {
+          state: {
+            ...state,
+            diag: d,
+            outcome: { ...state.outcome, ...(d.usage === undefined ? {} : { usage: d.usage }), diag: d },
+          },
           effects: [],
         };
     }
@@ -359,7 +398,15 @@ export function reduce(
   }
   if (input.kind === "session_event") {
     const e = input.event;
-    const base: Partial<RunDiagnostics> = { lastEventAt: input.at, lastEventType: e.t };
+    const usage = e.t === "message_end" ? accumulateUsage(state.diag.usage, e.usage) : undefined;
+    const base: Partial<RunDiagnostics> = {
+      lastEventAt: input.at,
+      lastEventType: e.t,
+      // X9: threaded through every downstream branch below via `{...state.diag, ...base}`
+      // so the accumulator is updated regardless of which phase/branch handles this event
+      // (including the abort_grace/reap early-return branch immediately below).
+      ...(usage === undefined ? {} : { usage }),
+    };
     if (state.phase === "abort_grace" || state.phase === "reap") {
       const diag = {
         ...state.diag,

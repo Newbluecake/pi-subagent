@@ -136,6 +136,15 @@ export interface RunDiagnostics {
   turns: number;
   retry?: { attempt: number; maxAttempts: number; delayMs: Millis; startedAt: Millis };
   compacting?: { reason: string; startedAt: Millis };
+  /**
+   * X9: lifetime accumulator, summed across every `message_end` event seen
+   * for this run (including ones observed after the run reached a terminal
+   * status, and across compaction — each message_end usage delta is summed
+   * exactly once, so it is unaffected by the session's own stats resetting
+   * post-compaction). Not derived from SessionHandle.getUsage()/session
+   * stats by design (architecture §7.2 X9).
+   */
+  usage?: UsageDelta;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;

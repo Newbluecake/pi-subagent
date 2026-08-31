@@ -1,12 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
+import type { SubagentExtensionPoints } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
 import { loadSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { mergeExtensionPoints } from "./extensions/registry.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
@@ -28,6 +30,14 @@ interface Stack {
 }
 
 /**
+ * M2 Wave 1 (architecture §7.1): the single merge point for the four
+ * documented extension hooks. Empty by default; future milestones (X1
+ * worktree, X10 schema tools, etc.) push their SubagentExtensionPoints here
+ * instead of inventing new mount points (I7: index.ts stays assembly-only).
+ */
+const extensionPoints: SubagentExtensionPoints[] = [];
+
+/**
  * M1 assembly. Only wiring lives here (D7 / I7): register the three tools
  * and /agent status once, then (re)build the L2-L3 stack on every
  * session_start (ctx.sessionManager, needed for the G5a/G5b append-entry
@@ -43,6 +53,7 @@ export default function activate(pi: ExtensionAPI): void {
   const holder: { current?: Stack } = {};
 
   const buildStack = (ctx: ExtensionContext): Stack => {
+    const merged = mergeExtensionPoints(extensionPoints);
     // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
     // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
     // stores + WARN instead of throwing inside the session_start handler.
@@ -76,6 +87,7 @@ export default function activate(pi: ExtensionAPI): void {
       reconcileTtlMs: settings.reconcileTtlMs,
       maxReconcileRounds: settings.maxReconcileRounds,
       maxBatch: settings.maxReconcileBatch,
+      ...(merged.onDelivery ? { onDelivery: merged.onDelivery } : {}), // H4
       sender: (payload) => {
         // G5b: sendMessage has no ack (arch. §2.5); failures stay inside
         // Notifier's own retry/backoff loop, never surfaced to run status.
@@ -95,6 +107,7 @@ export default function activate(pi: ExtensionAPI): void {
       watchdog,
       reaper,
       notifier,
+      extensions: [merged],
       onLifecycle: (event) =>
         pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
     });

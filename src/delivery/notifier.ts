@@ -34,6 +34,8 @@ export interface NotifierOptions {
   maxReconcileRounds?: number;
   maxBatch?: number;
   audit?: (entry: { key: DeliveryKey; state: DeliveryState; error?: string }) => void;
+  /** H4 (architecture §7.1): delivery bypass observer. Fired for every state transition (delivered/pending-retry/dropped/consumed/abandoned) with the full payload; must never throw into the notifier's own retry loop. */
+  onDelivery?: (p: DeliveryPayload, state: DeliveryState) => void;
 }
 export interface Notifier {
   enqueue(payload: DeliveryPayload): void;
@@ -66,6 +68,14 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const audit = (key: DeliveryKey, value: DeliveryState, error?: string) => {
     options.audit?.({ key, state: value, ...(error ? { error } : {}) });
   };
+  const notifyExt = (payload: DeliveryPayload, s: DeliveryState) => {
+    try {
+      options.onDelivery?.(payload, s);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[pi-subagent] extension hook onDelivery threw (ignored): ${message}`);
+    }
+  };
   const persist = (record: PersistedDelivery) => {
     state.set(record.key, record);
     options.store.put(record);
@@ -83,6 +93,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       state.set(record.key, next);
       options.store.update(record.key, { state: next.state, attempts: next.attempts, reconcileRound: round });
       audit(record.key, "delivered");
+      notifyExt(next, "delivered");
     } catch (error) {
       const attempts = (record.attempts ?? 0) + 1;
       const nextState: DeliveryState = attempts >= maxAttempts ? "dropped" : "pending";
@@ -91,6 +102,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       options.store.update(record.key, { state: nextState, attempts, reconcileRound: round });
       const message = error instanceof Error ? error.message : String(error);
       audit(record.key, nextState, message);
+      notifyExt(next, nextState);
       if (nextState === "pending")
         clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => attempt(next, round));
     }
@@ -108,6 +120,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       state.set(key, { ...record, state: "consumed" });
       options.store.update(key, { state: "consumed" });
       audit(key, "consumed");
+      notifyExt(record, "consumed");
       return true;
     },
     reconcile(persisted = options.store.list()) {
@@ -120,12 +133,14 @@ export function createNotifier(options: NotifierOptions): Notifier {
         if (now - p.createdAt > ttl) {
           options.store.update(p.key, { state: "abandoned" });
           audit(p.key, "abandoned", "reconcile ttl exceeded");
+          notifyExt(p, "abandoned");
           report.suppressed.push(p.key);
           return false;
         }
         if ((p.reconcileRound ?? 0) >= maxRounds) {
           options.store.update(p.key, { state: "abandoned" });
           audit(p.key, "abandoned", "reconcile rounds exceeded");
+          notifyExt(p, "abandoned");
           report.abandoned.push(p.key);
           return false;
         }
