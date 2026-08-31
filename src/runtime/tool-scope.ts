@@ -68,7 +68,12 @@ export function buildToolScopePolicy(opts: {
 }
 
 export function createToolScopeEnforcer(
-  deps: { onBlocked?: (names: readonly string[]) => void } = {},
+  deps: {
+    onBlocked?: (names: readonly string[]) => void;
+    /** H27: setActiveTools throwing must not escape into pi's event emitter;
+     * record + WARN and let the next turn boundary retry. */
+    onError?: (error: unknown) => void;
+  } = {},
 ): ToolScopeEnforcer {
   const recompute = (h: ScopeSessionHandle, policy: ToolScopePolicy): ScopeDecision => {
     const current = h.getActiveTools(); // TS2: sole source of truth, never a locally cached idea of "what should be active"
@@ -82,7 +87,17 @@ export function createToolScopeEnforcer(
     // — never gets a redundant setActiveTools call.
     const changed = applied.length !== currentSorted.length || applied.some((n, i) => n !== currentSorted[i]);
     if (blockedNewcomers.length) deps.onBlocked?.(blockedNewcomers); // TS4: never silent
-    if (changed) h.setActiveTools(applied); // TS3: caller guarantees this only runs at bind/turn_end boundaries
+    if (changed) {
+      try {
+        h.setActiveTools(applied); // TS3: caller guarantees this only runs at bind/turn_end boundaries
+      } catch (error) {
+        // H27: a throwing setActiveTools (disposed handle, pi internal state)
+        // must not propagate into pi's session.subscribe emitter. The next
+        // turn boundary recomputes from getActiveTools() and retries.
+        deps.onError?.(error);
+        return { applied, blockedNewcomers, changed: false };
+      }
+    }
     return { applied, blockedNewcomers, changed };
   };
   return { onBind: recompute, onTurnBoundary: recompute };

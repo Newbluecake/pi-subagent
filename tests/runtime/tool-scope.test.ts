@@ -96,3 +96,39 @@ describe("runtime/tool-scope: createToolScopeEnforcer (X11 late-registration gua
     expect(decision.blockedNewcomers).toEqual([]);
   });
 });
+
+describe("runtime/tool-scope: H27 setActiveTools failure containment", () => {
+  it("a throwing setActiveTools is caught, reported via onError, and does not escape", () => {
+    const errors: unknown[] = [];
+    const handle: ScopeSessionHandle = {
+      getActiveTools: () => ["Read", "mcp_evil_tool"],
+      setActiveTools: () => {
+        throw new Error("session disposed");
+      },
+    };
+    const policy = buildToolScopePolicy({ tools: ["Read"] });
+    const enforcer = createToolScopeEnforcer({ onError: (e) => errors.push(e) });
+    // Must not throw into pi's event emitter.
+    const decision = enforcer.onTurnBoundary(handle, policy);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toBe("session disposed");
+    expect(decision.changed).toBe(false); // nothing was actually applied
+    // Next turn boundary retries from the live set (sole source of truth).
+    expect(() => enforcer.onTurnBoundary(handle, policy)).not.toThrow();
+    expect(errors).toHaveLength(2);
+  });
+
+  it("still reports blocked newcomers even when setActiveTools throws", () => {
+    const blocked: string[][] = [];
+    const handle: ScopeSessionHandle = {
+      getActiveTools: () => ["Read", "mcp_evil_tool"],
+      setActiveTools: () => {
+        throw new Error("boom");
+      },
+    };
+    const policy = buildToolScopePolicy({ tools: ["Read"] });
+    const enforcer = createToolScopeEnforcer({ onBlocked: (n) => blocked.push([...n]), onError: () => {} });
+    enforcer.onTurnBoundary(handle, policy);
+    expect(blocked).toEqual([["mcp_evil_tool"]]);
+  });
+});

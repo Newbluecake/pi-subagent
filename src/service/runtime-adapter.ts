@@ -293,9 +293,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             granted: grantedReserved,
           }),
           enforcer: createToolScopeEnforcer({
+            // TS4: never silent. Note: §7.5's literal "WARN + diag.degraded"
+            // is only half-met here — the enforcer is built before the run's
+            // dispatch channel exists, so blocked/failed enforcement lands in
+            // the log but not in diag.degraded (documented gap, P3).
             onBlocked: (names) =>
               console.warn(
                 `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
+              ),
+            onError: (error) =>
+              console.warn(
+                `[pi-subagent] tool scope: setActiveTools failed for run ${spec.runId} (retried at next turn boundary): ${error instanceof Error ? error.message : String(error)}`,
               ),
           }),
         };
