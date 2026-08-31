@@ -43,6 +43,30 @@ describe("M-A: display meta at enqueue", () => {
     expect(s.diag.label).toBeUndefined();
     expect(s.diag.agentType).toBeUndefined();
   });
+
+  it("session_created carries the actual session model — fills the default case and overrides spawn-time meta", () => {
+    // no spawn-time model → session_created fills it
+    let s = createInitialState("r", 1, 0);
+    s = apply(s, { kind: "enqueued", at: 0, budget });
+    s = apply(s, { kind: "slot_acquired", at: 1 });
+    s = apply(s, { kind: "phase_entered", at: 2, phase: "session_create" });
+    s = apply(s, { kind: "session_created", at: 3, sessionId: "s1", model: { provider: "pi", id: "default-model" } });
+    expect(s.diag.model).toEqual({ provider: "pi", id: "default-model" });
+    // spawn-time meta present → actual session model still wins (ground truth)
+    let t = createInitialState("r2", 1, 0);
+    t = apply(t, { kind: "enqueued", at: 0, budget, meta: { model: { provider: "cfg", id: "configured" } } });
+    t = apply(t, { kind: "slot_acquired", at: 1 });
+    t = apply(t, { kind: "phase_entered", at: 2, phase: "session_create" });
+    t = apply(t, { kind: "session_created", at: 3, sessionId: "s2", model: { provider: "pi", id: "actual" } });
+    expect(t.diag.model).toEqual({ provider: "pi", id: "actual" });
+    // session_created without model keeps the spawn-time value
+    let u = createInitialState("r3", 1, 0);
+    u = apply(u, { kind: "enqueued", at: 0, budget, meta: { model: { provider: "cfg", id: "configured" } } });
+    u = apply(u, { kind: "slot_acquired", at: 1 });
+    u = apply(u, { kind: "phase_entered", at: 2, phase: "session_create" });
+    u = apply(u, { kind: "session_created", at: 3, sessionId: "s3" });
+    expect(u.diag.model).toEqual({ provider: "cfg", id: "configured" });
+  });
 });
 
 describe("M-A: tool trail (toolHistory / toolCounts)", () => {

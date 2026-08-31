@@ -63,9 +63,12 @@ export interface FleetWidgetRenderOptions {
   color?: FleetColorize;
 }
 
-/** M-C: one run's tree-row detail: "重构用户模块 architect kimi-k3 tool_exec 8m32s bash×3 ▸edit $1.05". */
+/** M-C: one run's tree-row detail: "重构用户模块 #223b8f1e architect kimi-k3 tool_exec 8m32s bash×3 ▸edit $1.05".
+ *  The #shortRunId ties the row back to its Agent tool call / completion
+ *  notification (which reference the run id) — label alone is ambiguous when
+ *  the same description is reused. */
 function widgetRowDetail(row: FleetRow): string {
-  const parts = [row.label ?? row.shortRunId, row.type ?? "·"];
+  const parts = [row.label ? `${row.label} #${row.shortRunId}` : row.shortRunId, row.type ?? "·"];
   if (row.model) parts.push(row.model);
   parts.push(row.phase, formatDuration(row.elapsedMs));
   const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);

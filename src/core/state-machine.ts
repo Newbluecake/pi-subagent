@@ -450,6 +450,9 @@ export function reduce(
           ...state.diag,
           lastEventType: "session_created",
           ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }),
+          // M-B2: the live session's actual model overrides spawn-time display
+          // metadata (ground truth; also fills pi-default-model runs).
+          ...(input.model === undefined ? {} : { model: input.model }),
         },
       },
       effects: [],

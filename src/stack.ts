@@ -127,12 +127,14 @@ export function buildSessionStack(
       // M-D: append a one-line stats summary (model · turns · tools · cost ·
       // duration) from the terminal snapshot so the parent session sees the
       // execution profile at a glance.
-      const outcome = store.get(payload.runId)?.outcome;
+      const snapshot = store.get(payload.runId);
+      const outcome = snapshot?.outcome;
       const stats = outcome ? formatOutcomeSummary(outcome) : undefined;
+      const label = snapshot?.diag.label;
       pi.sendMessage({
         customType: "subagent:notification",
         content:
-          `Subagent run ${payload.runId} ${payload.status}` +
+          `Subagent run ${payload.runId}${label ? ` (${label})` : ""} ${payload.status}` +
           (stats ? ` — ${stats}` : "") +
           (payload.textPreview ? `: ${payload.textPreview.slice(0, 200)}` : ""),
         display: true,

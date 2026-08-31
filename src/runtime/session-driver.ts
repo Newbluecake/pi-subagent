@@ -22,6 +22,8 @@ export interface SessionHandle {
   getActiveTools(): string[];
   getLastAssistantText(): string | undefined;
   getTurnError?(): string | undefined;
+  /** M-B2: the session's *actual* model (ground truth — covers runs with no spawn-time override/type default). */
+  getModelRef?(): { provider: string; id: string } | undefined;
   getUsage(): RunOutcome["usage"];
 }
 export interface SessionDriver {
@@ -164,6 +166,13 @@ class PiSessionHandle implements SessionHandle {
   }
   getLastAssistantText() {
     return this.session.getLastAssistantText();
+  }
+  /** M-B2: read the actual model off the live session (post-create, so pi's
+   *  own default-model selection is reflected even when the spawn request
+   *  carried no override and the agent type declared no model). */
+  getModelRef(): { provider: string; id: string } | undefined {
+    const m = this.session.model as { provider?: unknown; id?: unknown } | undefined;
+    return typeof m?.provider === "string" && typeof m?.id === "string" ? { provider: m.provider, id: m.id } : undefined;
   }
   /** pi resolves prompt() even when the final turn died (stopReason
    *  "error", e.g. provider crash) — without this check a dead turn looks

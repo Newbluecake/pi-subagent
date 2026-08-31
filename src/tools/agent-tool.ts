@@ -196,6 +196,7 @@ export function createAgentTool(deps: {
       const title = theme.fg("toolTitle", theme.bold(`Agent: ${args?.description ?? "…"}`));
       const meta = [
         args?.subagent_type ? `type: ${args.subagent_type}` : undefined,
+        args?.model ? `model: ${args.model.split("/").pop()}` : undefined,
         args?.run_in_background ? "background" : undefined,
         args?.resume ? `resume: ${args.resume}` : undefined,
         args?.isolation ? `isolation: ${args.isolation}` : undefined,

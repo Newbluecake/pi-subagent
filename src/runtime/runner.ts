@@ -344,11 +344,15 @@ export class RuntimeRunner implements Runner {
       handle = created.value;
       this.activeHandles.set(req.runId, { gen, handle });
       createP = undefined;
+      // M-B2: the session's actual model — authoritative over spawn-time
+      // displayMeta (covers pi-default-model runs and resume).
+      const modelRef = handle.getModelRef?.();
       dispatch({
         kind: "session_created",
         at: this.d.clock.now(),
         sessionId: handle.sessionId,
         ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
+        ...(modelRef === undefined ? {} : { model: modelRef }),
       });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
