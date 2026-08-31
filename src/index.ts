@@ -56,10 +56,26 @@ export default function activate(pi: ExtensionAPI): void {
   // an empty stack — observed in the wild as "no active session yet" when a
   // subagent called SubagentWorkflow. The main-process instance is the host;
   // child instances stay inert (nested delegation uses X3's injected tool).
+  //
+  // The claim MUST be released on session_shutdown: pi's /reload clears the
+  // extension cache and calls activate() again in the *same process*
+  // (agent-session.ts reload() → emit session_shutdown(reason "reload") on the
+  // old runner → resourceLoader.reload() → re-import → activate). A claim that
+  // outlives its activation makes every post-reload instance inert — the whole
+  // extension (Agent tool, /agent, hooks) silently disappears until pi is
+  // restarted. Only the owning activation releases it, so a child session that
+  // shuts down cannot hand the host role away.
   const HOST_KEY = Symbol.for("pi-subagent:host");
   const g = globalThis as Record<symbol, unknown>;
   if (g[HOST_KEY]) return;
-  g[HOST_KEY] = { activatedAt: Date.now() };
+  const claim = { activatedAt: Date.now() };
+  g[HOST_KEY] = claim;
+  // Registered before the compat gate below so even the disabled-stub path
+  // releases its claim (otherwise a bad-compat activation would wedge every
+  // later reload into the inert branch).
+  pi.on("session_shutdown", () => {
+    if (g[HOST_KEY] === claim) delete g[HOST_KEY];
+  });
 
   const settings = loadSettingsFromFile();
   // Built FRESH per activate(): pi may re-run activate on the same cached
