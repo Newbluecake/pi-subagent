@@ -149,12 +149,14 @@ export function buildSessionStack(
           ? (outcome?.error?.message ?? outcome?.timeoutReason ?? snapshot?.diag.error?.message)
           : undefined;
       const tail = failReason ?? (payload.textPreview || undefined);
+      // Human-facing head: label + #shortId (matches the tree rows). The full
+      // runId stays available in `details` and in the original spawn tool
+      // result, so the model can still steer/query/resume by id.
+      const who = label ? `"${label}" (#${payload.runId.slice(0, 8)})` : `#${payload.runId.slice(0, 8)}`;
       pi.sendMessage({
         customType: "subagent:notification",
         content:
-          `Subagent run ${payload.runId}${label ? ` (${label})` : ""} ${payload.status}` +
-          (stats ? ` — ${stats}` : "") +
-          (tail ? `: ${tail.slice(0, 200)}` : ""),
+          `Subagent ${who} ${payload.status}` + (stats ? ` — ${stats}` : "") + (tail ? `: ${tail.slice(0, 200)}` : ""),
         display: true,
         details: payload,
       });
