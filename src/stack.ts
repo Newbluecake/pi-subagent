@@ -20,6 +20,10 @@ import { createQueryService, type QueryService } from "./service/query-service.j
 import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
+import { FleetWidgetController } from "./ui/fleet-widget.js";
+
+/** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack (index.ts rebuilds the stack on every session_start and never calls a stack dispose hook). */
+let previousFleetWidget: FleetWidgetController | undefined;
 
 export interface Stack {
   spawn: SpawnService;
@@ -41,7 +45,17 @@ export function buildSessionStack(
   types: AgentTypeRegistry,
   mergedExtensions: readonly SubagentExtensionPoints[],
 ): Stack {
-  const merged = mergeExtensionPoints(mergedExtensions);
+  // X7b: session rebuild — dispose the previous session's fleet widget
+  // (stop its tick + setWidget(key, undefined)) before the new one mounts.
+  previousFleetWidget?.dispose();
+  previousFleetWidget = undefined;
+
+  // The widget controller is created after QueryService exists (below), but
+  // its H1 onLifecycle must be part of the merged extension points *before*
+  // the runner is built — hence a late-bound ref (same pattern as spawnRef).
+  const widgetRef: { current?: FleetWidgetController } = {};
+  const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
+  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints]);
 
   // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
   // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
@@ -120,6 +134,19 @@ export function buildSessionStack(
   });
   spawnRef.current = spawn;
   const query = createQueryService({ registry: createLiveRunRegistry(spawn, store), runner, clock: systemClock });
+  // X7b: always-on fleet widget above the editor. The controller self-probes
+  // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
+  // modes; settings.fleetWidget=false skips it entirely.
+  if (settings.fleetWidget) {
+    const widget = new FleetWidgetController({
+      ui: ctx.ui,
+      query,
+      clock: systemClock,
+      idleBudgetMs: settings.budget.idleMs,
+    });
+    widgetRef.current = widget;
+    previousFleetWidget = widget;
+  }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   return { spawn, query, orphans: reaper.registry, notifier, mention, scheduler, rpc };

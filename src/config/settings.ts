@@ -64,6 +64,8 @@ export interface AgentSettings {
   worktree: { enabled: boolean; gitTimeoutMs: number };
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Exceeding this is rejected at spawn time as a config error, never silently truncated. */
   maxNestedDepth: number;
+  /** X7b: always-on fleet widget pinned above the editor while subagent runs are active. The `/agent fleet` full-screen panel is unaffected by this switch. Default true. */
+  fleetWidget: boolean;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
   workflow: WorkflowSettings;
 }
@@ -78,6 +80,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   rememberAgents: true,
   worktree: { enabled: false, gitTimeoutMs: 30_000 },
   maxNestedDepth: 3,
+  fleetWidget: true,
   workflow: {
     enabled: false,
     budget: {},
@@ -130,6 +133,7 @@ export function loadSettings(source: unknown): AgentSettings {
       typeof value.maxNestedDepth === "number" && value.maxNestedDepth >= 0
         ? Math.floor(value.maxNestedDepth)
         : DEFAULT_SETTINGS.maxNestedDepth,
+    fleetWidget: typeof value.fleetWidget === "boolean" ? value.fleetWidget : DEFAULT_SETTINGS.fleetWidget,
     worktree:
       value.worktree && typeof value.worktree === "object"
         ? {
