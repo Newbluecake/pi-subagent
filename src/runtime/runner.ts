@@ -253,7 +253,7 @@ export class RuntimeRunner implements Runner {
           queueWaitMs: budget.queueWaitMs,
           signal: cancel.signal,
         }),
-        budget.queueWaitMs,
+        remainingFor(budget.queueWaitMs, this.d.clock.now(), state.deadlines).ms,
         cancel,
         "queue",
       );
@@ -269,8 +269,13 @@ export class RuntimeRunner implements Runner {
       ticket = acq.value.ticket;
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
-      createP = this.d.driver.create(req);
-      const created = await this.guard(createP, budget.startupMs, cancel, "create");
+      createP = req.resumeFrom
+        ? this.d.driver.resume
+          ? this.d.driver.resume(req.resumeFrom, req)
+          : Promise.reject(new Error("session driver does not support resume"))
+        : this.d.driver.create(req);
+      const createBudget = remainingFor(budget.startupMs, this.d.clock.now(), state.deadlines);
+      const created = await this.guard(createP, createBudget.ms, cancel, "create");
       if (!created.ok) {
         this.d.driver.onLateArrival(createP, (h) => this.d.reaper.disposeLate(req.runId, gen, h));
         createP = undefined;
@@ -285,11 +290,17 @@ export class RuntimeRunner implements Runner {
       handle = created.value;
       this.activeHandles.set(req.runId, { gen, handle });
       createP = undefined;
-      dispatch({ kind: "session_created", at: this.d.clock.now(), sessionId: handle.sessionId });
+      dispatch({
+        kind: "session_created",
+        at: this.d.clock.now(),
+        sessionId: handle.sessionId,
+        ...(handle.sessionFile === undefined ? {} : { sessionFile: handle.sessionFile }),
+      });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
+      const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
       const bound = await this.guard(
         this.d.driver.bind(handle, (e) => dispatch({ kind: "session_event", at: this.d.clock.now(), event: e })),
-        budget.bindMs,
+        bindBudget.ms,
         cancel,
         "bind",
       );
@@ -303,7 +314,8 @@ export class RuntimeRunner implements Runner {
         return state.outcome!;
       }
       this.d.watchdog.arm(req.runId, gen);
-      const prompted = await this.guard(handle.prompt(req.prompt), budget.totalMs, cancel, "prompt");
+      const promptBudget = remainingFor(budget.totalMs, this.d.clock.now(), state.deadlines);
+      const prompted = await this.guard(handle.prompt(req.prompt), promptBudget.ms, cancel, "prompt");
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
       dispatch({
         kind: "prompt_settled",

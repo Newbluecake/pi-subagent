@@ -1,0 +1,113 @@
+import { describe, expect, it } from "vitest";
+import { createSpawnService } from "../../src/service/spawn-service.js";
+import { TombstoneStore } from "../../src/service/tombstone.js";
+import type { AgentTypeConfig, RunOutcome } from "../../src/core/types.js";
+import type { Runner, SlotPool } from "../../src/service/ports.js";
+
+const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
+const budget = { totalMs: 100 };
+function deps(runner: Runner, tombstones: TombstoneStore) {
+  const pool: SlotPool = { acquire: async (runId) => ({ ok: true, ticket: { runId, release() {} } }) };
+  return {
+    types: { get: () => type, list: () => [], reload: async () => ({ types: [type], errors: [] }) },
+    pool,
+    runner,
+    tombstones,
+    budget,
+  };
+}
+function outcome(runId: string): RunOutcome {
+  return {
+    runId,
+    status: "completed",
+    turns: 1,
+    durationMs: 1,
+    diag: {
+      createdAt: 0,
+      phase: "settled",
+      phaseEnteredAt: 1,
+      pendingTools: 0,
+      turns: 1,
+      escalation: [],
+      orphaned: false,
+      generation: 1,
+      degraded: [],
+      staleInputs: 0,
+      unkillable: [],
+      sessionFile: "/tmp/session.jsonl",
+    },
+  };
+}
+describe("X2 resume", () => {
+  it("resolves a completed run to its session file and passes it to the runner", async () => {
+    let seen: string | undefined;
+    const runner: Runner = {
+      run: async (spec) => {
+        seen = spec.request.resumeFrom;
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    const first = await service.spawn({ type: "worker", prompt: "first", label: "build" });
+    expect("runId" in first).toBe(true);
+    await service.waitAll({ waitMs: 10 });
+    const resumed = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: "build" });
+    expect("runId" in resumed).toBe(true);
+    await service.waitAll({ waitMs: 10 });
+    expect(seen).toBe("/tmp/session.jsonl");
+  });
+  it("rejects an unknown target and an in-flight target", async () => {
+    let release!: () => void;
+    const runner: Runner = {
+      run: async (spec) => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    const first = await service.spawn({ type: "worker", prompt: "first", label: "busy" });
+    expect(await service.spawn({ type: "worker", prompt: "x", resumeFrom: "missing" })).toMatchObject({
+      error: { message: expect.stringContaining("not found") },
+    });
+    release();
+    await service.waitAll({ waitMs: 10 });
+    expect(first).toHaveProperty("runId");
+  });
+  it("rejects two resumes of the same tombstone while the first is running", async () => {
+    let calls = 0;
+    let release!: () => void;
+    const runner: Runner = {
+      run: async (spec) => {
+        calls++;
+        if (spec.request.resumeFrom)
+          await new Promise<void>((r) => {
+            release = r;
+          });
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first", label: "once" });
+    const one = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "once" });
+    const two = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "once" });
+    expect(one).toHaveProperty("runId");
+    expect(two).toMatchObject({ error: { message: expect.stringContaining("already has a resume") } });
+    release();
+    await service.waitAll({ waitMs: 10 });
+    expect(calls).toBe(2);
+  });
+  it("expires tombstones", () => {
+    let now = 0;
+    const store = new TombstoneStore(10, () => now);
+    store.register({
+      ...outcome("r"),
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      updatedAt: 0,
+    });
+    now = 11;
+    expect(store.get("r")).toBeUndefined();
+  });
+});

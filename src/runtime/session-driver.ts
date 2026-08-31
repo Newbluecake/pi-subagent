@@ -1,4 +1,5 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { DriverEvent, KillableHandle, RunOutcome, SessionSpec } from "../core/types.js";
 
@@ -24,6 +25,8 @@ export interface SessionHandle {
 }
 export interface SessionDriver {
   create(spec: SessionSpec): Promise<SessionHandle>;
+  /** Optional X2 path; runners fall back to create only for fresh sessions. */
+  resume?(sessionFile: string, spec: SessionSpec): Promise<SessionHandle>;
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void): Promise<void>;
   onLateArrival(p: Promise<SessionHandle>, cb: (h: SessionHandle) => void): void;
 }
@@ -105,8 +108,20 @@ class PiSessionHandle implements SessionHandle {
 }
 
 export class PiSessionDriver implements SessionDriver {
+  constructor(private readonly rememberAgents = true) {}
   create(spec: SessionSpec) {
-    return createAgentSession(spec as Parameters<typeof createAgentSession>[0]).then(
+    const cwd = spec.cwd ?? process.cwd();
+    const persist = spec.persist ?? this.rememberAgents;
+    const sessionManager = persist ? SessionManager.create(cwd) : SessionManager.inMemory(cwd);
+    return createAgentSession({
+      ...spec,
+      sessionManager,
+      ...(persist ? {} : { persist: false }),
+    } as Parameters<typeof createAgentSession>[0]).then(({ session }) => new PiSessionHandle(session));
+  }
+  resume(sessionFile: string, spec: SessionSpec) {
+    const sessionManager = SessionManager.open(sessionFile, undefined, spec.cwd);
+    return createAgentSession({ ...spec, sessionManager } as Parameters<typeof createAgentSession>[0]).then(
       ({ session }) => new PiSessionHandle(session),
     );
   }

@@ -371,7 +371,15 @@ export function reduce(
     return { state: { ...state, diag: { ...state.diag, lastEventType: "session_created" } }, effects: [] };
   if (input.kind === "session_created" && startingPhase(state.phase))
     return {
-      state: { ...state, sessionId: input.sessionId, diag: { ...state.diag, lastEventType: "session_created" } },
+      state: {
+        ...state,
+        sessionId: input.sessionId,
+        diag: {
+          ...state.diag,
+          lastEventType: "session_created",
+          ...(input.sessionFile === undefined ? {} : { sessionFile: input.sessionFile }),
+        },
+      },
       effects: [],
     };
   if (input.kind === "startup_failed" && state.phase === input.phase) {

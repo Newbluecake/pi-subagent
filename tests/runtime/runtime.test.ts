@@ -118,6 +118,40 @@ describe("runner hang bounds", () => {
     expect(outcome.status).toBe("timed_out");
     expect(d.pool.stats.inUse).toBe(0);
   });
+  it("resumes through the same bounded create path and passes the session file", async () => {
+    const clock = new FakeClock();
+    let resumed = "";
+    const d = deps(clock, {
+      create: async () => {
+        throw new Error("fresh path must not run");
+      },
+      resume: async (file) => {
+        resumed = file;
+        return handle({ sessionFile: file, prompt: () => Promise.resolve() });
+      },
+      bind: async () => undefined,
+      onLateArrival() {},
+    });
+    const result = await new RuntimeRunner(d).run({ ...request, resumeFrom: "/tmp/previous.jsonl" }, budget);
+    expect(result.status).toBe("completed");
+    expect(resumed).toBe("/tmp/previous.jsonl");
+    expect(result.diag.sessionFile).toBe("/tmp/previous.jsonl");
+  });
+
+  it("times out a resumed prompt through the same total guard", async () => {
+    const clock = new FakeClock();
+    const d = deps(clock, {
+      create: async () => handle(),
+      resume: async () => handle({ prompt: () => never(), sessionFile: "/tmp/previous.jsonl" }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    });
+    const p = new RuntimeRunner(d).run({ ...request, resumeFrom: "/tmp/previous.jsonl" }, budget);
+    const result = await settle(p, clock, 31);
+    expect(result.status).toBe("timed_out");
+    expect(d.pool.stats.inUse).toBe(0);
+  });
+
   it("reaper returns when abort never resolves", async () => {
     const clock = new FakeClock();
     const reaper = new EscalatingReaper(clock);

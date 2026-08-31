@@ -9,9 +9,7 @@ import type { SpawnService } from "../service/spawn-service.js";
  * (description / prompt / subagent_type / model / run_in_background) so
  * existing agent .md files and calling conventions keep working; steering
  * and result retrieval are separate tools (steer_subagent /
- * get_subagent_result) rather than crammed into this one, and resume is not
- * implemented in M1 (SessionDriver has no resume path yet) — advertised
- * honestly in the description rather than silently accepted.
+ * get_subagent_result) rather than crammed into this one, and supports X2 resume by label or run id.
  */
 export const AgentToolParams = Type.Object({
   description: Type.String({ description: "Short (3-5 word) description of the task, shown while it runs." }),
@@ -22,6 +20,15 @@ export const AgentToolParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description: "Optional model override as 'provider/id'. Defaults to the agent type's configured model.",
+    }),
+  ),
+  resume: Type.Optional(
+    Type.String({ description: "Agent label or run_id of a completed subagent session to continue." }),
+  ),
+  isolation: Type.Optional(
+    Type.Literal("worktree", {
+      description:
+        "Run in an isolated git worktree; changes are committed to a pi-agent-<runId> branch afterwards. Requires worktree.enabled in settings.",
     }),
   ),
   run_in_background: Type.Optional(
@@ -51,8 +58,9 @@ export function createAgentTool(deps: {
       "Launch an autonomous subagent to handle a complex, multi-step task. The subagent runs in its own bounded session " +
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
       "(completed/failed/timed_out/aborted). Use get_subagent_result to check on or wait for a background run, and " +
-      "steer_subagent to send a follow-up instruction to a still-running one. Resuming a previous run is not supported.",
-    promptSnippet: "Agent(description, prompt, subagent_type, model?, run_in_background?) - spawn a bounded subagent",
+      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to a completed Agent label or run_id to continue its persisted session.",
+    promptSnippet:
+      "Agent(description, prompt, subagent_type, model?, resume?, run_in_background?) - spawn or resume a bounded subagent",
     parameters: AgentToolParams,
     async execute(_toolCallId, params, signal) {
       const modelOverride = parseModel(params.model);
@@ -62,6 +70,8 @@ export function createAgentTool(deps: {
         label: params.description,
         ...(modelOverride ? { modelOverride } : {}),
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
+        ...(params.resume ? { resumeFrom: params.resume } : {}),
+        ...(params.isolation ? { isolation: params.isolation } : {}),
         ...(signal ? { signal } : {}),
       };
       if (params.run_in_background) {

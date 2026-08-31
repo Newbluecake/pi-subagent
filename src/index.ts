@@ -6,9 +6,10 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
-import { loadSettings } from "./config/settings.js";
+import { loadSettings, type AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
+import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
@@ -37,6 +38,13 @@ interface Stack {
  */
 const extensionPoints: SubagentExtensionPoints[] = [];
 
+/** X1: worktree isolation (H2 rewrite cwd + H3 commit/remove). Default off;
+ *  enable via settings worktree.enabled. Throws (→ failed(config)) when
+ *  explicitly requested but unavailable — never silently falls back. */
+function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): void {
+  extensionPoints.push(createPiWorktreeExtension(pi, settings.worktree));
+}
+
 /**
  * M1 assembly. Only wiring lives here (D7 / I7): register the three tools
  * and /agent status once, then (re)build the L2-L3 stack on every
@@ -47,6 +55,7 @@ const extensionPoints: SubagentExtensionPoints[] = [];
  */
 export default function activate(pi: ExtensionAPI): void {
   const settings = loadSettings(undefined);
+  wireWorktree(pi, settings);
   const types = createAgentTypeRegistry();
   const caps = detectPiCapabilities(pi);
   const compat = assertCompatible(caps);
@@ -101,7 +110,7 @@ export default function activate(pi: ExtensionAPI): void {
     });
     const runner = createRuntimeRunnerAdapter({
       clock: systemClock,
-      driver: new PiSessionDriver(),
+      driver: new PiSessionDriver(settings.rememberAgents),
       pool,
       store,
       watchdog,
@@ -147,6 +156,7 @@ export default function activate(pi: ExtensionAPI): void {
       query: forwardQuery(holder),
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
+      fleet: { idleBudgetMs: settings.budget.idleMs, clock: systemClock },
     }),
   );
 

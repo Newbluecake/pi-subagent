@@ -2,9 +2,11 @@ import type { Clock } from "../core/clock.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
   ErrorInfo,
+  LifecycleEvent,
   RunDiagnostics,
   RunEffect,
   RunOutcome,
+  RunSnapshot,
   SessionSpec,
   SubagentExtensionPoints,
 } from "../core/types.js";
@@ -169,6 +171,35 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       console.warn(`[pi-subagent] extension hook ${hook} failed for run ${runId} (ignored): ${error}`),
   };
   runtime = new RuntimeRunner(runnerDeps);
+  /**
+   * M1 验收 Minor fix (X7 前置): the H2 failure path runs before
+   * RuntimeRunner exists for this run, so it used to bypass every
+   * observability channel — no terminal snapshot in the store (QueryService,
+   * /agent status and the fleet panel couldn't see the run at all) and no
+   * lifecycle event. Persist + emit here through the same channels the
+   * effect interpreter uses for state-machine-driven outcomes.
+   */
+  const settleConfigFailure = (runId: string, error: ErrorInfo): RunOutcome => {
+    const now = deps.clock.now();
+    const outcome = failedConfigOutcome(runId, error, now);
+    const snapshot: RunSnapshot = {
+      runId,
+      generation: outcome.diag.generation,
+      status: "failed",
+      phase: "settled", // terminal-snapshot convention (state-machine.ts finish): diag.phase keeps the real phase
+      deadlines: { enqueuedAt: outcome.diag.createdAt, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: outcome.diag,
+      outcome,
+      updatedAt: now,
+    };
+    deps.store.put(snapshot);
+    perRun.get(runId)?.onSnapshot?.(snapshot);
+    const event: LifecycleEvent = { runId, generation: outcome.diag.generation, status: "failed", at: now };
+    perRun.get(runId)?.onLifecycle?.(event);
+    deps.onLifecycle?.(event);
+    merged.onLifecycle?.(event); // H1: run lifecycle bypass observer
+    return outcome;
+  };
   return {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
@@ -190,7 +221,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             spec.budget.startupMs,
             deps.clock,
           );
-          if (!resolved.ok) return failedConfigOutcome(spec.runId, resolved.error, deps.clock.now());
+          if (!resolved.ok) return settleConfigFailure(spec.runId, resolved.error);
           sessionSpec = resolved.value;
         }
         const req: ResolvedSpawnRequest = {
@@ -199,6 +230,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           prompt: buildPrompt(spec),
           ...(spec.request.signal === undefined ? {} : { signal: spec.request.signal }),
           ...(spec.request.slotless === undefined ? {} : { slotless: spec.request.slotless }),
+          ...(spec.request.resumeFrom === undefined ? {} : { resumeFrom: spec.request.resumeFrom }),
         };
         return await runtime.run(req, spec.budget);
       } finally {

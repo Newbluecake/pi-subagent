@@ -3,11 +3,18 @@ import type { UsageDelta } from "../core/types.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
+import { createFleetCommand, type FleetCommandDeps } from "../ui/fleet-command.js";
 
 export interface StatusCommandDeps {
   query: QueryService;
   orphans: OrphanRegistry;
   notifier: Notifier;
+  /**
+   * X7: optional extras for the `/agent fleet` subcommand (idleBudgetMs from
+   * settings enables the half-idle yellow highlight). The panel works without
+   * it — only QueryService is mandatory.
+   */
+  fleet?: Partial<FleetCommandDeps>;
 }
 
 /**
@@ -19,8 +26,19 @@ export interface StatusCommandDeps {
  */
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
-    description: "Show diagnostics for running and recently finished subagents (phase, last event, orphans).",
-    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+    description:
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent fleet` opens the live panel.",
+    getArgumentCompletions: (argumentPrefix: string) =>
+      [
+        { value: "status", label: "status", description: "Text diagnostics (default)" },
+        { value: "fleet", label: "fleet", description: "Live fleet panel (X7)" },
+      ].filter((item) => item.value.startsWith(argumentPrefix.trim())),
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const sub = args.trim().split(/\s+/, 1)[0];
+      if (sub === "fleet") {
+        const command = createFleetCommand({ query: deps.query, ...deps.fleet });
+        return command.handler(args.trim().slice(sub.length).trim(), ctx);
+      }
       ctx.ui.notify(renderStatus(deps), "info");
     },
   };

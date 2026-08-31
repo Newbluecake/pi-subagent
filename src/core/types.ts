@@ -73,6 +73,8 @@ export interface AgentTypeConfig {
   sourcePath?: string;
 }
 export interface SpawnRequest {
+  /** Assigned run identifier, used by lifecycle extensions for resource names. */
+  runId?: RunId;
   type: AgentTypeName;
   prompt: string;
   label?: string;
@@ -81,7 +83,11 @@ export interface SpawnRequest {
   budgetOverride?: Partial<DeadlineBudget>;
   slotless?: boolean;
   parentRunId?: RunId;
+  /** Request an isolated git worktree for this run. */
+  isolation?: "worktree";
   signal?: AbortSignal;
+  /** Resume a terminal run by run id or directly by its persisted session file. */
+  resumeFrom?: string;
 }
 export interface UsageDelta {
   input: number;
@@ -160,6 +166,8 @@ export interface RunDiagnostics {
   deliveryKey?: string;
   lastWarn?: string;
   text?: string;
+  /** Persisted pi session used by X2 resume. */
+  sessionFile?: string;
 }
 export interface DiagSummary {
   phase: RunPhase;
@@ -203,7 +211,7 @@ export type RunInput =
   | { kind: "slot_acquired"; at: Millis }
   | { kind: "slot_denied"; at: Millis; reason: "queue_timeout" | "aborted" }
   | { kind: "phase_entered"; at: Millis; phase: RunPhase }
-  | { kind: "session_created"; at: Millis; sessionId: string }
+  | { kind: "session_created"; at: Millis; sessionId: string; sessionFile?: string }
   | {
       kind: "startup_failed";
       at: Millis;
@@ -275,6 +283,10 @@ export interface SessionSpec {
   excludeTools?: string[];
   noTools?: "all" | "builtin";
   prompt?: string;
+  /** Whether a fresh session must be persisted for later resume. */
+  persist?: boolean;
+  /** Existing session file to open for X2 resume. */
+  resumeFrom?: string;
 }
 
 /** A resource an injected tool holds that reaper can synchronously, idempotently kill (2.2.2). */

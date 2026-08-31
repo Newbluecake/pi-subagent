@@ -10,6 +10,8 @@ export interface AgentSettings {
   reconcileTtlMs: number;
   maxReconcileRounds: number;
   maxReconcileBatch: number;
+  rememberAgents: boolean;
+  worktree: { enabled: boolean; gitTimeoutMs: number };
 }
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
@@ -19,6 +21,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   reconcileTtlMs: 24 * 60 * 60 * 1_000,
   maxReconcileRounds: 3,
   maxReconcileBatch: 10,
+  rememberAgents: true,
+  worktree: { enabled: false, gitTimeoutMs: 30_000 },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   return { ...DEFAULT_BUDGET, ...overrides.reduce((out, value) => ({ ...out, ...value }), {}) };
@@ -59,5 +63,16 @@ export function loadSettings(source: unknown): AgentSettings {
       typeof value.maxReconcileBatch === "number"
         ? Math.max(1, value.maxReconcileBatch)
         : DEFAULT_SETTINGS.maxReconcileBatch,
+    rememberAgents: typeof value.rememberAgents === "boolean" ? value.rememberAgents : DEFAULT_SETTINGS.rememberAgents,
+    worktree:
+      value.worktree && typeof value.worktree === "object"
+        ? {
+            enabled: (value.worktree as Record<string, unknown>).enabled === true,
+            gitTimeoutMs:
+              typeof (value.worktree as Record<string, unknown>).gitTimeoutMs === "number"
+                ? ((value.worktree as Record<string, unknown>).gitTimeoutMs as number)
+                : DEFAULT_SETTINGS.worktree.gitTimeoutMs,
+          }
+        : { ...DEFAULT_SETTINGS.worktree },
   });
 }
