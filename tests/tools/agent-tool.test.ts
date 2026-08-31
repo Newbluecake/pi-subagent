@@ -101,3 +101,29 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     expect(port.seen?.schema).toEqual(schema);
   });
 });
+
+describe("tools/agent-tool: timeout_ms budget override", () => {
+  it("threads timeout_ms into budgetOverride.totalMs; omits it when absent", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await tool.execute(
+      "tc1",
+      { description: "d", prompt: "p", subagent_type: "worker", timeout_ms: 120_000 },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen?.budgetOverride).toEqual({ totalMs: 120_000 });
+
+    const port2 = fakePort();
+    const tool2 = createAgentTool({ spawn: port2 });
+    await tool2.execute(
+      "tc2",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port2.seen?.budgetOverride).toBeUndefined();
+  });
+});
