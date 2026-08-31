@@ -1,7 +1,7 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { DriverEvent, KillableHandle, RunOutcome, SessionSpec } from "../core/types.js";
+import type { DriverEvent, KillableHandle, RunOutcome, SessionSpec, UsageDelta } from "../core/types.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 export interface DisposeReport {
@@ -32,6 +32,29 @@ export interface SessionDriver {
   onLateArrival(p: Promise<SessionHandle>, cb: (h: SessionHandle) => void): void;
 }
 
+/**
+ * Map pi's Usage (pi-ai) to our UsageDelta at this anti-corruption boundary.
+ * pi carries cost as a nested `cost.total`; UsageDelta wants a flat `costUsd`.
+ * Passing the raw object through leaves `costUsd` undefined, and
+ * `base.costUsd + undefined` poisons the lifetime accumulator with NaN
+ * (observed in the wild: the fleet widget rendered "$NaN"). Every field is
+ * clamped to a finite number so a missing/NaN provider field can never
+ * corrupt the sum.
+ */
+function mapUsage(u: unknown): UsageDelta | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const r = u as Record<string, unknown>;
+  const cost = r["cost"] as { total?: unknown } | undefined;
+  return {
+    input: num(r["input"]),
+    output: num(r["output"]),
+    cacheRead: num(r["cacheRead"]),
+    cacheWrite: num(r["cacheWrite"]),
+    costUsd: num(cost?.total),
+  };
+}
+
 function errorInfo(error: unknown): NonNullable<RunOutcome["error"]> {
   const e = error instanceof Error ? error : new Error(String(error));
   return { kind: "internal", message: e.message, ...(e.stack ? { stack: e.stack } : {}), retryable: false };
@@ -41,7 +64,11 @@ function mapEvent(e: any): DriverEvent | undefined {
   const t = e.type;
   if (t === "turn_start") return { t: "turn_start" };
   if (t === "turn_end") return { t: "turn_end", toolResults: Array.isArray(e.toolResults) ? e.toolResults.length : 0 };
-  if (t === "message_end") return { t: "message_end", usage: e.message?.usage };
+  if (t === "message_end") {
+    // exactOptionalPropertyTypes: omit `usage` entirely when absent.
+    const usage = mapUsage(e.message?.usage);
+    return usage ? { t: "message_end", usage } : { t: "message_end" };
+  }
   if (t === "tool_execution_start")
     return { t: "tool_start", toolCallId: String(e.toolCallId), toolName: String(e.toolName) };
   if (t === "tool_execution_end")

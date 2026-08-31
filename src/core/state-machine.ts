@@ -26,12 +26,15 @@ import type {
 function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undefined): UsageDelta | undefined {
   if (!delta) return prev;
   const base = prev ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+  // Defense in depth (drivers already clamp at the boundary): a non-finite
+  // field must never poison the lifetime accumulator with NaN.
+  const add = (a: number, b: number) => (Number.isFinite(b) ? a + b : a);
   return {
-    input: base.input + delta.input,
-    output: base.output + delta.output,
-    cacheRead: base.cacheRead + delta.cacheRead,
-    cacheWrite: base.cacheWrite + delta.cacheWrite,
-    costUsd: base.costUsd + delta.costUsd,
+    input: add(base.input, delta.input),
+    output: add(base.output, delta.output),
+    cacheRead: add(base.cacheRead, delta.cacheRead),
+    cacheWrite: add(base.cacheWrite, delta.cacheWrite),
+    costUsd: add(base.costUsd, delta.costUsd),
   };
 }
 
