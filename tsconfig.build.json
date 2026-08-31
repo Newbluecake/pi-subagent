@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "removeComments": true
+  },
+  "exclude": ["src/workflow/orchestrator.testing.ts", "node_modules", "dist"]
+}
