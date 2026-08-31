@@ -42,6 +42,12 @@ export const AgentToolParams = Type.Object({
         "Run in an isolated git worktree; changes are committed to a pi-agent-<runId> branch afterwards. Requires worktree.enabled in settings.",
     }),
   ),
+  timeout_ms: Type.Optional(
+    Type.Number({
+      description:
+        "Optional total wall-clock budget for this run in milliseconds (overrides the default 30min). The run always settles within this budget.",
+    }),
+  ),
   run_in_background: Type.Optional(
     Type.Boolean({
       description:
@@ -114,6 +120,7 @@ export function createAgentTool(deps: {
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
         ...(deps.forceSlotless ? { slotless: true } : {}),
         ...(params.resume ? { resumeFrom: params.resume } : {}),
+        ...(typeof params.timeout_ms === "number" ? { budgetOverride: { totalMs: params.timeout_ms } } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
         ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
         ...(signal ? { signal } : {}),

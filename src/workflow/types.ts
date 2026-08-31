@@ -65,16 +65,98 @@ export interface CallState {
 /** §3.6: `cancel()`'s honest, non-lying report of what actually happened (CR6). */
 export type CallCancelEffect = "withheld" | "retrying" | "stopped" | "already_settled" | "unknown";
 
-/** §3.3 `WorkflowChildSummary`, M3.2 slice: no `taskKey`/`occurrence`/`source` yet (those need journal tracking, M3.5) beyond a fixed `"live"` (no replay exists yet). `phaseId` (M3.4) is the environment/override phase this call was submitted under, if any. */
+/**
+ * M3.5 (workflow design §6.2): content-addressed lookup key for a single
+ * `agent()` call's declared semantics (`taskKeyOf`, journal.ts) — a hex
+ * digest string, opaque outside journal.ts/replay.ts.
+ */
+export type TaskKey = string;
+
+/**
+ * M3.5 §6.2: the `chain` scope's causal-chain digest — `H(chainDigestBefore
+ * ‖ taskKey)`, recomputed identically whether advancing the *current* run's
+ * live chain or reconstructing a *historical* entry's chain key from its
+ * recorded `chainDigestBefore` (journal.ts's `nextChainDigest`). Same
+ * representation as `TaskKey` (opaque hex digest string) — kept as a
+ * distinct alias purely for readability at call sites.
+ */
+export type ChainKey = string;
+
+/** M3.5 §6.2: which lookup key `replay.ts` uses — see journal.ts/replay.ts module docs for the safety/hit-rate tradeoff (定理 4' vs content scope). */
+export type ReplayScope = "chain" | "content";
+
+/**
+ * M3.5 §6.2 `TaskSemantics` (design's `journal-key.ts`), *narrowed* to the
+ * fields the current `agent()` host-call surface (host.ts's `handleAgent`)
+ * actually carries — `model`/`effort`/`tools`/`cwd`/`schema`/`gate` are not
+ * threaded through `ChildSpawner.spawn()` yet (M3.2/M3.4 scope), so they are
+ * not part of the key. This is a documented simplification in the same
+ * spirit as every other M3.x narrowing (see host.ts's own doc comments) —
+ * a future milestone that wires those fields into `agent()` must add them
+ * here too (`KEY_POLICY`-equivalent completeness is enforced by
+ * `taskKeyOf`'s exhaustive object literal + `journal.test.ts`'s WP5-style
+ * property test, not by a compile-time mapped-type gate, given file scope
+ * for this milestone is host.ts/journal.ts/replay.ts only).
+ */
+export interface TaskSemantics {
+  readonly agentType: string;
+  /** E2 (§6.3): a content hash of the agent type's *resolved configuration*, not just its name — a `.md` definition edit must miss. Falls back to the bare `agentType` name when the configured `ChildSpawner` cannot report one (documented gap, see host.ts's `ChildSpawner.configHashOf`). */
+  readonly agentTypeConfigHash: string;
+  readonly prompt: string;
+  /** RP7: `isolation:"worktree"` tasks are never replayed by default. */
+  readonly isolation?: "worktree";
+  /** §6.2: the workflow run's own top-level `args` — included because a script's prompt-construction logic can depend on `args` even where the resulting prompt text does not visibly change (defense-in-depth beyond "prompt is already textually complete"). */
+  readonly workflowArgs?: unknown;
+}
+
+/**
+ * M3.5 §6.5/§6.6 (JournalEntry, v1). One line of `journal.jsonl` — everything
+ * `replay.ts` needs to decide RP3/RP4/RP6/RP7 and to reconstruct both the
+ * `content`-scope key (`key`) and the `chain`-scope key (`chainKeyOf(key,
+ * chainDigestBefore)`) without needing to know which scope was active when
+ * this entry was written (see journal.ts's module doc for why `scope` is
+ * still recorded and checked at load time regardless).
+ */
+export interface JournalEntry {
+  readonly v: 1;
+  /** M3.5: the scope this entry was written under (see journal.ts doc — a scope switch between runs invalidates history under the *other* scope rather than silently miscounting `occurrence`). */
+  readonly scope: ReplayScope;
+  readonly key: TaskKey;
+  readonly chainDigestBefore: string;
+  /** §6.2 step 4: assigned at *submission* time, never at settle/write time — the load-bearing property that makes completion order irrelevant to matching (定理 4'/推论 2.1). */
+  readonly occurrence: number;
+  readonly agentType: string;
+  /** RP3: only successful calls are ever journaled. */
+  readonly status: "completed";
+  readonly isolation?: "worktree";
+  /** The value the sandboxed script's `agent()` call resolved to on this run (`outcome.text ?? null`, mirroring host.ts's live settle path). */
+  readonly value: string | null;
+  readonly completedAt: Millis;
+  readonly durationMs: Millis;
+  /** RP4: sha256 hex over the canonical form of every other field above — recomputed and checked at load time; a mismatch (hand-edited `value` without updating `digest`, or vice versa) demotes the line to `corruptLines`, never to a returned-but-wrong replay hit. */
+  readonly digest: string;
+}
+
+/** M3.5 §9.4/§10.2 W26/W30: per-run replay counters surfaced on `WorkflowOutcome.replay`. */
+export interface WorkflowReplayStats {
+  readonly hits: number;
+  readonly misses: number;
+  /** An entry existed at the (key, occurrence) but an RP precondition (RP1/RP6/RP7/RP9/scope mismatch) vetoed using it — distinct from a plain miss (no entry at all). */
+  readonly skipped: number;
+  readonly corruptLines: number;
+}
+
 export interface WorkflowChildSummary {
   readonly callId: CallId;
   readonly runId?: RunId;
   readonly label?: string;
   readonly phaseId?: PhaseId;
-  readonly source: "live";
+  readonly source: "live" | "replay";
   readonly status: "completed" | "failed" | "timed_out" | "aborted" | "withheld" | "running" | "stopping";
   readonly durationMs: Millis;
   readonly textPreview?: string;
+  readonly taskKey?: TaskKey;
+  readonly occurrence?: number;
 }
 
 /** §2.3.1: the worker's terminated-after state machine, S1 (spawning/ready) through S8 (orphan probe). */
@@ -84,6 +166,8 @@ export interface ScriptMeta {
   readonly name: string;
   readonly description: string;
   readonly phases?: readonly { readonly title: string }[];
+  /** M3.5 RP9 (§6.4): `meta.deterministic === false` disables replay *lookups* for the whole run (journal writes are unaffected). Defaults to `true` when absent. */
+  readonly deterministic?: boolean;
 }
 
 /**
@@ -176,6 +260,8 @@ export interface WorkflowOutcome {
   readonly children: readonly WorkflowChildSummary[];
   /** M3.3 §7.2 WL4 / RC3-RC4: calls reconcile_children gave up on (bounded `reconcileMs`) or the A2 retry loop gave up on (bounded `cancelRetryWindowMs`, CR7). Always `[]` when nothing needed to be given up on. */
   readonly orphanChildren?: readonly OrphanChildSummary[];
+  /** M3.5 §3.3/§9.4: replay hit/miss/skip/corrupt counters for this run. Present only when a journal was configured (`OrchestratorRunRequest.journal` set) — `undefined` for journal-less runs (not `{hits:0,...}`, so callers can tell "replay wasn't in play" from "replay was in play and never fired"). */
+  readonly replay?: WorkflowReplayStats;
 }
 
 /** §2.3/§4.1 WT2/WT3/WT9/WT11: the M3.1 slice of `WorkflowBudget` actually consumed by the isolation shell. */
@@ -210,6 +296,10 @@ export interface WorkflowRunBudget {
   readonly reconcileMs?: Millis;
   /** M3.3 WT18/§3.6: the A2 bounded-retry cancel loop's give-up window. Optional, default `startupMs`(30_000)+5_000 (§4.1, matches host.ts's M3.2 fixed default). */
   readonly cancelRetryWindowMs?: Millis;
+  /** M3.5 RP6 (§6.4): how long a journaled entry stays eligible for replay. Optional, default 7 days. `0` = unlimited. */
+  readonly replayTtlMs?: Millis;
+  /** M3.5 JS4 (§6.6): bounds the pre-terminal best-effort journal flush. Optional, default 2_000. */
+  readonly journalFlushMs?: Millis;
   /**
    * M3.4 WT7 (§4.1/§7.2 WI8): a single phase's own budget. `0`/undefined =
    * unlimited (workflow's own WT8 `workflowTotalMs` still applies). On
@@ -280,6 +370,15 @@ export interface WorkerHostEvents {
    * machinery beyond what `host.ts`'s own WT7 timer does with it.
    */
   onPhase(cb: (title: string) => void): void;
+  /**
+   * M3.5 §6 (RP9): fired once, synchronously ahead of any `host_call`
+   * message from the same worker (single ordered `MessagePort`, single
+   * script-thread sender — see worker-source.ts's `run()`), right after the
+   * script's `meta` literal parses successfully. Carries just the
+   * replay-relevant subset of `ScriptMeta` (`deterministic`); a script that
+   * never parses (meta_error) never fires this.
+   */
+  onMeta(cb: (meta: Pick<ScriptMeta, "deterministic">) => void): void;
   /**
    * M3.2 HR8: fired synchronously at the start of `terminate()` (S2), before
    * any I/O — the one hook host.ts needs to flush its own host-side pending

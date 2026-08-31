@@ -426,6 +426,9 @@ export function reduce(
     const base: Partial<RunDiagnostics> = {
       lastEventAt: input.at,
       lastEventType: e.t,
+      // turn_end drives the turns counter (G4 diagnostics + outcome.turns);
+      // without this branch every run reported turns: 0.
+      ...(e.t === "turn_end" ? { turns: state.diag.turns + 1 } : {}),
       // X9: threaded through every downstream branch below via `{...state.diag, ...base}`
       // so the accumulator is updated regardless of which phase/branch handles this event
       // (including the abort_grace/reap early-return branch immediately below).

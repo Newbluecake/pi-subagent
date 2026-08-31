@@ -98,7 +98,7 @@ function callHost(op, args, timeoutMs) {
 
 const SETTLE_GRACE_MS = 5000;
 
-/** HR3: \`agent()\`'s ack only confirms admission (\`{ callId, deadlineAt }\`); the actual child result arrives later via a \`host_settle\` push, awaited here as a second, independently-bounded stage. */
+/** HR3: 'agent()''s ack only confirms admission (\`{ callId, deadlineAt }\`); the actual child result arrives later via a \`host_settle\` push, awaited here as a second, independently-bounded stage. */
 function waitForSettle(callId, deadlineAt) {
   return new Promise((resolve, reject) => {
     const buffered = bufferedSettles.get(callId);
@@ -118,7 +118,7 @@ function waitForSettle(callId, deadlineAt) {
 }
 
 // M3.4 §5.2/§7.1 WI8: \`phase(title)\` is a *statement*, not a wrapper — it
-// just labels the environment every subsequent \`agent()\` call (that doesn't
+// just labels the environment every subsequent 'agent()' call (that doesn't
 // pass its own \`opts.phase\`) is submitted under. An explicit \`opts.phase\`
 // always overrides the environment (§5.3: "stage 内用 phase 选项必须使用它").
 let currentPhase;
@@ -130,7 +130,7 @@ function phase(title) {
 
 /**
  * §1.2 NW5: nested \`workflow()\` calls are explicitly out of scope for this
- * version. Rejecting (not throwing synchronously) matches \`agent()\`/\`gate()\`'s
+ * version. Rejecting (not throwing synchronously) matches 'agent()'/\`gate()\`'s
  * own "awaitable, catchable" shape so a script that does \`await
  * workflow(...).catch(...)\` degrades the same way it would for any other
  * host-call rejection, instead of crashing the whole script on a bare
@@ -408,6 +408,12 @@ function run() {
     return;
   }
   const sandbox = buildSandbox(parsed.meta);
+  // M3.5 §6 (RP9): tell the host whether this script opted out of replay
+  // *before* running any of it — sent on the same ordered port a 'host_call'
+  // for the first 'agent()' would later travel over, so the host always
+  // observes this ahead of any call it needs to gate (see types.ts's
+  // 'WorkerHostEvents.onMeta' doc).
+  send({ kind: "meta", meta: { deterministic: parsed.meta.deterministic !== false } });
   let ctx;
   try {
     ctx = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });

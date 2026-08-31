@@ -103,6 +103,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
   const onHostCall: Array<(envelope: HostCallEnvelope) => void> = [];
   const onPhase: Array<(title: string) => void> = [];
   const onTerminating: Array<(reason: string) => void> = [];
+  const onMeta: Array<(meta: { deterministic?: boolean }) => void> = [];
 
   const events: WorkerHostEvents = {
     onMetaError: (cb) => onMetaError.push(cb),
@@ -114,6 +115,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
     onHostCall: (cb) => onHostCall.push(cb),
     onPhase: (cb) => onPhase.push(cb),
     onTerminating: (cb) => onTerminating.push(cb),
+    onMeta: (cb) => onMeta.push(cb),
   };
 
   function isDetachedOrLater(): boolean {
@@ -165,6 +167,17 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
         const title = (msg as { title?: unknown }).title;
         if (typeof title !== "string") return; // HR7-equivalent: malformed, drop silently.
         for (const cb of onPhase) cb(title);
+        return;
+      }
+      case "meta": {
+        const raw = msg as { meta?: unknown };
+        const m = raw.meta;
+        const deterministic =
+          m && typeof m === "object" && "deterministic" in m
+            ? (m as { deterministic?: unknown }).deterministic
+            : undefined;
+        const payload: { deterministic?: boolean } = typeof deterministic === "boolean" ? { deterministic } : {};
+        for (const cb of onMeta) cb(payload);
         return;
       }
       default:

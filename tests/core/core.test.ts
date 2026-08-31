@@ -1715,3 +1715,30 @@ describe("CC4: enqueued deadlineCapAt (state-machine min() + CP3)", () => {
     }
   });
 });
+
+describe("turn counter (regression: turns was always 0)", () => {
+  it("increments diag.turns on turn_end and reports it in the outcome", () => {
+    let s = createInitialState("r-turns", 1, 0);
+    s = reduce(s, { generation: 1, input: { kind: "enqueued", at: 0, budget } }, budget).state;
+    s = reduce(s, { generation: 1, input: { kind: "slot_acquired", at: 1 } }, budget).state;
+    // walk the startup phases like production does (phase_entered), then a
+    // structural event moves prompt_dispatch into running/model_turn
+    s = reduce(s, { generation: 1, input: { kind: "phase_entered", at: 2, phase: "prompt_dispatch" } }, budget).state;
+    s = reduce(
+      s,
+      { generation: 1, input: { kind: "session_event", at: 2.5, event: { t: "turn_start" } } },
+      budget,
+    ).state;
+    expect(s.phase).toBe("model_turn");
+    for (const at of [3, 4, 5]) {
+      s = reduce(
+        s,
+        { generation: 1, input: { kind: "session_event", at, event: { t: "turn_end", toolResults: 0 } } },
+        budget,
+      ).state;
+    }
+    expect(s.diag.turns).toBe(3);
+    const out = reduce(s, { generation: 1, input: { kind: "prompt_settled", at: 10 } }, budget);
+    expect(out.state.outcome?.turns).toBe(3);
+  });
+});

@@ -3,14 +3,20 @@ import { withDeadline } from "../core/deadline.js";
 import type { Millis, RunId } from "../core/types.js";
 import { deriveChildBudget } from "./budget.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
+import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
+import { decideReplay, type ReplayIndex } from "./replay.js";
 import type {
   CallId,
   HostAckEnvelope,
   HostCallEnvelope,
   HostSettleEnvelope,
   OrphanChildSummary,
+  ReplayScope,
+  TaskKey,
+  TaskSemantics,
   WorkerHost,
   WorkflowChildSummary,
+  WorkflowReplayStats,
   WorkflowRunBudget,
 } from "./types.js";
 
@@ -69,12 +75,48 @@ export interface ChildSpawner {
    * children the registry never learned about).
    */
   stopChildrenOf?(parentRunId: string, cause: string): Promise<{ stopped: RunId[]; pending: RunId[] }>;
+  /**
+   * M3.5 §6.3 E2: a content hash of `type`'s *resolved* agent-type
+   * configuration (systemPrompt/tools/model/thinking, per the design's
+   * `agentTypeConfigHash`) — the real assembler wires this to the same
+   * `AgentTypeRegistry` `SpawnService` itself resolves against, so an edited
+   * `.md` definition changes the hash. Optional: when absent, `handleAgent`
+   * falls back to using the bare `type` name (documented gap — a script
+   * whose agent-type *definition* changes without its *name* changing will
+   * still replay stale results until a real hash is wired in).
+   */
+  configHashOf?(type: string): string | undefined;
 }
 
 export type GateRunner = (
   cmd: string,
   opts: { cwd?: string; timeoutMs: Millis },
 ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+
+/**
+ * M3.5 §6.5/§6.6: everything `handleAgent` needs to run the replay
+ * short-circuit + write journal entries for one run. Optional on
+ * `HostCallHandlerDeps` — a run with no `journal` configured skips both
+ * (unchanged M3.2/M3.4 live-only behavior, zero journal I/O).
+ */
+export interface JournalRunConfig {
+  readonly store: JournalStore;
+  readonly dir: string;
+  readonly index: ReplayIndex;
+  readonly scope: ReplayScope;
+  /** RP1. */
+  readonly noReplay: boolean;
+  readonly replayTtlMs?: Millis;
+  readonly journalFlushMs?: Millis;
+  /**
+   * RP9, mutable: `true` until the worker's `meta` message says otherwise
+   * (see orchestrator.ts's `onMeta` wiring — updated *before* boot()
+   * resolves the script's first turn, so no `agent()` call can ever observe
+   * a stale value). A plain object (not a getter function) so orchestrator.ts
+   * and host.ts share one mutable cell without an extra indirection layer.
+   */
+  readonly deterministic: { current: boolean };
+}
 
 export interface HostCallHandlerDeps {
   readonly clock: Clock;
@@ -98,6 +140,10 @@ export interface HostCallHandlerDeps {
   readonly workflowDeadlineAt?: Millis;
   readonly defaultAgentType?: string;
   readonly parentRunId?: string;
+  /** M3.5 §6.2: the workflow run's own top-level `args` — folded into every task's `TaskSemantics.workflowArgs`. */
+  readonly workflowArgs?: unknown;
+  /** M3.5, see `JournalRunConfig`'s doc. */
+  readonly journal?: JournalRunConfig;
   /** Fired once per settled/withheld child, in settlement order (feeds `WorkflowOutcome.children`). */
   onChildSettled?(summary: WorkflowChildSummary): void;
   /** M3.4 §9.2: fired once per `phase(title)`/timeout transition (progress-event plumbing; optional, harmless no-op if absent). */
@@ -109,6 +155,8 @@ export interface HostCallHandler {
   readonly children: readonly WorkflowChildSummary[];
   /** M3.4 §9.1/§9.2: the most recent `phase(title)` the script declared, if any (diagnostics only). */
   readonly currentPhaseId: string | undefined;
+  /** M3.5 §3.3/§9.4: replay hit/miss/skip counters for this run; `corruptLines` mirrors `deps.journal.index.stats.corruptLines` (fixed at load time). `undefined` when no `journal` was configured. */
+  readonly replayStats: WorkflowReplayStats | undefined;
   /** Best-effort: attempts to stop every still-active child (used ahead of a future M3.3 abort pipeline; harmless no-op today if nothing is running). */
   cancelAllChildren(cause: string): void;
   /**
@@ -119,6 +167,8 @@ export interface HostCallHandler {
    * `WorkerHost.terminate()`'s `onTerminating`) is a no-op once this has run.
    */
   stopOwned(cause: string, graceMs: Millis): Promise<{ orphanChildren: readonly OrphanChildSummary[] }>;
+  /** M3.5 JS4: a single bounded best-effort flush of this run's `journal` (no-op if none configured). Intended to be called once, ahead of the workflow's terminal decision (orchestrator.ts). */
+  flushJournal(deadlineMs: Millis): Promise<{ written: number; pending: number } | undefined>;
 }
 
 const DEFAULT_AGENT_TYPE = "general-purpose";
@@ -150,6 +200,20 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const phaseOf = new Map<CallId, string>();
   let terminated = false;
   let currentPhaseId: string | undefined;
+
+  // M3.5 §6.2: per-run chain digest (advances on every submission, hit or
+  // miss — 推论 2.2/定理 4') + per-K submission counters (occurrence is
+  // assigned here, at *submission* time, never at settle time — the one
+  // property that makes completion order irrelevant to matching). Both are
+  // no-ops (never read) when `deps.journal` is absent.
+  let chainDigest = CHAIN_SEED;
+  const occCounters = new Map<string, number>();
+  /** callId -> the journal bookkeeping needed to write an entry once this call's live settle arrives (RP3: only successful calls are ever journaled). */
+  const journalMetaOf = new Map<
+    CallId,
+    { taskKey: TaskKey; chainDigestBefore: string; occurrence: number; agentType: string; isolation?: "worktree" }
+  >();
+  const replayStats = { hits: 0, misses: 0, skipped: 0 };
   /**
    * M3.4 fix (found while adding real WT7 coverage): a *single* "current
    * phase timer" is wrong — clearing the previous phase's timer the instant
@@ -237,6 +301,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   function settleWithheld(callId: CallId, cause: string): void {
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
+    journalMetaOf.delete(callId); // never journaled (RP3: withheld isn't a success).
     recordSettled({
       callId,
       source: "live",
@@ -263,6 +328,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     registry.settle(callId, deps.clock.now());
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
     const phaseId = phaseOf.get(callId);
+    journalMetaOf.delete(callId); // never journaled (RP3: forced-abort isn't a success).
     recordSettled({
       callId,
       ...(state?.runId !== undefined ? { runId: state.runId } : {}),
@@ -309,6 +375,95 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // receives, it never itself falls back to a "current phase" notion (that
     // state lives in \`currentPhaseId\`/\`handlePhase\` above, worker-side only).
     const phaseId = typeof opts.phase === "string" ? opts.phase : undefined;
+    // M3.5 RP7 (§6.4): opt-in per-call `isolation:"worktree"` marker — not
+    // yet threaded into `ChildSpawner.spawn()` (host.ts doesn't call
+    // `SpawnService` directly, WI2), so it has no *live* effect on where the
+    // child actually runs today. It exists here purely so the journal
+    // records it and RP7 can veto replaying it once a future milestone wires
+    // real worktree isolation through `ChildSpawner`.
+    const isolation: "worktree" | undefined =
+      (opts as { isolation?: unknown }).isolation === "worktree" ? "worktree" : undefined;
+
+    // M3.5 §6.2/§6.4: the replay short-circuit. Computed unconditionally
+    // whenever a journal is configured, before any admission-limit checks
+    // below — occurrence/chain-digest must advance on *every* submission,
+    // hit or miss (定理 3 "至多复用一次" depends on `occCounters` incrementing
+    // regardless of outcome), and a replay hit never touches the live
+    // resource limits below (it doesn't hold a `SlotPool`/parallel slot).
+    const journal = deps.journal;
+    if (journal) {
+      const agentTypeConfigHash = deps.spawner.configHashOf?.(agentType) ?? agentType;
+      const sem: TaskSemantics = {
+        agentType,
+        agentTypeConfigHash,
+        prompt: a.prompt,
+        ...(isolation !== undefined ? { isolation } : {}),
+        ...(deps.workflowArgs !== undefined ? { workflowArgs: deps.workflowArgs } : {}),
+      };
+      const taskKey = taskKeyOf(sem);
+      const chainDigestBefore = chainDigest;
+      const kForOccurrence = journal.scope === "content" ? taskKey : nextChainDigest(chainDigestBefore, taskKey);
+      const occurrence = occCounters.get(kForOccurrence) ?? 0;
+      occCounters.set(kForOccurrence, occurrence + 1);
+      // §6.2 step 5: the chain always advances, hit or miss.
+      chainDigest = nextChainDigest(chainDigestBefore, taskKey);
+
+      const decision = decideReplay({
+        index: journal.index,
+        taskKey,
+        chainDigestBefore,
+        occurrence,
+        noReplay: journal.noReplay,
+        deterministic: journal.deterministic.current,
+        now: deps.clock.now(),
+        ...(journal.replayTtlMs !== undefined ? { replayTtlMs: journal.replayTtlMs } : {}),
+      });
+
+      if (decision.kind === "hit") {
+        replayStats.hits += 1;
+        registry.submit(callId, deps.clock.now());
+        startedAt.set(callId, deps.clock.now());
+        if (phaseId !== undefined) phaseOf.set(callId, phaseId);
+        registry.settle(callId, deps.clock.now());
+        recordSettled({
+          callId,
+          source: "replay",
+          status: "completed",
+          durationMs: 0,
+          taskKey,
+          occurrence,
+          ...(decision.entry.value !== null ? { textPreview: decision.entry.value.slice(0, 2048) } : {}),
+          ...(phaseId !== undefined ? { phaseId } : {}),
+        });
+        // Same two-stage ack/settle shape as the live path (HR3) — the ack
+        // returned below is what the caller posts; the settle push happens
+        // here, synchronously, since there is nothing to await. Worker-side
+        // buffering (`bufferedSettles`, worker-source.ts) already tolerates a
+        // settle landing before its own ack is processed, so wire order is
+        // not load-bearing here.
+        deps.workerHost.send({
+          kind: "host_settle",
+          callId,
+          ok: true,
+          value: decision.entry.value,
+        } satisfies HostSettleEnvelope);
+        return {
+          kind: "host_ack",
+          id: callId,
+          ok: true,
+          value: { callId, deadlineAt: deps.clock.now() },
+        };
+      }
+      if (decision.kind === "miss") replayStats.misses += 1;
+      else replayStats.skipped += 1;
+      journalMetaOf.set(callId, {
+        taskKey,
+        chainDigestBefore,
+        occurrence,
+        agentType,
+        ...(isolation !== undefined ? { isolation } : {}),
+      });
+    }
 
     // §5.3 D-W… "narrowed": M3.2 does not have the agent-type registry
     // reachable at this layer (it lives in `AgentTypeRegistry`, service
@@ -321,6 +476,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       0,
     );
     if (activeCount >= budget.maxParallel) {
+      journalMetaOf.delete(callId);
       return {
         kind: "host_ack",
         id: callId,
@@ -331,6 +487,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const totalEverSubmitted =
       registry.stats.admission + registry.stats.pre_runner + registry.stats.running + registry.stats.settled;
     if (totalEverSubmitted >= budget.maxChildren) {
+      journalMetaOf.delete(callId);
       return {
         kind: "host_ack",
         id: callId,
@@ -351,6 +508,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       undefined,
     );
     if (derived.capped === "expired") {
+      journalMetaOf.delete(callId);
       return {
         kind: "host_ack",
         id: callId,
@@ -373,6 +531,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     });
     if ("error" in spawned) {
       registry.settle(callId, deps.clock.now());
+      journalMetaOf.delete(callId);
       recordSettled({
         callId,
         source: "live",
@@ -408,6 +567,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       if (!outcome) {
         // The spawner never settled this run (e.g. it was already gone by
         // the time waitAll looked it up) — report it honestly rather than hang.
+        journalMetaOf.delete(callId); // never journaled (RP3: not a success).
         const settleMsg: HostSettleEnvelope = {
           kind: "host_settle",
           callId,
@@ -434,6 +594,32 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         ...(outcome.text !== undefined ? { textPreview: outcome.text.slice(0, 2048) } : {}),
         ...(phaseId !== undefined ? { phaseId } : {}),
       });
+      // M3.5 RP3 (§6.4): only a *successful* live settle is ever journaled —
+      // failed/aborted/timed-out children never get an entry, matching the
+      // upstream plugin's "journaled failure ends the prefix" invariant
+      // (§6.1) at the per-entry granularity `chain`/`content` scope already
+      // gives us. `append()` is fire-and-forget (JS1) — never awaited here,
+      // so a slow/failing disk cannot delay this settle push to the worker.
+      if (journal && outcome.status === "completed") {
+        const meta = journalMetaOf.get(callId);
+        if (meta) {
+          journal.store.append(
+            journal.dir,
+            buildEntry({
+              scope: journal.scope,
+              key: meta.taskKey,
+              chainDigestBefore: meta.chainDigestBefore,
+              occurrence: meta.occurrence,
+              agentType: meta.agentType,
+              ...(meta.isolation !== undefined ? { isolation: meta.isolation } : {}),
+              value: outcome.text ?? null,
+              completedAt: deps.clock.now(),
+              durationMs,
+            }),
+          );
+        }
+      }
+      journalMetaOf.delete(callId);
       const settleMsg: HostSettleEnvelope =
         outcome.status === "completed"
           ? { kind: "host_settle", callId, ok: true, value: outcome.text ?? null }
@@ -556,6 +742,15 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     get currentPhaseId() {
       return currentPhaseId;
     },
+    get replayStats(): WorkflowReplayStats | undefined {
+      if (!deps.journal) return undefined;
+      return {
+        hits: replayStats.hits,
+        misses: replayStats.misses,
+        skipped: replayStats.skipped,
+        corruptLines: deps.journal.index.stats.corruptLines,
+      };
+    },
     cancelAllChildren(cause) {
       registry.cancelAll(cause);
     },
@@ -614,6 +809,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         });
       }
       return { orphanChildren };
+    },
+    async flushJournal(deadlineMs) {
+      if (!deps.journal) return undefined;
+      return deps.journal.store.flush(deps.journal.dir, deadlineMs);
     },
   };
 }

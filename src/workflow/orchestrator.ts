@@ -1,9 +1,18 @@
 import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import { attachHostCallHandler, type ChildSpawner, type GateRunner, type HostCallHandler } from "./host.js";
+import {
+  attachHostCallHandler,
+  type ChildSpawner,
+  type GateRunner,
+  type HostCallHandler,
+  type JournalRunConfig,
+} from "./host.js";
+import { createJournalStore } from "./journal.js";
+import { buildReplayIndex } from "./replay.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
 import type {
   OrphanChildSummary,
+  ReplayScope,
   SerializedError,
   WorkerHost,
   WorkflowChildSummary,
@@ -62,6 +71,12 @@ export interface OrchestratorRunRequest {
   readonly signal?: AbortSignal;
   /** M3.4 §5.1/§5.2: the tool parameter surfaced to the script as its top-level `args` global. */
   readonly args?: unknown;
+  /** M3.5 §6.5: the journal namespace (`<journalRootDir>/<sanitized journal>/journal.jsonl`). `undefined` (default) disables both replay and journal writes for this run — zero journal I/O, unchanged M3.1-M3.4 behavior. Requires `OrchestratorDeps.journalRootDir` to also be set; if either is missing the run proceeds journal-less rather than failing. */
+  readonly journal?: string;
+  /** M3.5 RP1: forces every `agent()` call live even when a journal is configured; journal writes still happen (§6.4: "noReplay 未设置" is the *only* RP a caller can opt out of on purpose). */
+  readonly noReplay?: boolean;
+  /** M3.5 §6.2: `content` vs `chain` lookup-key scope. Default `"chain"`. Resolved once at `enqueued` time, like `deadlineAt` — never re-read mid-run. */
+  readonly replayScope?: ReplayScope;
 }
 
 /**
@@ -89,6 +104,16 @@ export interface OrchestratorDeps {
   gateRunner?: GateRunner;
   /** M3.2 §3.7: threaded into every spawned child's `SpawnRequest.parentRunId` (CC1 `stopChildrenOf` anchor). */
   parentRunId?: string;
+  /**
+   * M3.5 §6.5: filesystem root a journal-enabled run's `<journalDir>` is
+   * derived from (`join(journalRootDir, sanitize(request.journal))`). Plain
+   * constructor DI, same seam as `parentRunId`/`spawner` — the real path
+   * (state-dir-relative) is decided by whatever assembles this
+   * `OrchestratorDeps` above `src/workflow/**` (WI1: this module never
+   * reaches for it itself). Optional: absent (or `request.journal` absent)
+   * disables the feature entirely, see `OrchestratorRunRequest.journal`.
+   */
+  journalRootDir?: string;
 }
 
 export interface Orchestrator {
@@ -131,6 +156,37 @@ function validateScriptSize(script: string): { ok: true } | { ok: false; message
     return { ok: false, message: "script must not be empty" };
   }
   return { ok: true };
+}
+
+/** M3.5 §6.5: filename-safe journal namespace — whitelist characters, capped length, matching the design's "做文件名安全化" note. */
+function sanitizeJournalName(name: string): string {
+  const safe = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+  return safe.length > 0 ? safe : "_";
+}
+
+/**
+ * M3.5 §6.2/§6.5/§6.6: loads this run's journal (if any) and builds the
+ * scope-appropriate `ReplayIndex` once, ahead of `boot()`. Only called when
+ * both `req.journal` and `deps.journalRootDir` are present (see the call
+ * site) — `deterministic` starts `true` and is updated by the `onMeta`
+ * listener the instant the worker's own `meta` message arrives (RP9).
+ */
+async function buildJournalConfig(deps: OrchestratorDeps, req: OrchestratorRunRequest): Promise<JournalRunConfig> {
+  const store = createJournalStore({ clock: deps.clock });
+  const dir = `${deps.journalRootDir}/${sanitizeJournalName(req.journal as string)}`;
+  const { entries, corruptLines } = await store.load(dir);
+  const scope: ReplayScope = req.replayScope ?? "chain";
+  const index = buildReplayIndex(entries, corruptLines, scope);
+  return {
+    store,
+    dir,
+    index,
+    scope,
+    noReplay: req.noReplay ?? false,
+    ...(req.budget.replayTtlMs !== undefined ? { replayTtlMs: req.budget.replayTtlMs } : {}),
+    ...(req.budget.journalFlushMs !== undefined ? { journalFlushMs: req.budget.journalFlushMs } : {}),
+    deterministic: { current: true },
+  };
 }
 
 type InternalResolution =
@@ -282,6 +338,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
         diag,
         children,
         ...(orphanChildren.length > 0 ? { orphanChildren } : {}),
+        ...(hostHandlerRef?.replayStats !== undefined ? { replay: hostHandlerRef.replayStats } : {}),
         ...(extra.result !== undefined ? { result: extra.result } : {}),
         ...(extra.error ? { error: extra.error } : {}),
         ...(extra.timeoutReason ? { timeoutReason: extra.timeoutReason } : {}),
@@ -350,8 +407,27 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     const deadlineAt = req.budget.workflowTotalMs > 0 ? createdAt + req.budget.workflowTotalMs : undefined;
     const workerHost = deps.createWorkerHost();
 
+    // M3.5 §6.5/§6.6: load (once, before boot) whatever journal history exists
+    // for this namespace and build the scope-appropriate `ReplayIndex` —
+    // deliberately *not* bounded by a dedicated deadline (a small JSONL read
+    // is not expected to be the long pole here; an FS that hangs on `readFile`
+    // is an environment problem out of this milestone's scope, same
+    // simplification class as §6.6's own "withDeadline(scriptLoadMs) 由调用方施加"
+    // note for the *store*, just not exercised by this orchestrator slice).
+    const journalConfig: JournalRunConfig | undefined =
+      req.journal !== undefined && deps.journalRootDir !== undefined ? await buildJournalConfig(deps, req) : undefined;
+
     workerHost.events.onLog(() => {
       logLines += 1;
+    });
+
+    // M3.5 RP9: updates `journalConfig.deterministic.current` the instant the
+    // worker's `meta` message arrives — always ahead of any `host_call` from
+    // the same worker (types.ts's `WorkerHostEvents.onMeta` doc), and (like
+    // `onLog` above) wired ahead of `boot()` so no race with the worker's own
+    // first turn is possible.
+    workerHost.events.onMeta((meta) => {
+      if (journalConfig && meta.deterministic !== undefined) journalConfig.deterministic.current = meta.deterministic;
     });
 
     // M3.2 §3.3/§3.5: wired *before* `boot()` — the worker can start sending
@@ -383,6 +459,8 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       budget: req.budget,
       ...(deadlineAt !== undefined ? { workflowDeadlineAt: deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
+      ...(req.args !== undefined ? { workflowArgs: req.args } : {}),
+      ...(journalConfig !== undefined ? { journal: journalConfig } : {}),
       onChildSettled: () => {
         children = hostHandler.children;
       },
@@ -523,6 +601,19 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       // EI2: best-effort effect failed — degrade, do not hang the pipeline.
       // `hostHandler.stopOwned` itself is exception-safe in normal operation;
       // this branch only fires under test-injected `beforeEffect: "throw"`.
+    }
+
+    // M3.5 JS4: a single bounded best-effort flush, ahead of ②/`resolve_settled`
+    // — gives buffered journal entries a real chance to land on disk before
+    // the process might exit shortly after this run settles. Best-effort:
+    // `flushJournal` itself never throws (journal.ts's `flush()` degrades to
+    // reporting `pending`, never rejects), and a flush timeout never delays
+    // the workflow's own terminal decision past `journalFlushMs`.
+    try {
+      await hostHandler.flushJournal(req.budget.journalFlushMs ?? 2_000);
+    } catch {
+      // JS3: a flush failure only costs this run's own newly-written entries
+      // a chance to be replayed later — it never fails the workflow itself.
     }
 
     // WL3 (terminate_worker): §2.3.1 S1–S8, unchanged. `stopOwned` above
