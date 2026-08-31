@@ -1,6 +1,6 @@
 import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import { attachHostCallHandler, type ChildSpawner, type GateRunner } from "./host.js";
+import { attachHostCallHandler, type ChildSpawner, type GateRunner, type HostCallHandler } from "./host.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
 import type {
   OrphanChildSummary,
@@ -60,6 +60,8 @@ export interface OrchestratorRunRequest {
   readonly script: string;
   readonly budget: WorkflowRunBudget;
   readonly signal?: AbortSignal;
+  /** M3.4 §5.1/§5.2: the tool parameter surfaced to the script as its top-level `args` global. */
+  readonly args?: unknown;
 }
 
 /**
@@ -229,6 +231,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     let logLines = 0;
     let orphanWorker: WorkflowDiagnostics["orphanWorker"];
     let children: readonly WorkflowChildSummary[] = [];
+    let hostHandlerRef: HostCallHandler | undefined;
     let outcomeAt1Snapshot: WorkflowOutcome | undefined;
     let retryingCancelsAtDecision = 0;
 
@@ -269,6 +272,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
         logLines,
         ...(orphanWorker ? { orphanWorker } : {}),
         ...(pendingReconcile ? { retryingCancels: retryingCancelsAtDecision } : {}),
+        ...(hostHandlerRef?.currentPhaseId !== undefined ? { currentPhaseId: hostHandlerRef.currentPhaseId } : {}),
       };
       return {
         workflowId: req.workflowId,
@@ -382,7 +386,11 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       onChildSettled: () => {
         children = hostHandler.children;
       },
+      onPhaseChange: (event) => {
+        deps.emit?.("subagent:workflow:phase", { workflowId: req.workflowId, ...event });
+      },
     });
+    hostHandlerRef = hostHandler;
 
     const bootOutcome = await workerHost.boot({
       scriptSource: req.script,
@@ -399,6 +407,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       ...(req.budget.hostCallMs !== undefined ? { hostCallMs: req.budget.hostCallMs } : {}),
       ...(req.budget.gateMs !== undefined ? { gateMs: req.budget.gateMs } : {}),
       ...(req.budget.maxBatchItems !== undefined ? { maxBatchItems: req.budget.maxBatchItems } : {}),
+      ...(req.args !== undefined ? { args: req.args } : {}),
     });
 
     if (!bootOutcome.ok) {

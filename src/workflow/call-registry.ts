@@ -103,6 +103,36 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
     attempt();
   }
 
+  /**
+   * CR2/§7.1 A2 fix: the `bind()`-after-cancel race (a `cancel()` landed
+   * while this call's `spawner.spawn()` was still in flight, so the
+   * `CallRegistry` state is *already* terminally "settled" as withheld by
+   * the time the real `runId` shows up). A single `abort()` attempt is not
+   * enough here — the newly-discovered child can be just as deep in the
+   * real core's A2 pre_runner window (`activeCancels` not yet registered) as
+   * an ordinarily-tracked call would be, so it needs the exact same bounded
+   * retry cadence (WT18/CR7), just detached from `calls`/`cancelIntent`
+   * bookkeeping (that state is already final and must not be reopened —
+   * WR1-equivalent for calls). Bounded by the same `cancelRetryWindowMs`;
+   * best-effort, never reported back to the caller (CR7: must never block
+   * the workflow's own settlement on this).
+   */
+  function retryOrphanAbort(callId: CallId, runId: RunId, cause: string): void {
+    const startedAt = deps.clock.now();
+    const attempt = (): void => {
+      retryTimers.delete(callId);
+      void deps.abort(runId, cause).then((ok) => {
+        if (ok) return;
+        if (deps.clock.now() - startedAt >= deps.cancelRetryWindowMs) {
+          deps.onCancelRetryGivenUp?.(callId, runId);
+          return;
+        }
+        retryTimers.set(callId, deps.clock.setTimer(cancelRetryMs, attempt));
+      });
+    };
+    attempt();
+  }
+
   const registry: CallRegistry = {
     submit(callId, at) {
       if (closed) return; // CR5
@@ -120,7 +150,32 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
     bind(callId, runId) {
       const state = calls.get(callId);
       if (!state) return { cancelNow: false };
-      if (state.phase === "settled") return { cancelNow: false }; // already withheld by a pre-intent (CR4)
+      if (state.phase === "settled") {
+        // Already withheld — either via CR4 (cancel() arrived before submit())
+        // or via cancel() landing in the A1 admission window *while this
+        // call's `SpawnService.spawn()` was still in flight* (submit() runs
+        // before the `await spawner.spawn(...)`, so admission legitimately
+        // spans that whole window — cancel() treats it as "never spawns" and
+        // settles it immediately). If a `cancelIntent` is recorded, `runId`
+        // here is real: the async spawn actually resolved with a live child
+        // *after* the call had already been marked withheld. Report
+        // `cancelNow` so the caller (`handleAgent`) aborts that real child
+        // immediately instead of leaking it — the alternative backstop,
+        // `stopChildrenOf`'s `parentRunId`-keyed sweep, never fires when no
+        // `parentRunId` is configured and may already have finished its one
+        // grace-window pass by the time this late `bind()` runs.
+        if (state.cancelIntent) {
+          // Kick off the same bounded retry cadence CR2 uses for the ordinary
+          // A2 case, detached from `calls`/`cancelIntent` bookkeeping since
+          // this call's own state is already final. The caller does not need
+          // to (and must not) also call `abort()` itself — `cancelNow` here
+          // is purely informational ("skip the normal settle path, this
+          // callId is already recorded").
+          retryOrphanAbort(callId, runId, state.cancelIntent.cause);
+          return { cancelNow: true, cause: state.cancelIntent.cause };
+        }
+        return { cancelNow: false };
+      }
       state.phase = "pre_runner";
       state.runId = runId;
       if (state.cancelIntent) {

@@ -101,6 +101,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
   const onExit: Array<(code: number, expected: boolean) => void> = [];
   const onError: Array<(error: SerializedError) => void> = [];
   const onHostCall: Array<(envelope: HostCallEnvelope) => void> = [];
+  const onPhase: Array<(title: string) => void> = [];
   const onTerminating: Array<(reason: string) => void> = [];
 
   const events: WorkerHostEvents = {
@@ -111,6 +112,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
     onExit: (cb) => onExit.push(cb),
     onError: (cb) => onError.push(cb),
     onHostCall: (cb) => onHostCall.push(cb),
+    onPhase: (cb) => onPhase.push(cb),
     onTerminating: (cb) => onTerminating.push(cb),
   };
 
@@ -159,6 +161,12 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
         for (const cb of onHostCall) cb({ id: raw.id, op: raw.op as HostCallEnvelope["op"], args: raw.args });
         return;
       }
+      case "phase": {
+        const title = (msg as { title?: unknown }).title;
+        if (typeof title !== "string") return; // HR7-equivalent: malformed, drop silently.
+        for (const cb of onPhase) cb(title);
+        return;
+      }
       default:
         return; // HR7-equivalent: unrecognized payload shapes are ignored, not thrown on.
     }
@@ -190,6 +198,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
       hostCallMs: init.hostCallMs ?? 60_000,
       gateMs: init.gateMs ?? 600_000,
       maxBatchItems: init.maxBatchItems ?? 1024,
+      args: init.args === undefined ? null : init.args,
     };
 
     try {

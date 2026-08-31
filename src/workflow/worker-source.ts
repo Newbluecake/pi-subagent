@@ -53,6 +53,11 @@ const scriptSource = workerData.scriptSource;
 const hostCallMs = workerData.hostCallMs || 60000;
 const gateMs = workerData.gateMs || 600000;
 const maxBatchItems = workerData.maxBatchItems || 1024;
+// M3.4 §5.2: "args" is the script's top-level global, cloned into workerData
+// at construction time (no round trip needed — it's already in this thread's
+// own memory by the time the scaffold starts). Object.prototype.hasOwnProperty
+// avoids treating an explicit \`undefined\` differently from "never set".
+const workflowArgs = Object.prototype.hasOwnProperty.call(workerData, "args") ? workerData.args : null;
 
 // M3.2 (§3.3/§3.5): the worker-side half of the call/ack/settle protocol.
 // This lives in the *trusted scaffold* scope (outside vm), same as \`send\`
@@ -112,9 +117,40 @@ function waitForSettle(callId, deadlineAt) {
   });
 }
 
+// M3.4 §5.2/§7.1 WI8: \`phase(title)\` is a *statement*, not a wrapper — it
+// just labels the environment every subsequent \`agent()\` call (that doesn't
+// pass its own \`opts.phase\`) is submitted under. An explicit \`opts.phase\`
+// always overrides the environment (§5.3: "stage 内用 phase 选项必须使用它").
+let currentPhase;
+function phase(title) {
+  if (typeof title !== "string") throw new TypeError("phase(title) expects a string");
+  currentPhase = title;
+  send({ kind: "phase", title: title });
+}
+
+/**
+ * §1.2 NW5: nested \`workflow()\` calls are explicitly out of scope for this
+ * version. Rejecting (not throwing synchronously) matches \`agent()\`/\`gate()\`'s
+ * own "awaitable, catchable" shape so a script that does \`await
+ * workflow(...).catch(...)\` degrades the same way it would for any other
+ * host-call rejection, instead of crashing the whole script on a bare
+ * (non-awaited) call.
+ */
+function workflowFn() {
+  return Promise.reject(
+    new Error(
+      "workflow(nameOrRef, args?) is not implemented in this version (§1.2 NW5) — inline the referenced script's " +
+        "agent()/parallel()/pipeline() calls directly, or run it as a separate SubagentWorkflow call instead.",
+    ),
+  );
+}
+
 function agent(prompt, opts) {
   if (typeof prompt !== "string") return Promise.reject(new TypeError("agent(prompt, opts?): prompt must be a string"));
-  return callHost("agent", { prompt: prompt, opts: opts || null }, hostCallMs).then(function (ack) {
+  var o = opts || {};
+  var effectivePhase = typeof o.phase === "string" ? o.phase : currentPhase;
+  var mergedOpts = effectivePhase !== undefined ? Object.assign({}, o, { phase: effectivePhase }) : o;
+  return callHost("agent", { prompt: prompt, opts: mergedOpts }, hostCallMs).then(function (ack) {
     return waitForSettle(ack.callId, ack.deadlineAt);
   }).then(function (outcome) {
     // §5.2/§5.3: a terminal *failure* of the child (or being withheld/aborted
@@ -300,6 +336,28 @@ function buildSandbox(meta) {
   sandbox.gate = gate;
   sandbox.parallel = parallel;
   sandbox.pipeline = pipeline;
+  sandbox.phase = phase;
+  sandbox.workflow = workflowFn;
+  // §5.2: \`args\` is a plain top-level global (not \`workflow.args\`, a v1
+  // naming mistake the design corrected — see §5.3's compat matrix). Passed
+  // through as-is; the script may read (but mutating it has no effect
+  // outside the sandbox — it's a structured-clone copy).
+  sandbox.args = workflowArgs;
+  // §5.2: \`budget\` — pi has no token-quota directive, so \`total\` is always
+  // \`null\` (matching the upstream plugin) and \`remaining()\` is always
+  // \`Infinity\`. \`spent()\` is a documented M3.4 gap (see this milestone's
+  // hand-off note in orchestrator.ts): child usage accounting isn't threaded
+  // through \`ChildSpawner\`/\`host.ts\` yet, so it always reports 0 rather than
+  // silently fabricating a number.
+  sandbox.budget = Object.freeze({
+    total: null,
+    spent: function () {
+      return 0;
+    },
+    remaining: function () {
+      return Infinity;
+    },
+  });
   function DisabledDate() {
     throw new Error("Date is disabled inside workflow scripts (non-deterministic; would break replay). See DET2.");
   }

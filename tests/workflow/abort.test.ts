@@ -169,6 +169,53 @@ describe("host.ts stopOwned (WL1 close_gate + WL2 stop_owned + WL4 inline reconc
     expect(handler.registry.listActive()).toEqual([]); // RC1: nothing left non-terminal in the registry either
   });
 
+  it("M3.4-prep fix: cancel() landing while spawn() is still in flight aborts the real child once it resolves, instead of leaking it with no parentRunId configured", async () => {
+    const h = hostHarness();
+    await h.boot();
+    let resolveSpawn!: (v: { runId: string }) => void;
+    const abortCalls: Array<{ runId: string; cause?: string }> = [];
+    const spawner: ChildSpawner = {
+      spawn: () => new Promise((resolve) => (resolveSpawn = resolve)),
+      abort: async (runId, cause) => {
+        abortCalls.push({ runId, ...(cause !== undefined ? { cause } : {}) });
+        return true;
+      },
+      waitAll: async () => new Promise(() => {}), // never called for this callId (see assertion below)
+      // Deliberately no `stopChildrenOf` and no `parentRunId` passed to
+      // `attachHostCallHandler` below — this is exactly the configuration
+      // under which the OS4 sweep backstop cannot find the leaked child.
+    };
+    const handler = attachHostCallHandler({
+      clock: h.clock,
+      workerHost: h.workerHost,
+      spawner,
+      gateRunner,
+      budget: BASE_BUDGET,
+    });
+    h.postHostCall("c5", "agent", { prompt: "in flight when stop lands" });
+    await flush();
+    // `spawn()` is still pending -- `registry.bind()` for c5 has not run yet.
+    expect(handler.registry.resolve("c5")?.phase).toBe("admission");
+
+    const stopPromise = handler.stopOwned("user_stop", 1_000);
+    await flush();
+    // stopOwned's cancelAll() already marked c5 "withheld" (settled) on the
+    // A1 assumption it never spawns.
+    expect(handler.children).toHaveLength(1);
+    expect(handler.children[0]).toMatchObject({ callId: "c5", status: "withheld" });
+
+    // The in-flight spawn() now resolves with a real runId, *after* c5 was
+    // already marked withheld.
+    resolveSpawn({ runId: "leaked-run" });
+    await flush();
+
+    expect(abortCalls).toEqual([{ runId: "leaked-run", cause: "user_stop" }]);
+    // No duplicate summary was recorded for the same callId.
+    expect(handler.children).toHaveLength(1);
+
+    await stopPromise;
+  });
+
   it("idempotent (WI6): calling stopOwned twice does not double-record or double-cancel", async () => {
     const h = hostHarness();
     await h.boot();

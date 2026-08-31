@@ -164,6 +164,85 @@ describe("CallRegistry (§3.6)", () => {
     expect(attempts).toBe(attemptsAtSettle); // no further retries after settle
   });
 
+  it("in-flight-spawn leak fix: cancel() during admission followed by a late bind() with a real runId reports cancelNow so the caller can abort it", () => {
+    const clock = new FakeClock();
+    const registry = createCallRegistry({ clock, abort: async () => true, cancelRetryWindowMs: 1_000 });
+    registry.submit("c1", clock.now());
+    // WL1/WL2 fires while `spawner.spawn()` for c1 is still in flight (bind() hasn't run yet).
+    const effect = registry.cancel("c1", "user_stop");
+    expect(effect).toBe("withheld");
+    expect(registry.resolve("c1")?.phase).toBe("settled");
+
+    // The in-flight spawn() now resolves with a real runId — bind() must not
+    // silently swallow it; it must surface cancelNow so the caller aborts
+    // the now-leaked child instead of letting it run unattended.
+    const bound = registry.bind("c1", "run1");
+    expect(bound).toEqual({ cancelNow: true, cause: "user_stop" });
+  });
+
+  it("in-flight-spawn leak fix: the late-bind orphan abort retries on the same cancelRetryMs cadence as the ordinary A2 path (CR2), not just once", async () => {
+    const clock = new FakeClock();
+    let attempts = 0;
+    const abortResults = [false, false, true]; // fails twice, succeeds on the 3rd attempt
+    const registry = createCallRegistry({
+      clock,
+      abort: async () => {
+        const ok = abortResults[attempts] ?? true;
+        attempts += 1;
+        return ok;
+      },
+      cancelRetryWindowMs: 10_000,
+      cancelRetryMs: 250,
+    });
+    registry.submit("c1", clock.now());
+    registry.cancel("c1", "timeout"); // marks it withheld while spawn() is still (conceptually) in flight
+    registry.bind("c1", "leaked-run"); // spawn() resolves late, with a real runId
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(attempts).toBe(1);
+
+    clock.advance(250);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(attempts).toBe(2);
+
+    clock.advance(250);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(attempts).toBe(3); // succeeds -> retry loop stops
+
+    clock.advance(20_000);
+    await Promise.resolve();
+    expect(attempts).toBe(3); // no further attempts after success
+  });
+
+  it("in-flight-spawn leak fix: the late-bind orphan abort gives up boundedly at cancelRetryWindowMs (CR7/WT18), not forever", async () => {
+    const clock = new FakeClock();
+    let gaveUp: { callId: string; runId: string } | undefined;
+    const registry = createCallRegistry({
+      clock,
+      abort: async () => false, // never succeeds
+      cancelRetryWindowMs: 1_000,
+      cancelRetryMs: 250,
+      onCancelRetryGivenUp: (callId, runId) => {
+        gaveUp = { callId, runId };
+      },
+    });
+    registry.submit("c1", clock.now());
+    registry.cancel("c1", "timeout");
+    registry.bind("c1", "leaked-run");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    for (let i = 0; i < 6; i += 1) {
+      clock.advance(250);
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(gaveUp).toEqual({ callId: "c1", runId: "leaked-run" });
+  });
+
   it("CR5: cancelAll() closes the registry — subsequent submit() is rejected (WR7-adjacent: no post-close spawns)", () => {
     const clock = new FakeClock();
     const registry = createCallRegistry({ clock, abort: async () => true, cancelRetryWindowMs: 1_000 });

@@ -17,6 +17,15 @@ import type { RunawayPolicy } from "../config/settings.js";
 export type WorkflowId = string;
 
 /**
+ * M3.4 (workflow design §5.2/§7.1 WI8): the label a script's `phase(title)`
+ * statement gives to a group of `agent()` calls (or an explicit
+ * `opts.phase` override). Just a string — there is no separate phase
+ * registry/tree in this milestone (`meta.phases` remains a purely
+ * declarative array for progress-tree UI, see `ScriptMeta`).
+ */
+export type PhaseId = string;
+
+/**
  * M3.2 (workflow design §3.6): one `agent()`/`gate()` host call. In M3.2
  * there is no journal/replay (M3.5) and no reduce-based `CallPhase` state
  * machine wired to `QueryService` (M3.3), so `CallId` is just the RPC
@@ -56,11 +65,12 @@ export interface CallState {
 /** §3.6: `cancel()`'s honest, non-lying report of what actually happened (CR6). */
 export type CallCancelEffect = "withheld" | "retrying" | "stopped" | "already_settled" | "unknown";
 
-/** §3.3 `WorkflowChildSummary`, M3.2 slice: no `taskKey`/`occurrence`/`phaseId`/`source` yet (those need journal/phase tracking, M3.4/M3.5) beyond a fixed `"live"` (no replay exists in M3.2). */
+/** §3.3 `WorkflowChildSummary`, M3.2 slice: no `taskKey`/`occurrence`/`source` yet (those need journal tracking, M3.5) beyond a fixed `"live"` (no replay exists yet). `phaseId` (M3.4) is the environment/override phase this call was submitted under, if any. */
 export interface WorkflowChildSummary {
   readonly callId: CallId;
   readonly runId?: RunId;
   readonly label?: string;
+  readonly phaseId?: PhaseId;
   readonly source: "live";
   readonly status: "completed" | "failed" | "timed_out" | "aborted" | "withheld" | "running" | "stopping";
   readonly durationMs: Millis;
@@ -127,6 +137,8 @@ export interface WorkflowDiagnostics {
   readonly retryingCancels?: number;
   /** M3.3 EI5: set when `resolve_settled` itself failed to apply (a defect in the effect pipeline, not in the workflow) and this outcome is the EI5 fallback rather than a normally-reconciled one. */
   readonly degraded?: "settlement_apply_failed";
+  /** M3.4 §9.1/§9.2: the phase the script's most recent `phase(title)` call declared, if any — diagnostic only (`/agent status`-equivalent), not authoritative for `WorkflowChildSummary.phaseId` (each call records its own phase at submission time). */
+  readonly currentPhaseId?: PhaseId;
 }
 
 /**
@@ -198,6 +210,14 @@ export interface WorkflowRunBudget {
   readonly reconcileMs?: Millis;
   /** M3.3 WT18/§3.6: the A2 bounded-retry cancel loop's give-up window. Optional, default `startupMs`(30_000)+5_000 (§4.1, matches host.ts's M3.2 fixed default). */
   readonly cancelRetryWindowMs?: Millis;
+  /**
+   * M3.4 WT7 (§4.1/§7.2 WI8): a single phase's own budget. `0`/undefined =
+   * unlimited (workflow's own WT8 `workflowTotalMs` still applies). On
+   * expiry only the calls submitted under that `phase(title)` (or an
+   * explicit `opts.phase` override) are cancelled — the workflow itself is
+   * unaffected and keeps running (this is *not* a global `close_gate`).
+   */
+  readonly phaseTotalMs?: Millis;
 }
 
 /** §3.5: what `WorkerHost.boot()` needs to start the worker thread and its sandboxed script. */
@@ -217,6 +237,8 @@ export interface WorkerHostInit {
   readonly gateMs?: Millis;
   /** M3.2 §5.3: `parallel()`/`pipeline()` item cap, enforced sandbox-side so an oversize batch fails fast without a host round trip. */
   readonly maxBatchItems?: number;
+  /** M3.4 §5.2: the script's top-level `args` global — structured-cloned into `workerData` at construction (no separate message round trip needed, unlike `phase`/`log`/host calls). `undefined` surfaces to the script as `null` (§5.2: "顶层全局"). */
+  readonly args?: unknown;
 }
 
 export type WorkerBootOutcome =
@@ -251,6 +273,13 @@ export interface WorkerHostEvents {
   onError(cb: (error: SerializedError) => void): void;
   /** M3.2 §3.5: a `HostCallEnvelope` arrived from the worker (`agent`/`gate`/`log`). */
   onHostCall(cb: (envelope: HostCallEnvelope) => void): void;
+  /**
+   * M3.4 §5.2/§9.2: the script's `phase(title)` statement fired. Fire-and-
+   * forget one-way message, same wire shape as `onLog` — there is no ack,
+   * no settle, and (per WI8) no interaction with the abort/close_gate
+   * machinery beyond what `host.ts`'s own WT7 timer does with it.
+   */
+  onPhase(cb: (title: string) => void): void;
   /**
    * M3.2 HR8: fired synchronously at the start of `terminate()` (S2), before
    * any I/O — the one hook host.ts needs to flush its own host-side pending

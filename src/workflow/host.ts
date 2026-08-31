@@ -92,6 +92,7 @@ export interface HostCallHandlerDeps {
     | "childBudgetFraction"
     | "childTotalMs"
     | "cancelRetryWindowMs"
+    | "phaseTotalMs"
   >;
   /** WR2-equivalent: the workflow's own absolute deadline, computed once at enqueue and never recomputed here. */
   readonly workflowDeadlineAt?: Millis;
@@ -99,11 +100,15 @@ export interface HostCallHandlerDeps {
   readonly parentRunId?: string;
   /** Fired once per settled/withheld child, in settlement order (feeds `WorkflowOutcome.children`). */
   onChildSettled?(summary: WorkflowChildSummary): void;
+  /** M3.4 §9.2: fired once per `phase(title)`/timeout transition (progress-event plumbing; optional, harmless no-op if absent). */
+  onPhaseChange?(event: { phaseId: string; kind: "enter" | "timeout"; at: Millis }): void;
 }
 
 export interface HostCallHandler {
   readonly registry: CallRegistry;
   readonly children: readonly WorkflowChildSummary[];
+  /** M3.4 §9.1/§9.2: the most recent `phase(title)` the script declared, if any (diagnostics only). */
+  readonly currentPhaseId: string | undefined;
   /** Best-effort: attempts to stop every still-active child (used ahead of a future M3.3 abort pipeline; harmless no-op today if nothing is running). */
   cancelAllChildren(cause: string): void;
   /**
@@ -142,7 +147,63 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   };
   const children: WorkflowChildSummary[] = [];
   const startedAt = new Map<CallId, Millis>();
+  const phaseOf = new Map<CallId, string>();
   let terminated = false;
+  let currentPhaseId: string | undefined;
+  /**
+   * M3.4 fix (found while adding real WT7 coverage): a *single* "current
+   * phase timer" is wrong — clearing the previous phase's timer the instant
+   * a script moves on to `phase("next")` means a straggler call left behind
+   * in the abandoned phase never gets WT7's cancellation at all (the exact
+   * pattern the design's own `agent()`-without-`await` + `parallel`/
+   * `pipeline` idioms encourage). Each phase gets its own independent timer,
+   * keyed by title, so a still-active call in an *earlier* phase is still
+   * bounded by that phase's own budget even after the script has moved on.
+   */
+  const phaseTimers = new Map<string, ReturnType<Clock["setTimer"]>>();
+
+  function clearAllPhaseTimers(): void {
+    for (const timer of phaseTimers.values()) deps.clock.clearTimer(timer);
+    phaseTimers.clear();
+  }
+
+  /**
+   * M3.4 WT7/§7.2 WI8: a script's `phase(title)` statement re-labels the
+   * environment every subsequent `agent()` call (without its own
+   * `opts.phase`) lands under, and (if `budget.phaseTotalMs` is configured)
+   * arms a fresh bounded timer *for that phase title specifically* —
+   * independent of whatever other phase timers are already ticking for
+   * earlier phases the script has since moved past.
+   *
+   * WI8 is the crucial distinction from WL1 `close_gate`: on expiry only the
+   * calls this function itself tagged with `title` are cancelled
+   * (`registry.cancel`, the ordinary A1-A4 per-call path) — the registry is
+   * never closed, `terminated` never flips, and the workflow's own status is
+   * completely unaffected. A phase timeout is a *local* event.
+   */
+  function handlePhase(title: string): void {
+    if (terminated) return; // WL1 already closed everything down; a late phase() from the worker changes nothing.
+    currentPhaseId = title;
+    deps.onPhaseChange?.({ phaseId: title, kind: "enter", at: deps.clock.now() });
+    const phaseTotalMs = deps.budget.phaseTotalMs;
+    if (phaseTotalMs === undefined || phaseTotalMs <= 0) return;
+    // Re-entering the same phase title restarts its own clock (a script that
+    // calls `phase("retry")` more than once is opting into a fresh budget for
+    // that leg, same as any other phase).
+    const existing = phaseTimers.get(title);
+    if (existing !== undefined) deps.clock.clearTimer(existing);
+    phaseTimers.set(
+      title,
+      deps.clock.setTimer(phaseTotalMs, () => {
+        phaseTimers.delete(title);
+        for (const active of registry.listActive()) {
+          if (phaseOf.get(active.callId) === title) registry.cancel(active.callId, "phase_timeout");
+        }
+        deps.onPhaseChange?.({ phaseId: title, kind: "timeout", at: deps.clock.now() });
+      }),
+    );
+  }
+  deps.workerHost.events.onPhase(handlePhase);
 
   const registry = createCallRegistry({
     clock: deps.clock,
@@ -175,7 +236,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   /** A1 (withheld): `cancel()` already synchronously settled these — they never spawned, so there is no runId to report. */
   function settleWithheld(callId: CallId, cause: string): void {
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
-    recordSettled({ callId, source: "live", status: "withheld", durationMs });
+    const phaseId = phaseOf.get(callId);
+    recordSettled({
+      callId,
+      source: "live",
+      status: "withheld",
+      durationMs,
+      ...(phaseId !== undefined ? { phaseId } : {}),
+    });
     deps.workerHost.send({
       kind: "host_settle",
       callId,
@@ -194,12 +262,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const state = registry.resolve(callId);
     registry.settle(callId, deps.clock.now());
     const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
+    const phaseId = phaseOf.get(callId);
     recordSettled({
       callId,
       ...(state?.runId !== undefined ? { runId: state.runId } : {}),
       source: "live",
       status: "aborted",
       durationMs,
+      ...(phaseId !== undefined ? { phaseId } : {}),
     });
     // Best-effort: the port may already be closing (S5), but a send racing
     // that close is harmless (WorkerHost.send is a no-throw best-effort primitive).
@@ -217,7 +287,10 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   }
 
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
-    const a = args as { prompt?: unknown; opts?: { label?: unknown; agentType?: unknown } | null };
+    const a = args as {
+      prompt?: unknown;
+      opts?: { label?: unknown; agentType?: unknown; phase?: unknown } | null;
+    };
     if (typeof a.prompt !== "string") {
       return {
         kind: "host_ack",
@@ -230,6 +303,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     const label = typeof opts.label === "string" ? opts.label : undefined;
     const agentType =
       typeof opts.agentType === "string" ? opts.agentType : (deps.defaultAgentType ?? DEFAULT_AGENT_TYPE);
+    // M3.4 §5.2: worker-source.ts already resolved \`opts.phase\` against the
+    // script's environment \`phase(title)\` (explicit \`opts.phase\` wins) before
+    // this call ever left the sandbox — this handler just records whatever it
+    // receives, it never itself falls back to a "current phase" notion (that
+    // state lives in \`currentPhaseId\`/\`handlePhase\` above, worker-side only).
+    const phaseId = typeof opts.phase === "string" ? opts.phase : undefined;
 
     // §5.3 D-W… "narrowed": M3.2 does not have the agent-type registry
     // reachable at this layer (it lives in `AgentTypeRegistry`, service
@@ -282,6 +361,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
 
     registry.submit(callId, deps.clock.now());
     startedAt.set(callId, deps.clock.now());
+    if (phaseId !== undefined) phaseOf.set(callId, phaseId);
 
     const spawned = await deps.spawner.spawn({
       type: agentType,
@@ -298,11 +378,26 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         source: "live",
         status: "withheld",
         durationMs: deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now()),
+        ...(phaseId !== undefined ? { phaseId } : {}),
       });
       return { kind: "host_ack", id: callId, ok: false, error: spawned.error };
     }
 
-    registry.bind(callId, spawned.runId);
+    const bound = registry.bind(callId, spawned.runId);
+    if (bound.cancelNow) {
+      // M3.3 fix (was previously silently dropped): a cancel arrived while
+      // this `agent()`'s `spawner.spawn()` call was still in flight, so
+      // `CallRegistry` had already (synchronously, on the A1 admission
+      // assumption "never spawns") settled this call as withheld. It *did*
+      // spawn — `spawned.runId` is a real, running child. `registry.bind()`
+      // itself already kicked off a bounded A2-style retry (`retryOrphanAbort`)
+      // against it, so there is nothing further to do here beyond skipping the
+      // `waitAll()`/`recordSettled` path below — the withheld summary for this
+      // callId was already recorded when the cancel first landed
+      // (`settleWithheld`/`forceSettleActive`), and recording it again here
+      // would duplicate `children[]`.
+      return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause ?? "cancelled" };
+    }
 
     // HR3: fire the settle wait in the background — the ack below returns
     // immediately, independent of how long the child itself takes.
@@ -319,7 +414,14 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
           ok: false,
           error: { message: "child run did not settle" },
         };
-        recordSettled({ callId, runId: spawned.runId, source: "live", status: "aborted", durationMs });
+        recordSettled({
+          callId,
+          runId: spawned.runId,
+          source: "live",
+          status: "aborted",
+          durationMs,
+          ...(phaseId !== undefined ? { phaseId } : {}),
+        });
         deps.workerHost.send(settleMsg);
         return;
       }
@@ -330,6 +432,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         status: outcome.status,
         durationMs,
         ...(outcome.text !== undefined ? { textPreview: outcome.text.slice(0, 2048) } : {}),
+        ...(phaseId !== undefined ? { phaseId } : {}),
       });
       const settleMsg: HostSettleEnvelope =
         outcome.status === "completed"
@@ -439,6 +542,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   deps.workerHost.events.onTerminating((reason) => {
     if (terminated) return; // WL3 after WL1/WL2 already ran via stopOwned() — everything is settled, avoid double-recording.
     terminated = true;
+    clearAllPhaseTimers(); // WR4-equivalent: no armed timer may survive the workflow's own terminal decision.
     const cancelled = registry.cancelAll(reason);
     for (const callId of cancelled.withheld) settleWithheld(callId, reason);
     for (const callId of cancelled.retrying) forceSettleActive(callId, reason);
@@ -449,6 +553,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     get children() {
       return children;
     },
+    get currentPhaseId() {
+      return currentPhaseId;
+    },
     cancelAllChildren(cause) {
       registry.cancelAll(cause);
     },
@@ -458,6 +565,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // agent()/gate() admission can land after this point (onHostCall checks
       // the same `terminated` flag).
       terminated = true;
+      clearAllPhaseTimers(); // same WR4-equivalent hygiene as onTerminating above.
       // WL2: cascade-cancel every still-active call (CallRegistry's bounded
       // retry loop +, if the caller supplied one, the core's own owner-stop
       // sweep — OS4).
