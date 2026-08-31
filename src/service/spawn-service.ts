@@ -29,9 +29,12 @@ export interface SpawnServiceDeps {
   onSnapshot?: (snapshot: RunSnapshot) => void;
   onLifecycle?: LifecycleSink;
   tombstones?: TombstoneStore;
+  /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Default 3. */
+  maxNestedDepth?: number;
 }
 export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { snapshots(): readonly RunSnapshot[] } {
   const now = deps.now ?? (() => Date.now());
+  const maxNestedDepth = deps.maxNestedDepth ?? 3;
   const records = new Map<RunId, RunSnapshot>();
   const outcomes = new Map<RunId, RunOutcome>();
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
@@ -39,10 +42,31 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const resumeLocks = new Set<string>();
   const labels = new Map<string, RunId>();
   const tombstones = deps.tombstones ?? new TombstoneStore(30 * 60 * 1000, now);
+  // X3: nested-delegation bookkeeping. `nesting` holds, for every currently
+  // *running* top-level or nested run, the depth it was spawned at plus the
+  // canSpawn whitelist of its own agent type (i.e. what it, in turn, is
+  // allowed to spawn) — this is the authoritative enforcement point,
+  // independent of (and in addition to) the injected nested Agent tool's own
+  // check in tools/agent-tool.ts. `childrenOf`/`parentOf` track the run tree
+  // purely for cascading abort; both are cleaned up as runs finish so they
+  // never grow past the number of currently-running nested runs.
+  const nesting = new Map<RunId, { depth: number; canSpawn?: string[] }>();
+  const childrenOf = new Map<RunId, Set<RunId>>();
+  const parentOf = new Map<RunId, RunId>();
   const terminal = (s: string) => ["completed", "failed", "timed_out", "aborted"].includes(s);
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
     running.delete(outcome.runId);
+    nesting.delete(outcome.runId);
+    const parent = parentOf.get(outcome.runId);
+    if (parent !== undefined) {
+      parentOf.delete(outcome.runId);
+      const siblings = childrenOf.get(parent);
+      if (siblings) {
+        siblings.delete(outcome.runId);
+        if (siblings.size === 0) childrenOf.delete(parent);
+      }
+    }
     const snapshot = outcome.diag
       ? ({
           runId: outcome.runId,
@@ -73,6 +97,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     config: NonNullable<ReturnType<AgentTypeRegistry["get"]>>,
     budget: DeadlineBudget,
     resumeLockKeys: readonly string[] = [],
+    depth = 0,
   ) => {
     running.add(runId);
     try {
@@ -85,6 +110,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         ...(req.cwd ? { cwd: req.cwd } : {}),
         ...((req.modelOverride ?? config.model) ? { model: req.modelOverride ?? config.model } : {}),
         budget,
+        depth,
       };
       const outcome = await deps.runner.run(spec, {
         ...(deps.onLifecycle ? { onLifecycle: deps.onLifecycle } : {}),
@@ -127,6 +153,41 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     async spawn(req) {
       const config = deps.types.get(req.type);
       if (!config) return { error: { kind: "config", message: `unknown agent type: ${req.type}`, retryable: false } };
+      // X3: nesting depth + canSpawn whitelist. Authoritative for real
+      // nested chains produced by the injected nested Agent tool, whose
+      // parentRunId always names a currently-tracked, still-running entry
+      // (the tool only exists inside an active session). `parentRunId` is
+      // NOT a model-facing parameter of the top-level Agent tool, so an
+      // untracked/foreign parentRunId cannot originate from tool-call input
+      // — it is either a stale/finished reference or a caller using
+      // `parentRunId` purely as a display label (pre-X3 usage, still
+      // supported); neither case is a nested-delegation privilege
+      // escalation, so it is left unrestricted (depth 0, no canSpawn cap)
+      // rather than rejected. The check below only fires when the parent IS
+      // currently tracked, i.e. it is a real, live nesting relationship.
+      let depth = 0;
+      if (req.parentRunId) {
+        const parent = nesting.get(req.parentRunId);
+        if (parent) {
+          if (!parent.canSpawn?.includes(req.type))
+            return {
+              error: {
+                kind: "config",
+                message: `nested delegation is not permitted: parent's agent type may only spawn [${(parent.canSpawn ?? []).join(", ")}], not "${req.type}"`,
+                retryable: false,
+              },
+            };
+          depth = parent.depth + 1;
+          if (depth > maxNestedDepth)
+            return {
+              error: {
+                kind: "config",
+                message: `nested delegation depth ${depth} exceeds the configured maximum (${maxNestedDepth})`,
+                retryable: false,
+              },
+            };
+        }
+      }
       let resolvedReq = req;
       let lockKeys: string[] = [];
       if (req.resumeFrom) {
@@ -160,7 +221,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const runId = randomUUID();
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
       if (req.label) labels.set(req.label, runId);
-      void start(resolvedReq, runId, config, budget, lockKeys);
+      nesting.set(runId, { depth, ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}) });
+      if (req.parentRunId) {
+        parentOf.set(runId, req.parentRunId);
+        const siblings = childrenOf.get(req.parentRunId) ?? new Set<RunId>();
+        siblings.add(runId);
+        childrenOf.set(req.parentRunId, siblings);
+      }
+      void start(resolvedReq, runId, config, budget, lockKeys, depth);
       return { runId };
     },
     async spawnAndWait(req) {
@@ -179,6 +247,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;
+      // X3: cascade to nested children before/alongside aborting this run
+      // itself. Recurses through `service.abort` so grandchildren are
+      // reached too; idempotent against the double-hop that also arrives via
+      // RunnerDeps.onChildAbort (runtime/runner.ts → index.ts wiring) once
+      // this run's own cancellation actually fires — `running.has()` /
+      // createCancelHandle's already-aborted guard make the second pass a
+      // no-op rather than an infinite loop.
+      const children = [...(childrenOf.get(runId) ?? [])].filter((c) => running.has(c));
+      if (children.length) await Promise.all(children.map((c) => service.abort(c, "parent_abort")));
       if (deps.runner.abort) return (await deps.runner.abort(runId, cause)).ok;
       return false;
     },

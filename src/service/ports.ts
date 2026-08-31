@@ -40,6 +40,8 @@ export interface RunnerSpec {
   readonly cwd?: string;
   readonly model?: { provider: string; id: string };
   readonly budget: DeadlineBudget;
+  /** X3: nesting depth of this run (0 = top-level), computed by SpawnService at spawn time. */
+  readonly depth?: number;
 }
 export interface RunnerCallbacks {
   onLifecycle?(event: LifecycleEvent): void;

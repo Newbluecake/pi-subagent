@@ -19,6 +19,7 @@ import type {
 import type { SnapshotStore } from "../core/store.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "./session-driver.js";
 import type { SlotPool, SlotTicket } from "./slot-pool.js";
+import type { ToolScopeEnforcer, ToolScopePolicy } from "./tool-scope.js";
 import type { Watchdog } from "./watchdog.js";
 import type { Reaper, ReapInput } from "./reaper.js";
 
@@ -27,6 +28,10 @@ export interface ResolvedSpawnRequest extends SessionSpec {
   prompt: string;
   signal?: AbortSignal;
   slotless?: boolean;
+  /** X3: propagated through so RunState/RunSnapshot.parentRunId (core §5.1) is actually populated for nested runs — previously always undefined because nothing threaded it past RunnerSpec.request. */
+  parentRunId?: string;
+  /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
+  toolScope?: { policy: ToolScopePolicy; enforcer: ToolScopeEnforcer };
 }
 export interface CancelHandle {
   readonly runId: string;
@@ -171,6 +176,17 @@ export interface RunnerDeps {
   beforeReap?: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => Promise<void> | void;
   /** Diagnostics-only sink for extension hook failures/timeouts (H3); never affects run outcome or settle timing beyond reapMs bound. */
   onExtensionError?: (hook: "beforeReap", runId: string, error: string) => void;
+  /**
+   * X3: invoked whenever this run's cancellation is triggered (explicit
+   * abortRun() call or the external SpawnRequest.signal firing), from
+   * whichever path first reaches it — the single funnel point inside
+   * createCancelHandle's onCancel callback below. Always called with cause
+   * "parent_abort" (semantically "your parent is going away"), regardless of
+   * *why* the parent itself stopped. The caller (service/runtime-adapter.ts,
+   * wired from index.ts) is expected to look up and abort this run's own
+   * children; RuntimeRunner itself has no notion of a run tree.
+   */
+  onChildAbort?: (runId: string, cause: StopCause) => void;
 }
 export interface Runner {
   run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome>;
@@ -180,6 +196,10 @@ const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => (
   message: e instanceof Error ? e.message : String(e),
   retryable: false,
 });
+const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "aborted"]);
+function isTerminalStatus(status: string): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
 export class RuntimeRunner implements Runner {
   private readonly states = new Map<string, RunState>();
   private generation = new Map<string, number>();
@@ -225,15 +245,19 @@ export class RuntimeRunner implements Runner {
   async run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome> {
     const gen = (this.generation.get(req.runId) ?? 0) + 1;
     this.generation.set(req.runId, gen);
-    let state = createInitialState(req.runId, gen, this.d.clock.now());
+    let state = createInitialState(req.runId, gen, this.d.clock.now(), req.parentRunId);
     this.states.set(req.runId, state);
-    const cancel = createCancelHandle(req.runId, gen, req.signal, (reason) =>
+    const cancel = createCancelHandle(req.runId, gen, req.signal, (reason) => {
+      const selfCause: StopCause = reason === "external" ? "parent_abort" : "user_stop";
       this.dispatchExternal(req.runId, gen, {
         kind: "stop_requested",
         at: this.d.clock.now(),
-        cause: reason === "external" ? "parent_abort" : "user_stop",
-      }),
-    );
+        cause: selfCause,
+      });
+      // X3: cascade regardless of *why* this run stopped — a child's parent
+      // going away is always "parent_abort" from the child's point of view.
+      this.d.onChildAbort?.(req.runId, "parent_abort");
+    });
     this.activeCancels.set(req.runId, { gen, cancel });
     let ticket: SlotTicket | undefined;
     let handle: SessionHandle | undefined;
@@ -299,7 +323,17 @@ export class RuntimeRunner implements Runner {
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "extension_bind" });
       const bindBudget = remainingFor(budget.bindMs, this.d.clock.now(), state.deadlines);
       const bound = await this.guard(
-        this.d.driver.bind(handle, (e) => dispatch({ kind: "session_event", at: this.d.clock.now(), event: e })),
+        this.d.driver.bind(handle, (e) => {
+          dispatch({ kind: "session_event", at: this.d.clock.now(), event: e });
+          // X11 TS3: setActiveTools only ever happens at a turn boundary, never
+          // mid tool_exec. TS-race guard: re-check terminality *after*
+          // dispatch() above has already folded this same event into the
+          // state machine, so a deadline_fired arriving in the same tick is
+          // reflected in state.status before we decide whether to enforce.
+          if (e.t === "turn_end" && req.toolScope && !isTerminalStatus(state.status)) {
+            req.toolScope.enforcer.onTurnBoundary(handle!, req.toolScope.policy);
+          }
+        }),
         bindBudget.ms,
         cancel,
         "bind",
@@ -313,6 +347,9 @@ export class RuntimeRunner implements Runner {
         });
         return state.outcome!;
       }
+      // X11: first application, right after bind and before prompt dispatch
+      // (architecture §7.5 onBind). Guarded the same way as onTurnBoundary.
+      if (req.toolScope && !isTerminalStatus(state.status)) req.toolScope.enforcer.onBind(handle, req.toolScope.policy);
       this.d.watchdog.arm(req.runId, gen);
       const promptBudget = remainingFor(budget.totalMs, this.d.clock.now(), state.deadlines);
       const prompted = await this.guard(handle.prompt(req.prompt), promptBudget.ms, cancel, "prompt");

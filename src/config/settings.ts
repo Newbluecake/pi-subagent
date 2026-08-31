@@ -15,6 +15,8 @@ export interface AgentSettings {
   maxReconcileBatch: number;
   rememberAgents: boolean;
   worktree: { enabled: boolean; gitTimeoutMs: number };
+  /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Exceeding this is rejected at spawn time as a config error, never silently truncated. */
+  maxNestedDepth: number;
 }
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
@@ -26,6 +28,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   maxReconcileBatch: 10,
   rememberAgents: true,
   worktree: { enabled: false, gitTimeoutMs: 30_000 },
+  maxNestedDepth: 3,
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   return { ...DEFAULT_BUDGET, ...overrides.reduce((out, value) => ({ ...out, ...value }), {}) };
@@ -67,6 +70,10 @@ export function loadSettings(source: unknown): AgentSettings {
         ? Math.max(1, value.maxReconcileBatch)
         : DEFAULT_SETTINGS.maxReconcileBatch,
     rememberAgents: typeof value.rememberAgents === "boolean" ? value.rememberAgents : DEFAULT_SETTINGS.rememberAgents,
+    maxNestedDepth:
+      typeof value.maxNestedDepth === "number" && value.maxNestedDepth >= 0
+        ? Math.floor(value.maxNestedDepth)
+        : DEFAULT_SETTINGS.maxNestedDepth,
     worktree:
       value.worktree && typeof value.worktree === "object"
         ? {

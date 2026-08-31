@@ -41,7 +41,13 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
           : `Run ${params.run_id} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
         return {
           content: [{ type: "text" as const, text }],
-          details: { status: snapshot.status, usage: snapshot.diag.usage },
+          details: {
+            status: snapshot.status,
+            usage: snapshot.diag.usage,
+            ...(snapshot.outcome?.structuredResult !== undefined
+              ? { structuredResult: snapshot.outcome.structuredResult }
+              : {}),
+          },
         };
       }
       const waited = await deps.query.wait(params.run_id, {
@@ -59,7 +65,13 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
       }
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
-        details: { status: waited.outcome.status, usage: waited.outcome.usage },
+        details: {
+          status: waited.outcome.status,
+          usage: waited.outcome.usage,
+          ...(waited.outcome.structuredResult !== undefined
+            ? { structuredResult: waited.outcome.structuredResult }
+            : {}),
+        },
       };
     },
   } satisfies ToolDefinition<typeof ResultToolParams>;

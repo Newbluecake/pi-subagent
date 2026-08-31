@@ -1,13 +1,16 @@
 import type { Clock } from "../core/clock.js";
+import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
   ErrorInfo,
   LifecycleEvent,
   RunDiagnostics,
   RunEffect,
+  RunId,
   RunOutcome,
   RunSnapshot,
   SessionSpec,
+  StopCause,
   SubagentExtensionPoints,
 } from "../core/types.js";
 import type { Notifier } from "../delivery/notifier.js";
@@ -21,7 +24,10 @@ import {
 import type { Reaper } from "../runtime/reaper.js";
 import type { SessionDriver } from "../runtime/session-driver.js";
 import type { SlotPool } from "../runtime/slot-pool.js";
+import { buildToolScopePolicy, createToolScopeEnforcer } from "../runtime/tool-scope.js";
 import type { Watchdog } from "../runtime/watchdog.js";
+import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
+import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
 
 export interface RuntimeAdapterDeps {
@@ -36,6 +42,17 @@ export interface RuntimeAdapterDeps {
   onLifecycle?: LifecycleSink;
   /** M2 Wave 1: the four documented extension hooks (architecture §7.1), pre-merged or raw — mergeExtensionPoints() is idempotent over a single already-merged entry. */
   extensions?: readonly SubagentExtensionPoints[];
+  /**
+   * X3: lazily-resolved narrow spawn port used to build the nested Agent
+   * tool injected into a child session's own SessionSpec.customTools. A
+   * getter (not a value) because createRuntimeRunnerAdapter is constructed
+   * before createSpawnService exists in index.ts (SpawnService itself needs
+   * the runner as one of its own deps) — the getter is called at spawn time,
+   * by which point index.ts has filled in the ref.
+   */
+  nestedSpawn?: () => NestedSpawnPort | undefined;
+  /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
+  onChildAbort?: (runId: RunId, cause: StopCause) => void;
 }
 
 /**
@@ -169,6 +186,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     ...(merged.beforeReap ? { beforeReap: merged.beforeReap } : {}), // H3
     onExtensionError: (hook, runId, error) =>
       console.warn(`[pi-subagent] extension hook ${hook} failed for run ${runId} (ignored): ${error}`),
+    ...(deps.onChildAbort ? { onChildAbort: deps.onChildAbort } : {}), // X3 cascade
   };
   runtime = new RuntimeRunner(runnerDeps);
   /**
@@ -203,6 +221,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   return {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
+      // X10: captures the last StructuredOutput submission for this run, if
+      // any. Populated (only) by the injected tool's onSubmit below; read
+      // again, independently, after the run settles (host-side re-validation
+      // — architecture §7.2 X10 "双重校验").
+      const structured: { value?: unknown } = {};
       try {
         let sessionSpec: SessionSpec = {
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
@@ -210,6 +233,41 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
           ...(spec.type.thinkingLevel === undefined ? {} : { thinkingLevel: spec.type.thinkingLevel }),
         };
+        // X3/X10 built-in injected tools, always applied ahead of any H2
+        // extension (so an extension's resolveSessionSpec still sees — and can
+        // further extend — the full customTools list).
+        const grantedReserved: string[] = [];
+        const customTools: unknown[] = [];
+        if (spec.type.canSpawn?.length && deps.nestedSpawn) {
+          const port = deps.nestedSpawn();
+          if (port) {
+            customTools.push(
+              createAgentTool({
+                spawn: port,
+                parentRunId: spec.runId,
+                allowedTypes: spec.type.canSpawn,
+                forceSlotless: true,
+              }),
+            );
+            grantedReserved.push("Agent");
+          }
+        }
+        if (spec.request.schema !== undefined) {
+          const schema = spec.request.schema;
+          customTools.push(
+            createStructuredOutputTool({
+              schema,
+              onSubmit: (value) => {
+                const result = validateAgainstSchema(schema, value);
+                if (result.ok) structured.value = value;
+                return result;
+              },
+            }),
+          );
+          grantedReserved.push("StructuredOutput");
+        }
+        if (customTools.length)
+          sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };
         // H2: resolveSessionSpec runs before any slot/session resource is
         // acquired and is bounded by startupMs; a throw or timeout fails the
         // run outright ("failed(config)", not a silent fallback to the
@@ -224,6 +282,23 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           if (!resolved.ok) return settleConfigFailure(spec.runId, resolved.error);
           sessionSpec = resolved.value;
         }
+        // X11: re-applied at bind and every turn_end (runtime/runner.ts), not
+        // just once here — this is what actually closes the MCP-late-registration
+        // gap (architecture §7.5). `undefined` allow-list preserves the pre-X11
+        // behavior for agent types without a `tools` field: no restriction
+        // beyond the always-on reserved-name protection.
+        const toolScope = {
+          policy: buildToolScopePolicy({
+            ...(spec.type.tools ? { tools: spec.type.tools } : {}),
+            granted: grantedReserved,
+          }),
+          enforcer: createToolScopeEnforcer({
+            onBlocked: (names) =>
+              console.warn(
+                `[pi-subagent] tool scope: blocked late-registered/reserved tool(s) not in run ${spec.runId}'s whitelist: ${names.join(", ")}`,
+              ),
+          }),
+        };
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
           ...sessionSpec,
@@ -231,8 +306,14 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           ...(spec.request.signal === undefined ? {} : { signal: spec.request.signal }),
           ...(spec.request.slotless === undefined ? {} : { slotless: spec.request.slotless }),
           ...(spec.request.resumeFrom === undefined ? {} : { resumeFrom: spec.request.resumeFrom }),
+          ...(spec.request.parentRunId === undefined ? {} : { parentRunId: spec.request.parentRunId }),
+          toolScope,
         };
-        return await runtime.run(req, spec.budget);
+        let outcome = await runtime.run(req, spec.budget);
+        // X10 host-side re-validation (second of the two mandatory checks).
+        if (spec.request.schema !== undefined)
+          outcome = applyStructuredOutputPolicy(outcome, spec.request.schema, structured.value);
+        return outcome;
       } finally {
         perRun.delete(spec.runId);
       }

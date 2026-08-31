@@ -29,7 +29,19 @@ export type TimeoutReason =
   | "total"
   | `tool:${string}`;
 export type StopCause = "parent_abort" | "user_stop" | "timeout" | "shutdown" | "parent_gone";
-export type ErrorKind = "config" | "auth" | "startup_transient" | "model" | "timeout" | "aborted" | "internal";
+export type ErrorKind =
+  | "config"
+  | "auth"
+  | "startup_transient"
+  | "model"
+  | "timeout"
+  | "aborted"
+  | "internal"
+  /** X10: run reached a terminal state without a schema-valid StructuredOutput submission. */
+  | "schema";
+
+/** X10: opaque JSON Schema object (subset validated by core/json-schema.ts). */
+export type JsonSchema = Record<string, unknown>;
 export interface ErrorInfo {
   kind: ErrorKind;
   message: string;
@@ -71,6 +83,16 @@ export interface AgentTypeConfig {
   color?: string;
   budgetOverride?: Partial<DeadlineBudget>;
   sourcePath?: string;
+  /**
+   * X3: agent type names this type is allowed to spawn as nested subagents.
+   * Undefined/empty = this type cannot nest (no Agent tool is injected into
+   * its own session). This is a declaration on the *parent* type, distinct
+   * from `tools` (frontmatter `tools` still gates the host's own top-level
+   * Agent tool visibility if used there; `canSpawn` gates the *injected*
+   * nested Agent tool's subagent_type whitelist and, authoritatively, the
+   * spawn-service-level depth/whitelist check — architecture §7.2 X3).
+   */
+  canSpawn?: string[];
 }
 export interface SpawnRequest {
   /** Assigned run identifier, used by lifecycle extensions for resource names. */
@@ -88,6 +110,14 @@ export interface SpawnRequest {
   signal?: AbortSignal;
   /** Resume a terminal run by run id or directly by its persisted session file. */
   resumeFrom?: string;
+  /**
+   * X10: require the subagent to submit its final result through an
+   * injected StructuredOutput tool matching this JSON Schema. Validated both
+   * at submission time (child-side, inside the injected tool) and again
+   * independently against the raw captured payload once the run reaches a
+   * terminal state (host-side) — architecture §7.2 X10 "双重校验".
+   */
+  schema?: JsonSchema;
 }
 export interface UsageDelta {
   input: number;
@@ -116,6 +146,8 @@ export interface RunOutcome {
   error?: ErrorInfo;
   timeoutReason?: TimeoutReason;
   usage?: UsageDelta;
+  /** X10: the schema-validated payload submitted via StructuredOutput, once host-side re-validation has also passed. Absent when no schema was requested, or when the run failed(schema). */
+  structuredResult?: unknown;
   turns: number;
   durationMs: Millis;
   diag: RunDiagnostics;
@@ -287,6 +319,16 @@ export interface SessionSpec {
   persist?: boolean;
   /** Existing session file to open for X2 resume. */
   resumeFrom?: string;
+  /**
+   * Additional tool definitions to register for this session (pi's
+   * `createAgentSession({ customTools })`, see 2.9). Typed `unknown[]` here
+   * (not `ToolDefinition[]`) to keep core/types.ts free of
+   * `@earendil-works/*` imports (I1); the driver casts at the point of use
+   * (matches the existing `model?: unknown` convention on this interface).
+   * X3 (nested Agent tool) and X10 (StructuredOutput tool) are injected this
+   * way by service/runtime-adapter.ts before H2 extensions run.
+   */
+  customTools?: unknown[];
 }
 
 /** A resource an injected tool holds that reaper can synchronously, idempotently kill (2.2.2). */

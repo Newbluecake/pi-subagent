@@ -38,9 +38,7 @@ interface Stack {
  */
 const extensionPoints: SubagentExtensionPoints[] = [];
 
-/** X1: worktree isolation (H2 rewrite cwd + H3 commit/remove). Default off;
- *  enable via settings worktree.enabled. Throws (→ failed(config)) when
- *  explicitly requested but unavailable — never silently falls back. */
+/** X1: worktree isolation (H2 rewrite cwd + H3 commit/remove). Default off; enable via settings worktree.enabled. Throws (→ failed(config)) when explicitly requested but unavailable — never silently falls back. */
 function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): void {
   extensionPoints.push(createPiWorktreeExtension(pi, settings.worktree));
 }
@@ -108,6 +106,8 @@ export default function activate(pi: ExtensionAPI): void {
         });
       },
     });
+    // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
+    const spawnRef: { current?: SpawnService } = {};
     const runner = createRuntimeRunnerAdapter({
       clock: systemClock,
       driver: new PiSessionDriver(settings.rememberAgents),
@@ -119,17 +119,21 @@ export default function activate(pi: ExtensionAPI): void {
       extensions: [merged],
       onLifecycle: (event) =>
         pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
+      nestedSpawn: () => spawnRef.current,
+      onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
     });
     const spawn = createSpawnService({
       types,
       pool,
       runner,
       budget: settings.budget,
+      maxNestedDepth: settings.maxNestedDepth,
       onSnapshot: (snapshot) => {
         if (snapshot.diag.startedAt !== undefined && snapshot.diag.startedAt === snapshot.diag.enqueuedAt)
           pi.events.emit("subagent:started", { runId: snapshot.runId, at: snapshot.updatedAt });
       },
     });
+    spawnRef.current = spawn;
     const query = createQueryService({ registry: createRunRegistry(store), runner, clock: systemClock });
     return { spawn, query, orphans: reaper.registry, notifier };
   };

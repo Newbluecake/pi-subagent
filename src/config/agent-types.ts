@@ -40,6 +40,16 @@ function parseFile(text: string, path: string): AgentTypeConfig {
           .map((x) => x.trim())
           .filter(Boolean)
       : undefined;
+  // X3: nested delegation whitelist ("canSpawn" in AgentTypeConfig —
+  // frontmatter key is `can_spawn` to match the existing snake_case
+  // convention of `prompt_mode` / `max_turns` / `display_name`).
+  const canSpawn =
+    typeof fields.can_spawn === "string"
+      ? fields.can_spawn
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean)
+      : undefined;
   const model =
     typeof fields.model === "string" && fields.model.includes("/")
       ? (() => {
@@ -51,6 +61,7 @@ function parseFile(text: string, path: string): AgentTypeConfig {
   const config: AgentTypeConfig = { name, description, systemPrompt: body, promptMode, sourcePath: path };
   if (typeof fields.display_name === "string") config.displayName = fields.display_name;
   if (tools?.length) config.tools = tools;
+  if (canSpawn?.length) config.canSpawn = canSpawn;
   if (model) config.model = model;
   if (
     fields.thinking === "off" ||

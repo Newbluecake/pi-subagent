@@ -1,6 +1,17 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { SpawnService } from "../service/spawn-service.js";
+import type { ErrorInfo, RunId, RunOutcome, SpawnRequest } from "../core/types.js";
+
+/**
+ * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
+ * *nested* Agent tool injected into a child session is given — it never
+ * gets the full SpawnService, only spawn/spawnAndWait, so it structurally
+ * cannot call abort()/waitAll() on unrelated runs).
+ */
+export interface NestedSpawnPort {
+  spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
+  spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
+}
 
 /**
  * "Agent" tool — drop-in replacement for @tintinweb/pi-subagents' Agent tool
@@ -37,6 +48,15 @@ export const AgentToolParams = Type.Object({
         "If true, returns immediately with a run id instead of waiting for completion. Retrieve the result later with get_subagent_result.",
     }),
   ),
+  schema: Type.Optional(
+    Type.Unknown({
+      description:
+        "Optional JSON Schema object. When set, the subagent must submit its final result through an injected " +
+        "StructuredOutput tool matching this schema; the host independently re-validates the submitted payload " +
+        "before the run is considered completed (double validation — architecture §7.2 X10). If the run ends " +
+        "without a schema-valid submission it is reported as failed, not completed with free text.",
+    }),
+  ),
 });
 export type AgentToolParams = Static<typeof AgentToolParams>;
 
@@ -48,9 +68,24 @@ function parseModel(model?: string): { provider: string; id: string } | undefine
 }
 
 export function createAgentTool(deps: {
-  spawn: SpawnService;
+  spawn: NestedSpawnPort;
   parentRunId?: string;
+  /**
+   * X3: when set, this factory produces the *nested* delegation tool
+   * injected into a child session (service/runtime-adapter.ts, gated by the
+   * parent agent type's `canSpawn`). `subagent_type` is rejected outright
+   * (never silently clamped) when it is not in this list — the
+   * spawn-service-level check (spawn-service.ts) re-validates the same
+   * whitelist plus the nesting-depth cap independently, so this check is
+   * defense-in-depth, not the sole enforcement point.
+   */
+  allowedTypes?: readonly string[];
+  /** X3: nested runs are always slotless (do not consume the concurrency pool) — forced here so a nested delegation tool can never be constructed without it. */
+  forceSlotless?: boolean;
 }): ToolDefinition<typeof AgentToolParams> {
+  const nestedNote = deps.allowedTypes
+    ? ` This is a nested delegation tool: subagent_type is restricted to [${deps.allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed).`
+    : "";
   return {
     name: "Agent",
     label: "Agent",
@@ -58,11 +93,18 @@ export function createAgentTool(deps: {
       "Launch an autonomous subagent to handle a complex, multi-step task. The subagent runs in its own bounded session " +
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
       "(completed/failed/timed_out/aborted). Use get_subagent_result to check on or wait for a background run, and " +
-      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to a completed Agent label or run_id to continue its persisted session.",
+      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to a completed Agent label or run_id to continue its persisted session. " +
+      "Set schema to require a structured (schema-validated) result instead of free text." +
+      nestedNote,
     promptSnippet:
-      "Agent(description, prompt, subagent_type, model?, resume?, run_in_background?) - spawn or resume a bounded subagent",
+      "Agent(description, prompt, subagent_type, model?, resume?, schema?, run_in_background?) - spawn or resume a bounded subagent",
     parameters: AgentToolParams,
     async execute(_toolCallId, params, signal) {
+      if (deps.allowedTypes && !deps.allowedTypes.includes(params.subagent_type)) {
+        throw new Error(
+          `nested delegation is not permitted: this agent may only spawn [${deps.allowedTypes.join(", ")}], not "${params.subagent_type}"`,
+        );
+      }
       const modelOverride = parseModel(params.model);
       const request = {
         type: params.subagent_type,
@@ -70,8 +112,10 @@ export function createAgentTool(deps: {
         label: params.description,
         ...(modelOverride ? { modelOverride } : {}),
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
+        ...(deps.forceSlotless ? { slotless: true } : {}),
         ...(params.resume ? { resumeFrom: params.resume } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
+        ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
         ...(signal ? { signal } : {}),
       };
       if (params.run_in_background) {
@@ -93,8 +137,22 @@ export function createAgentTool(deps: {
         throw new Error(`Subagent "${params.description}" did not complete successfully: ${reason}`);
       }
       return {
-        content: [{ type: "text" as const, text: outcome.text ?? "(subagent completed with no text output)" }],
-        details: { runId: outcome.runId, status: outcome.status, turns: outcome.turns, durationMs: outcome.durationMs },
+        content: [
+          {
+            type: "text" as const,
+            text:
+              outcome.structuredResult !== undefined
+                ? JSON.stringify(outcome.structuredResult)
+                : (outcome.text ?? "(subagent completed with no text output)"),
+          },
+        ],
+        details: {
+          runId: outcome.runId,
+          status: outcome.status,
+          turns: outcome.turns,
+          durationMs: outcome.durationMs,
+          ...(outcome.structuredResult !== undefined ? { structuredResult: outcome.structuredResult } : {}),
+        },
       };
     },
   } satisfies ToolDefinition<typeof AgentToolParams>;
