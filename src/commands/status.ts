@@ -5,19 +5,12 @@ import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { formatDuration } from "../ui/fleet-panel.js";
-import { createFleetCommand, type FleetCommandDeps } from "../ui/fleet-command.js";
 
 export interface StatusCommandDeps {
   query: QueryService;
   orphans: OrphanRegistry;
   notifier: Notifier;
-  /**
-   * X7: optional extras for the `/agent fleet` subcommand (idleBudgetMs from
-   * settings enables the half-idle yellow highlight). The panel works without
-   * it — only QueryService is mandatory.
-   */
-  fleet?: Partial<FleetCommandDeps>;
-  /** M3.6: in-flight workflow rows for `/agent status`'s own WORKFLOWS section (independent of the `fleet` subcommand's CC5 splice, so plain `/agent status` shows them too). */
+  /** M3.6: in-flight workflow rows for `/agent status`'s own WORKFLOWS section. */
   workflow?: { activity: { list(): readonly WorkflowActivitySnapshot[] }; now?: () => number };
 }
 
@@ -31,19 +24,22 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent fleet` opens the live panel.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend. The live agent tree is pinned above the editor while runs are active.",
     getArgumentCompletions: (argumentPrefix: string) =>
       [
         { value: "status", label: "status", description: "Text diagnostics (default)" },
         { value: "costs", label: "costs", description: "Per-run cost breakdown" },
-        { value: "fleet", label: "fleet", description: "Live fleet panel (X7)" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim())),
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const tokens = args.trim().split(/\s+/).filter(Boolean);
       const sub = tokens[0];
       if (sub === "fleet") {
-        const command = createFleetCommand({ query: deps.query, ...deps.fleet });
-        return command.handler(args.trim().slice(sub.length).trim(), ctx);
+        // Removed overlay panel — point old muscle memory at the replacements.
+        ctx.ui.notify(
+          "The `/agent fleet` overlay panel was removed. The live agent tree is always pinned above the editor while runs are active; use `/agent status`, `/agent status <runId>` or `/agent costs` for details.",
+          "info",
+        );
+        return;
       }
       if (sub === "costs") {
         ctx.ui.notify(renderCosts(deps.query), "info");

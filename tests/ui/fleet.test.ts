@@ -1,18 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { FakeClock } from "../../src/core/clock.js";
 import type { RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
-import type { QueryService } from "../../src/service/query-service.js";
 import {
   buildFleetViewModel,
   escalationSummary,
-  FleetPanel,
   formatDuration,
   formatUsage,
   highlightOf,
   idleOf,
-  renderFleetLines,
-  type FleetTone,
 } from "../../src/ui/fleet-panel.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -139,7 +133,7 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.activeCount).toBe(3);
   });
 
-  it("caps active rows and reports the overflow", () => {
+  it("caps active rows and reports the overflow in the counts", () => {
     const runs = Array.from({ length: 5 }, (_, i) =>
       snapshot({ runId: `run-${i}`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
     );
@@ -147,8 +141,6 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.rows).toHaveLength(2);
     expect(model.activeCount).toBe(5);
     expect(model.shownActiveCount).toBe(2);
-    const text = renderFleetLines(model).join("\n");
-    expect(text).toContain("+3 more active run(s)");
   });
 
   it("appends only the N most recent terminal runs, dimmed and never highlighted", () => {
@@ -195,162 +187,3 @@ describe("view-model: buildFleetViewModel", () => {
   });
 });
 
-describe("renderFleetLines (plain + injected color)", () => {
-  const opts = { now: 10_000, idleBudgetMs: 1000 };
-
-  it("renders the empty state", () => {
-    const lines = renderFleetLines(buildFleetViewModel([], opts));
-    expect(lines.join("\n")).toContain("No subagent runs recorded");
-    expect(lines[0]).toContain("0 active / 0 total");
-  });
-
-  it("renders run id, status, phase, tool, escalation and usage in the row", () => {
-    const s = snapshot({
-      runId: "abcdef12-3456",
-      diag: diag({
-        currentTool: { name: "read", toolCallId: "t", startedAt: 1 },
-        escalation: [{ level: "L2", at: 1, ok: false }],
-        usage: usage(0.0001),
-      }),
-    });
-    const text = renderFleetLines(buildFleetViewModel([s], opts)).join("\n");
-    expect(text).toContain("abcdef12");
-    expect(text).toContain("running");
-    expect(text).toContain("model_turn");
-    expect(text).toContain("read");
-    expect(text).toContain("esc:L2✗");
-    expect(text).toContain("$0.0001");
-    expect(text).toContain("1 active / 1 total");
-    expect(text).toContain("Usage (all runs):");
-  });
-
-  it("applies the injected color by highlight level — warn yellow, crit red, terminal muted", () => {
-    const warn = snapshot({ runId: "warn-001", diag: diag({ lastEventAt: 9_000 }) });
-    const crit = snapshot({ runId: "crit-001", status: "stopping" });
-    const done = snapshot({ runId: "done-001", status: "completed", phase: "settled", updatedAt: 5 });
-    const model = buildFleetViewModel([warn, crit, done], opts);
-    const color = (tone: FleetTone, text: string) => `<${tone}>${text}</>`;
-    const text = renderFleetLines(model, { color }).join("\n");
-    expect(text).toMatch(/<warn>[^\n]*warn-001/);
-    expect(text).toMatch(/<crit>[^\n]*crit-001/);
-    expect(text).toMatch(/<muted>[^\n]*done-001/);
-    expect(text).not.toMatch(/<warn>[^\n]*done-001/);
-  });
-});
-
-/** CC5 (workflow design §8.2 / §9.3): FleetPanelDeps.extraSections — an optional injection point for a future workflow panel's own pre-rendered lines, spliced in before the AGENTS section. */
-describe("renderFleetLines: CC5 extraSections", () => {
-  const opts = { now: 10_000, idleBudgetMs: 1000 };
-
-  it("prepends every extra section's lines before the AGENTS header, in order", () => {
-    const model = buildFleetViewModel([], opts);
-    const lines = renderFleetLines(model, {
-      extraSections: [{ lines: ["WORKFLOWS (1)", " wf_a91c running"] }, { lines: ["---"] }],
-    });
-    expect(lines.slice(0, 3)).toEqual(["WORKFLOWS (1)", " wf_a91c running", "---"]);
-    expect(lines[3]).toContain("Subagent fleet");
-  });
-
-  it("omitting extraSections leaves rendering byte-for-byte identical to before CC5 (default behavior unchanged)", () => {
-    const s = snapshot({ runId: "plain-001" });
-    const model = buildFleetViewModel([s], opts);
-    expect(renderFleetLines(model)).toEqual(renderFleetLines(model, { extraSections: undefined }));
-    expect(renderFleetLines(model)[0]).toContain("Subagent fleet");
-  });
-});
-
-describe("FleetPanel component", () => {
-  function fakeQuery(runs: RunSnapshot[]): QueryService & { runs: RunSnapshot[] } {
-    const holder = {
-      runs,
-      get: (id: string) => holder.runs.find((r) => r.runId === id),
-      list: () => [...holder.runs],
-      wait: async () => ({ ok: false as const, reason: "unknown_run" as const }),
-      waitAll: async () => ({ settled: [], pending: [] }),
-      steer: async () => ({ ok: false as const, reason: "not_running" as const }),
-      stop: async () => ({ ok: false, escalatedTo: "L4" as const }),
-    };
-    return holder;
-  }
-
-  it("renders current runs and closes on q / esc / ctrl+c, calling done exactly once", () => {
-    const clock = new FakeClock(10_000);
-    const query = fakeQuery([snapshot({ runId: "live-001" })]);
-    let doneCalls = 0;
-    const panel = new FleetPanel({ query, clock, done: () => doneCalls++ });
-    expect(panel.render(120).join("\n")).toContain("live-001");
-    expect(clock.pendingTimers).toBe(1); // refresh timer armed
-
-    panel.handleInput("q");
-    expect(doneCalls).toBe(1);
-    expect(clock.pendingTimers).toBe(0); // timer cleared on close
-    panel.handleInput("q"); // double close is a no-op
-    expect(doneCalls).toBe(1);
-
-    const p2 = new FleetPanel({ query, clock, done: () => doneCalls++ });
-    p2.handleInput("\x1b");
-    const p3 = new FleetPanel({ query, clock, done: () => doneCalls++ });
-    p3.handleInput("\x03");
-    expect(doneCalls).toBe(3);
-  });
-
-  it("auto-refreshes from QueryService.list on the clock tick (data source, not pushed state)", () => {
-    const clock = new FakeClock(10_000);
-    const query = fakeQuery([]);
-    let renders = 0;
-    const panel = new FleetPanel({
-      query,
-      clock,
-      refreshMs: 500,
-      done: () => undefined,
-      tui: { requestRender: () => renders++ },
-    });
-    expect(panel.render(120).join("\n")).toContain("No subagent runs");
-    query.runs.push(snapshot({ runId: "late-run-1" }));
-    clock.advance(500); // refresh tick fires
-    expect(renders).toBeGreaterThan(0);
-    expect(panel.render(120).join("\n")).toContain("late-run");
-    panel.dispose();
-    expect(clock.pendingTimers).toBe(0);
-  });
-
-  it("manual r refresh pulls new data without waiting for the tick", () => {
-    const clock = new FakeClock(10_000);
-    const query = fakeQuery([]);
-    const panel = new FleetPanel({ query, clock, done: () => undefined });
-    query.runs.push(snapshot({ runId: "manual-1" }));
-    panel.handleInput("r");
-    expect(panel.render(120).join("\n")).toContain("manual-1");
-    panel.dispose();
-  });
-
-  it("truncates every rendered line to the viewport width", () => {
-    const clock = new FakeClock(10_000);
-    const query = fakeQuery([
-      snapshot({
-        diag: diag({ currentTool: { name: "a-very-long-tool-name", toolCallId: "t", startedAt: 1 }, usage: usage(1) }),
-      }),
-    ]);
-    const panel = new FleetPanel({ query, clock, done: () => undefined });
-    for (const line of panel.render(40)) expect(visibleWidth(line)).toBeLessThanOrEqual(40);
-    panel.dispose();
-  });
-
-  it("CC5: calls deps.extraSections() fresh on every render and splices its lines in", () => {
-    const clock = new FakeClock(10_000);
-    const query = fakeQuery([]);
-    let calls = 0;
-    const panel = new FleetPanel({
-      query,
-      clock,
-      done: () => undefined,
-      extraSections: () => {
-        calls++;
-        return [{ lines: [`WORKFLOWS tick ${calls}`] }];
-      },
-    });
-    expect(panel.render(120)[0]).toBe("WORKFLOWS tick 1");
-    expect(panel.render(120)[0]).toBe("WORKFLOWS tick 2"); // re-invoked, not cached
-    panel.dispose();
-  });
-});

@@ -27,7 +27,6 @@ import { createStatusCommand } from "./commands/status.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
-import { renderWorkflowFleetSection } from "./ui/workflow-fleet-section.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
 /**
@@ -139,11 +138,6 @@ export default function activate(pi: ExtensionAPI): void {
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
       workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
-      fleet: {
-        idleBudgetMs: settings.budget.idleMs,
-        clock: systemClock,
-        extraSections: () => [renderWorkflowFleetSection(forwardWorkflow(holder).activity.list(), systemClock.now())],
-      },
     }),
   );
 

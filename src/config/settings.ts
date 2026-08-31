@@ -64,7 +64,7 @@ export interface AgentSettings {
   worktree: { enabled: boolean; gitTimeoutMs: number };
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Exceeding this is rejected at spawn time as a config error, never silently truncated. */
   maxNestedDepth: number;
-  /** X7b: always-on fleet widget pinned above the editor while subagent runs are active. The `/agent fleet` full-screen panel is unaffected by this switch. Default true. */
+  /** X7b: always-on agent-tree widget pinned above the editor while subagent runs are active. Default true. */
   fleetWidget: boolean;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
   workflow: WorkflowSettings;
