@@ -67,6 +67,13 @@ export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3)
     const dur = r.endedAt === undefined ? "running…" : formatDuration(r.endedAt - r.startedAt);
     lines.push(`${mark} ${r.name}${r.argsPreview ? ` ${r.argsPreview}` : ""} (${dur})`);
   }
+  // M5: the subagent's own streaming text tail (diag.text accumulates via
+  // text_delta) — the "what is it saying right now" line.
+  const tail = d.text?.trimEnd().split("\n").filter(Boolean).pop();
+  if (tail) {
+    const compact = tail.replace(/\s+/g, " ").trim();
+    lines.push(`💬 ${compact.length > 76 ? `…${compact.slice(-75)}` : compact}`);
+  }
   return lines;
 }
 

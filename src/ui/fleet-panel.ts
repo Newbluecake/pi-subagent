@@ -59,6 +59,8 @@ export interface FleetRow {
   /** X3 nested run (spawned with parentRunId). */
   nested: boolean;
   terminal: boolean;
+  /** M6: for terminal rows, how long ago the run settled (now - updatedAt); undefined for active rows. */
+  settledAgoMs: Millis | undefined;
   highlight: FleetHighlight;
 }
 
@@ -201,6 +203,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     usage: snapshot.diag.usage,
     nested: snapshot.parentRunId !== undefined,
     terminal,
+    settledAgoMs: terminal ? Math.max(0, opts.now - snapshot.updatedAt) : undefined,
     highlight: highlightOf(snapshot, opts),
   };
 }

@@ -6,6 +6,8 @@ import { withDeadline } from "../core/deadline.js";
 import type { Orchestrator, OrchestratorRunRequest } from "../workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "../workflow/activity.js";
 import type { WorkflowId, WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
+import type { UsageDelta } from "../core/types.js";
+import { toPiToolUsage } from "./usage.js";
 
 /**
  * M3.6 (workflow design \u00a75.1/\u00a74.3/\u00a74.3.2): the `SubagentWorkflow` tool \u2014
@@ -25,6 +27,8 @@ export interface WorkflowToolDeps {
   readonly defaultBudget: WorkflowRunBudget;
   readonly activity: WorkflowActivityRegistry;
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
+  /** M8: resolve a live child run's lifetime usage so the workflow tool result can carry the aggregate spend (pi usage accounting). */
+  usageOf?(runId: string): UsageDelta | undefined;
 }
 
 /**
@@ -264,13 +268,37 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
             `workflow "${workflowId}" did not complete successfully: ${reason}\n${renderOutcomeText(outcome)}`,
           );
         }
+        // M8: aggregate the LIVE children's spend onto this tool result (pi
+        // usage accounting — same mechanism as the Agent tool). Replay hits
+        // cost nothing and carry no fresh runId; withheld/running children
+        // without a runId contribute nothing. runIds ride along in details so
+        // an external HUD (pi-hud) can dedupe its event-reported live costs.
+        const liveRunIds = outcome.children
+          .filter((c) => c.source === "live" && c.runId !== undefined)
+          .map((c) => c.runId!);
+        const childUsages = deps.usageOf ? liveRunIds.map((id) => deps.usageOf!(id)).filter(Boolean) : [];
+        const totalUsage = (childUsages as UsageDelta[]).reduce<UsageDelta | undefined>(
+          (acc, u) =>
+            acc
+              ? {
+                  input: acc.input + u.input,
+                  output: acc.output + u.output,
+                  cacheRead: acc.cacheRead + u.cacheRead,
+                  cacheWrite: acc.cacheWrite + u.cacheWrite,
+                  costUsd: acc.costUsd + u.costUsd,
+                }
+              : u,
+          undefined,
+        );
         return {
           content: [{ type: "text" as const, text: renderOutcomeText(outcome) }],
+          ...(totalUsage ? { usage: toPiToolUsage(totalUsage) } : {}),
           details: {
             workflowId: outcome.workflowId,
             status: outcome.status,
             durationMs: outcome.durationMs,
             children: outcome.children,
+            runIds: liveRunIds,
             ...(outcome.replay ? { replay: outcome.replay } : {}),
           },
         };

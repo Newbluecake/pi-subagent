@@ -60,6 +60,8 @@ export function formatWidgetCost(costUsd: number): string {
 export interface FleetWidgetRenderOptions {
   /** Run rows shown below the header line. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
+  /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
+  terminalLingerMs?: number;
   /** Color injector, same tones as the panel (warn/crit/muted); default plain text. */
   color?: FleetColorize;
 }
@@ -74,6 +76,15 @@ function widgetRowDetail(row: FleetRow): string {
   parts.push(row.phase, formatDuration(row.elapsedMs));
   const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
   if (trail) parts.push(trail);
+  if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
+  return parts.join(" ");
+}
+
+/** M6: a just-finished run's dimmed row: "✓ 任务名 #id type model completed 39s $0.11". */
+function widgetTerminalDetail(row: FleetRow): string {
+  const parts = [row.label ? `${row.label} #${row.shortRunId}` : row.shortRunId, row.type ?? "·"];
+  if (row.model) parts.push(row.model);
+  parts.push(row.status, formatDuration(row.elapsedMs));
   if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
   return parts.join(" ");
 }
@@ -114,12 +125,17 @@ export function buildFleetWidgetLines(
   model: FleetViewModel,
   opts: FleetWidgetRenderOptions = {},
 ): string[] | undefined {
-  if (model.activeCount === 0) return undefined;
   const color: FleetColorize = opts.color ?? ((_tone, text) => text);
   const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
+  const lingerMs = opts.terminalLingerMs ?? 5000;
   const activeRows = model.rows.filter((r) => !r.terminal);
-  if (activeRows.length === 0) return undefined; // defensive: activeCount/rows disagree
-  const worst = activeRows[0]!.highlight;
+  // M6: just-finished runs linger dimmed for a few seconds so a completion is
+  // perceivable instead of vanishing between two ticks.
+  const recentTerminal = model.rows.filter(
+    (r) => r.terminal && r.settledAgoMs !== undefined && r.settledAgoMs <= lingerMs,
+  );
+  if (model.activeCount === 0 && recentTerminal.length === 0) return undefined;
+  const worst = activeRows[0]?.highlight ?? "none";
   const ordered = treeOrder(activeRows).slice(0, maxRows);
   const hidden = model.activeCount - ordered.length;
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
@@ -131,6 +147,10 @@ export function buildFleetWidgetLines(
   for (const { row, depth } of ordered) {
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
     lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`));
+  }
+  for (const row of recentTerminal.slice(0, Math.max(0, maxRows - ordered.length))) {
+    const mark = row.status === "completed" ? "✓" : "✗";
+    lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
   }
   return lines;
 }
@@ -200,7 +220,7 @@ export class FleetWidgetController {
     if (!this.live) return;
     const model = buildFleetViewModel(this.deps.query.list(), {
       now: this.clock.now(),
-      recentTerminal: 0, // widget shows active runs only
+      recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
       maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
       ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
       ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),

@@ -216,13 +216,30 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[0]).toContain(`+${12 - WIDGET_MAX_ROWS} more`);
   });
 
-  it("terminal rows in a mixed model are ignored (active-only tree)", () => {
+  it("M6: just-finished runs linger dimmed (✓/✗) within terminalLingerMs, then vanish", () => {
     const active = snapshot({ runId: "live-0000", diag: diag({ lastEventAt: 9_900 }) });
-    const done = snapshot({ runId: "done-0000", status: "completed", phase: "settled", updatedAt: 9_999 });
-    const model = buildFleetViewModel([active, done], { ...OPTS, recentTerminal: 3 });
+    const done = snapshot({
+      runId: "done-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_999,
+      diag: diag({ usage: usage(0.11), label: "刚完成" }),
+    });
+    const failed = snapshot({ runId: "fail-0000", status: "failed", phase: "settled", updatedAt: 9_998 });
+    const old = snapshot({ runId: "old-00000", status: "completed", phase: "settled", updatedAt: 1_000 }); // 9s ago
+    const model = buildFleetViewModel([active, done, failed, old], { ...OPTS, recentTerminal: 3 });
     const lines = buildFleetWidgetLines(model)!;
-    expect(lines).toHaveLength(2);
     expect(lines[0]).toContain("1 active");
+    expect(lines[1]).toContain("live-000");
+    expect(lines.some((l) => l.startsWith("✓ 刚完成 #done-000") && l.includes("completed") && l.includes("$0.11"))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.startsWith("✗ fail-000") && l.includes("failed"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("old-0000"); // 9s ago → expired
+    // all-terminal fleet: still shown while lingering, hidden once expired
+    const onlyDone = buildFleetViewModel([done], { ...OPTS, recentTerminal: 3 });
+    expect(buildFleetWidgetLines(onlyDone)![0]).toContain("0 active");
+    expect(buildFleetWidgetLines(onlyDone, { terminalLingerMs: 0 })).toBeUndefined();
   });
 });
 

@@ -185,3 +185,33 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
     expect(text).toContain("Error: [model] reasoning_effort medium not supported");
   });
 });
+
+describe("M7 renderCosts", () => {
+  it("lists runs cost-descending with status marks and a grand total", async () => {
+    const { renderCosts } = await import("../../src/commands/status.js");
+    const cheap = snapshot({
+      runId: "cheap-000",
+      diag: { ...snapshot().diag, label: "便宜任务", settledAt: 10_000, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 } },
+    });
+    const pricey = snapshot({
+      runId: "pricey-00",
+      status: "running",
+      phase: "model_turn",
+      diag: { ...snapshot().diag, label: "贵任务", agentType: "architect", model: { provider: "p", id: "opus-5" }, usage: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0, costUsd: 1.5 } },
+    });
+    const text = renderCosts({ ...({} as object), list: () => [cheap, pricey] } as never);
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("2 run(s)");
+    expect(lines[1]).toContain("$1.5000");
+    expect(lines[1]).toContain("▸ pricey-0");
+    expect(lines[1]).toContain("opus-5");
+    expect(lines[1]).toContain("running");
+    expect(lines[2]).toContain("$0.0100");
+    expect(lines[2]).toContain("✓ cheap-00");
+    expect(text).toContain("Total: $1.5100");
+  });
+  it("handles an empty session", async () => {
+    const { renderCosts } = await import("../../src/commands/status.js");
+    expect(renderCosts({ list: () => [] } as never)).toContain("No subagent runs");
+  });
+});

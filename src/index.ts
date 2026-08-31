@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { SubagentExtensionPoints } from "./core/types.js";
+import type { SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
@@ -226,6 +226,7 @@ function forwardWorkflow(holder: { current?: Stack }): {
   defaultBudget: WorkflowRunBudget;
   activity: WorkflowActivityRegistry;
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
+  usageOf(runId: string): UsageDelta | undefined;
 } {
   return {
     get defaultBudget() {
@@ -235,6 +236,8 @@ function forwardWorkflow(holder: { current?: Stack }): {
       return requireStack(holder).workflow.activity;
     },
     createOrchestrator: (workflowId) => requireStack(holder).workflow.createOrchestrator(workflowId),
+    // M8: child spend lookup for the workflow tool's aggregate usage.
+    usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
   };
 }
 function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {

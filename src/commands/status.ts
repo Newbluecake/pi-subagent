@@ -31,10 +31,11 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent fleet` opens the live panel.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent fleet` opens the live panel.",
     getArgumentCompletions: (argumentPrefix: string) =>
       [
         { value: "status", label: "status", description: "Text diagnostics (default)" },
+        { value: "costs", label: "costs", description: "Per-run cost breakdown" },
         { value: "fleet", label: "fleet", description: "Live fleet panel (X7)" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim())),
     handler: async (args: string, ctx: ExtensionCommandContext) => {
@@ -43,6 +44,10 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
       if (sub === "fleet") {
         const command = createFleetCommand({ query: deps.query, ...deps.fleet });
         return command.handler(args.trim().slice(sub.length).trim(), ctx);
+      }
+      if (sub === "costs") {
+        ctx.ui.notify(renderCosts(deps.query), "info");
+        return;
       }
       // M-C4: `/agent status <runId-or-prefix>` (or `/agent <runId>`) — one run's tool timeline.
       const idArg = sub === "status" ? tokens[1] : sub;
@@ -127,6 +132,40 @@ export function renderRunDetail(query: QueryService, idArg: string): string {
   if (d.error) lines.push(`  Error: [${d.error.kind}] ${d.error.message.slice(0, 300)}`);
   if (d.timeoutReason) lines.push(`  Timeout: ${d.timeoutReason}`);
   if (d.sessionFile) lines.push(`  Session: ${d.sessionFile}`);
+  return lines.join("\n");
+}
+
+/**
+ * M7: `/agent costs` — per-run spend breakdown (cost-descending), separating
+ * active from finished runs, with a grand total. Answers "钱花哪了" without
+ * digging through notifications.
+ */
+export function renderCosts(query: QueryService): string {
+  const runs = [...query.list()].sort((a, b) => (b.diag.usage?.costUsd ?? 0) - (a.diag.usage?.costUsd ?? 0));
+  if (runs.length === 0) return "No subagent runs recorded this session.";
+  const terminalStatuses = ["completed", "failed", "timed_out", "aborted"];
+  const lines = [`Subagent costs — ${runs.length} run(s)`];
+  for (const s of runs) {
+    const d = s.diag;
+    const active = !terminalStatuses.includes(s.status);
+    const cost = d.usage ? `$${d.usage.costUsd.toFixed(4)}` : "$0.0000";
+    const cols = [
+      `  ${cost.padStart(8)}`,
+      active ? "▸" : s.status === "completed" ? "✓" : "✗",
+      s.runId.slice(0, 8),
+      (d.label ?? "·").slice(0, 24).padEnd(24),
+      (d.agentType ?? "·").padEnd(12),
+      (d.model?.id ?? "·").padEnd(14),
+      `${d.turns}t`,
+      d.settledAt !== undefined ? formatDuration(Math.max(0, d.settledAt - d.createdAt)) : "running",
+    ];
+    lines.push(cols.join(" "));
+  }
+  const total = sumUsage(runs.map((s) => s.diag.usage));
+  if (total)
+    lines.push(
+      `  Total: $${total.costUsd.toFixed(4)} · in:${total.input} out:${total.output} cache_r:${total.cacheRead}`,
+    );
   return lines.join("\n");
 }
 

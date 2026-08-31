@@ -266,3 +266,18 @@ describe("M-B: renderResult", () => {
     expect(expanded).toContain("line8");
   });
 });
+
+describe("M5: streaming text tail in progress lines", () => {
+  it("appends the last non-empty line of diag.text, whitespace-collapsed and tail-truncated", () => {
+    const snap = snapshot({ diag: diag({ text: "第一段\n\n正在分析 src/core 的  状态机\n" }) });
+    const lines = buildProgressLines(snap, 1_000);
+    expect(lines[lines.length - 1]).toBe("💬 正在分析 src/core 的 状态机");
+    const long = snapshot({ diag: diag({ text: `x\n${"很".repeat(100)}` }) });
+    const tail = buildProgressLines(long, 1_000).pop()!;
+    expect(tail.startsWith("💬 …")).toBe(true);
+    expect(tail.length).toBeLessThanOrEqual(80);
+  });
+  it("omits the tail line when no text has streamed yet", () => {
+    expect(buildProgressLines(snapshot(), 1_000).some((l) => l.startsWith("💬"))).toBe(false);
+  });
+});
