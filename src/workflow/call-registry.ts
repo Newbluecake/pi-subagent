@@ -1,4 +1,4 @@
-import type { Clock } from "../core/clock.js";
+import type { Clock, TimerHandle } from "../core/clock.js";
 import type { Millis, RunId } from "../core/types.js";
 import type { CallCancelEffect, CallId, CallPhase, CallState } from "./types.js";
 
@@ -41,6 +41,13 @@ export interface CallRegistry {
   cancel(callId: CallId, cause: string): CallCancelEffect;
   /** CR5: cancelAll + close registry to further `submit()` (paired with `close_gate`, WR7). */
   cancelAll(cause: string): { withheld: CallId[]; retrying: CallId[]; stopped: CallId[]; alreadySettled: CallId[] };
+  /**
+   * M3.3 §4.3.1.1: snapshot of every call not yet in phase `settled`, for
+   * building the ① `outcomeAt1()` view (RC1's exception — only legal on a
+   * `pendingReconcile:true` snapshot) and for WL4's `reconcile_children`
+   * bounded sweep.
+   */
+  listActive(): Array<{ callId: CallId; runId?: RunId; phase: CallPhase }>;
   readonly closed: boolean;
   readonly stats: Record<CallPhase, number> & { retryingCancels: number };
 }
@@ -50,6 +57,17 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
   const calls = new Map<CallId, CallState>();
   /** CR4: "cancel arrived before submit" — cancel causes recorded here, consulted by `submit`/`bind`. */
   const preIntents = new Map<CallId, string>();
+  /**
+   * M3.3 hygiene fix (found while adding real abort-pipeline tests, WR4/WP9
+   * class): the retry loop's next-attempt timer must be cancelled the
+   * instant a call settles independently (its real outcome arrived via
+   * `handleAgent`'s own `waitAll().then()`, not via this loop succeeding) —
+   * otherwise a harmless-but-armed `Clock.setTimer` outlives the call,
+   * violating "no armed timers survive a terminal decision" the moment the
+   * *workflow* itself settles too (`FakeClock.pendingTimers` would be
+   * nonzero even though nothing is actually still trying to do anything).
+   */
+  const retryTimers = new Map<CallId, TimerHandle>();
   let closed = false;
 
   function countByPhase(): Record<CallPhase, number> {
@@ -63,6 +81,7 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
     if (!state) return;
     const startedAt = deps.clock.now();
     const attempt = (): void => {
+      retryTimers.delete(callId); // the timer that fired to invoke this attempt is now spent.
       const current = calls.get(callId);
       if (!current || current.phase === "settled") return; // settled independently — no need to keep retrying (CR7).
       void deps.abort(runId, cause).then((ok) => {
@@ -77,7 +96,7 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
           deps.onCancelRetryGivenUp?.(callId, runId); // CR7: give up boundedly, never blocks workflow settle.
           return;
         }
-        deps.clock.setTimer(cancelRetryMs, attempt);
+        retryTimers.set(callId, deps.clock.setTimer(cancelRetryMs, attempt));
       });
     };
     // §3.6 step 2: try once immediately, then fall back to the cancelRetryMs cadence (step 3).
@@ -119,6 +138,11 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
       if (!state) return;
       state.phase = "settled";
       state.settledAt = at;
+      const timer = retryTimers.get(callId);
+      if (timer) {
+        deps.clock.clearTimer(timer);
+        retryTimers.delete(callId);
+      }
     },
     resolve(callId) {
       return calls.get(callId);
@@ -159,6 +183,14 @@ export function createCallRegistry(deps: CallRegistryDeps): CallRegistry {
         else if (effect === "stopped") stopped.push(callId);
       }
       return { withheld, retrying, stopped, alreadySettled };
+    },
+    listActive() {
+      const out: Array<{ callId: CallId; runId?: RunId; phase: CallPhase }> = [];
+      for (const c of calls.values()) {
+        if (c.phase === "settled") continue;
+        out.push({ callId: c.callId, phase: c.phase, ...(c.runId !== undefined ? { runId: c.runId } : {}) });
+      }
+      return out;
     },
     get closed() {
       return closed;

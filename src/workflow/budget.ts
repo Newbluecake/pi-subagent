@@ -1,3 +1,4 @@
+import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { Millis } from "../core/types.js";
 import type { WorkflowRunBudget } from "./types.js";
 
@@ -31,6 +32,15 @@ export interface WorkflowBudgetView {
 export interface DerivedChildBudget {
   /** Milliseconds this specific child is allotted, before either cap kicks in. */
   readonly totalMs: Millis;
+  /**
+   * M3.3 Minor fix (workflow design §4.4.3 BW3): `min(DEFAULT_BUDGET.queueWaitMs, totalMs)` —
+   * previously computed nowhere, so a workflow-derived child with a short
+   * relative budget could still sit in the core's spawn queue for up to the
+   * core default `queueWaitMs` (600s) before it was even considered
+   * expired, silently defeating BW1's whole point. Threaded through
+   * `host.ts` into `ChildSpawner.spawn`'s `budgetOverride.queueWaitMs`.
+   */
+  readonly queueWaitMs: Millis;
   /** BW9': CC4's absolute upper bound — always `min(workflowDeadlineAt, phaseDeadlineAt)` when either is finite. */
   readonly deadlineAt?: Millis;
   readonly capped: "want" | "policy" | "phase" | "workflow" | "expired";
@@ -74,10 +84,14 @@ export function deriveChildBudget(view: WorkflowBudgetView, want: Millis | undef
   const winner = candidates[0]!;
 
   if (winner.ms <= 0) {
-    return { totalMs: 0, capped: "expired" };
+    return { totalMs: 0, queueWaitMs: 0, capped: "expired" };
   }
 
   const totalMs = winner.ms === POSITIVE_INFINITY_MS ? Number.MAX_SAFE_INTEGER : Math.floor(winner.ms);
+  // BW3: queue-wait must not outlive the child's own total budget, or the
+  // core's queue could hold an admission open long after this workflow could
+  // possibly still use its result.
+  const queueWaitMs = Math.min(DEFAULT_BUDGET.queueWaitMs, totalMs);
 
   // BW9': deadlineAt = min(workflowDeadlineAt, phaseDeadlineAt), independent
   // of which one actually capped `totalMs` — this is what makes "child dies
@@ -95,5 +109,5 @@ export function deriveChildBudget(view: WorkflowBudgetView, want: Millis | undef
     deadlineAt = undefined; // BW10: workflowTotalMs=0 (and no phase cap) ⇒ genuinely unbounded.
   }
 
-  return { totalMs, capped: winner.capped, ...(deadlineAt !== undefined ? { deadlineAt } : {}) };
+  return { totalMs, queueWaitMs, capped: winner.capped, ...(deadlineAt !== undefined ? { deadlineAt } : {}) };
 }

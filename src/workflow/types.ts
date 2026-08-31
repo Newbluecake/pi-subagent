@@ -76,8 +76,18 @@ export interface ScriptMeta {
   readonly phases?: readonly { readonly title: string }[];
 }
 
-/** §3.2: why a workflow run stopped (M3.1 subset — no child/abort causes yet, those land in M3.3). */
-export type WorkflowStopCause = "user_stop" | "timeout" | "script_error" | "worker_died" | "runaway" | "shutdown";
+/**
+ * §3.2/§7.1: why a workflow run stopped. M3.3 adds `parent_abort` (WI5
+ * reverse propagation: this workflow was itself stopped because whatever
+ * `stopChildrenOf`-style owner it runs under decided to stop it — the
+ * plumbing that actually calls `Orchestrator.stop(id, "parent_abort")` lives
+ * above `src/workflow/**` and is out of this milestone's scope, see the
+ * hand-off note in orchestrator.ts) and `phase_timeout` (WT7, reserved:
+ * phase tracking itself is M3.4, so no code path produces this cause yet —
+ * kept here so M3.4 does not need a WorkflowStopCause change).
+ */
+export type WorkflowStopCause =
+  "user_stop" | "timeout" | "script_error" | "worker_died" | "runaway" | "shutdown" | "parent_abort" | "phase_timeout";
 
 /** §3.2: which absolute/relative deadline fired (M3.1 subset of WT1–WT19). */
 export type WorkflowTimeoutReason =
@@ -91,6 +101,20 @@ export interface WorkflowHeartbeatDiag {
   readonly stalledMs: Millis;
 }
 
+/**
+ * §7.2 WL4 / RC3-RC4: a call whose child never reached a terminal state
+ * within `reconcileMs` of the workflow's own logical terminal decision. Once
+ * a call lands here it is permanently removed from `WorkflowOutcome.children`
+ * (RC1: a `pendingReconcile:false` outcome's `children[]` may only contain
+ * terminal/`withheld` entries — no `running`/`stopping` residue).
+ */
+export interface OrphanChildSummary {
+  readonly callId: CallId;
+  readonly runId?: RunId;
+  readonly reason: "reconcile_timeout" | "cancel_retry_exhausted";
+  readonly at: Millis;
+}
+
 export interface WorkflowDiagnostics {
   readonly createdAt: Millis;
   readonly startedAt?: Millis;
@@ -99,6 +123,10 @@ export interface WorkflowDiagnostics {
   readonly heartbeat: WorkflowHeartbeatDiag;
   readonly logLines: number;
   readonly orphanWorker?: { readonly threadId?: number; readonly reason: string; readonly at: Millis };
+  /** M3.3 §3.6 CR6: calls whose A2 bounded-retry cancel loop is still in flight at the moment this snapshot was taken (only meaningful on `outcomeAt1()`-shaped, `pendingReconcile:true` snapshots — always 0 once `pendingReconcile` is `false`, since WL4's reconcile finalizes every call one way or another). */
+  readonly retryingCancels?: number;
+  /** M3.3 EI5: set when `resolve_settled` itself failed to apply (a defect in the effect pipeline, not in the workflow) and this outcome is the EI5 fallback rather than a normally-reconciled one. */
+  readonly degraded?: "settlement_apply_failed";
 }
 
 /**
@@ -110,7 +138,14 @@ export interface WorkflowDiagnostics {
 export interface WorkflowOutcome {
   readonly workflowId: WorkflowId;
   readonly status: WorkflowTerminalStatus;
-  readonly pendingReconcile: false;
+  /**
+   * M3.3 (§4.3.1.1): `true` on an `outcomeAt1()`-shaped ("①") snapshot —
+   * `children[].status` may then include the non-terminal `"running"` /
+   * `"stopping"` values. Every outcome `Orchestrator.run()`/`settled()`
+   * resolve with is the "②" snapshot and always has this `false` (RC1);
+   * `outcomeAt1()` is the only producer of `true`.
+   */
+  readonly pendingReconcile: boolean;
   readonly result?: unknown;
   readonly error?: { readonly message: string; readonly stack?: string };
   readonly timeoutReason?: WorkflowTimeoutReason;
@@ -118,16 +153,17 @@ export interface WorkflowOutcome {
   readonly durationMs: Millis;
   readonly diag: WorkflowDiagnostics;
   /**
-   * M3.2 (§3.3, slice): every `agent()` call submitted during this run, in
-   * submission order (stable, assertable — mirrors the full design's
+   * M3.2/M3.3 (§3.3, slice): every `agent()` call submitted during this run,
+   * in submission order (stable, assertable — mirrors the full design's
    * `WorkflowChildSummary[]`). Always `[]` for scripts that never call
-   * `agent()`. `pendingReconcile` stays permanently `false` in M3.2 (no
-   * abort/reconcile pipeline yet, M3.3) — by the time `run()` resolves, the
-   * host's own accounting has every submitted call in a terminal phase
-   * (settled or withheld), because `terminate()`'s S4 (host.ts) rejects
-   * whatever is still pending before the orchestrator ever calls `settle()`.
+   * `agent()`. RC1: once `pendingReconcile` is `false`, every entry here is
+   * terminal or `withheld` — nothing `running`/`stopping` survives WL4's
+   * `reconcile_children` (calls that didn't make it are moved to
+   * `orphanChildren` instead, never left behind here).
    */
   readonly children: readonly WorkflowChildSummary[];
+  /** M3.3 §7.2 WL4 / RC3-RC4: calls reconcile_children gave up on (bounded `reconcileMs`) or the A2 retry loop gave up on (bounded `cancelRetryWindowMs`, CR7). Always `[]` when nothing needed to be given up on. */
+  readonly orphanChildren?: readonly OrphanChildSummary[];
 }
 
 /** §2.3/§4.1 WT2/WT3/WT9/WT11: the M3.1 slice of `WorkflowBudget` actually consumed by the isolation shell. */
@@ -156,6 +192,12 @@ export interface WorkflowRunBudget {
   readonly childBudgetPolicy?: "inherit_remaining" | "fixed" | "fraction";
   readonly childBudgetFraction?: number;
   readonly childTotalMs?: Millis;
+  /** M3.3 WT10: WL2's bounded wait for still-active children to settle for real before WL4 gives up on them. Optional, default 10_000 (§4.1). */
+  readonly abortGraceMs?: Millis;
+  /** M3.3 WT19: WL4's single bounded snapshot read of whatever is still outstanding after `abortGraceMs`. Optional, default 1_000 (§4.1). */
+  readonly reconcileMs?: Millis;
+  /** M3.3 WT18/§3.6: the A2 bounded-retry cancel loop's give-up window. Optional, default `startupMs`(30_000)+5_000 (§4.1, matches host.ts's M3.2 fixed default). */
+  readonly cancelRetryWindowMs?: Millis;
 }
 
 /** §3.5: what `WorkerHost.boot()` needs to start the worker thread and its sandboxed script. */
@@ -232,16 +274,50 @@ export interface HostCallEnvelope {
   readonly args: unknown;
 }
 
-/** M3.2 §3.5: the host->worker ack segment. `agent` acks carry `{ callId, deadlineAt }` (HR3); `gate` acks carry the finished exec result (single-segment RPC, §4.1 WT6). */
+/**
+ * M3.2 §3.5: the host->worker ack segment. `agent` acks carry `{ callId, deadlineAt }` (HR3); `gate` acks carry the finished exec result (single-segment RPC, §4.1 WT6).
+ *
+ * M3.3 Blocker fix (verification finding B): this envelope **must** carry a
+ * `kind` discriminator — `worker-source.ts`'s inbound dispatch (`commPort.on("message", ...)`)
+ * switches on `msg.kind === "host_ack"`/`"host_settle"` and silently drops anything else.
+ * Before this fix `host.ts` sent these envelopes without `kind`, so every real
+ * `agent()`/`gate()` ack/settle was dropped worker-side and the calling script's
+ * `await` hung until HR1's client-side timeout (or, with no per-call timeout
+ * override, effectively until WT8). `host.test.ts`'s coverage used a fake
+ * `WorkerHost` double that never round-tripped through the real worker-source
+ * dispatcher, so this never showed up there — see `worker-host-call.test.ts`
+ * for the real-worker regression coverage this fix adds.
+ */
 export type HostAckEnvelope =
-  | { readonly id: string; readonly ok: true; readonly value: unknown }
-  | { readonly id: string; readonly ok: false; readonly error: { readonly message: string } }
-  | { readonly id: string; readonly ok: false; readonly cancelled: true; readonly cause: string };
+  | { readonly kind: "host_ack"; readonly id: string; readonly ok: true; readonly value: unknown }
+  | {
+      readonly kind: "host_ack";
+      readonly id: string;
+      readonly ok: false;
+      readonly error: { readonly message: string };
+    }
+  | {
+      readonly kind: "host_ack";
+      readonly id: string;
+      readonly ok: false;
+      readonly cancelled: true;
+      readonly cause: string;
+    };
 
-/** M3.2 §3.3 HR3: the host->worker settle segment, pushed asynchronously once an `agent()` child reaches a terminal state. */
+/**
+ * M3.2 §3.3 HR3: the host->worker settle segment, pushed asynchronously once
+ * an `agent()` child reaches a terminal state. Same M3.3 Blocker fix as
+ * `HostAckEnvelope` above — `kind` is required so `worker-source.ts` can
+ * actually route it.
+ */
 export type HostSettleEnvelope =
-  | { readonly callId: string; readonly ok: true; readonly value: unknown }
-  | { readonly callId: string; readonly ok: false; readonly error: { readonly message: string } };
+  | { readonly kind: "host_settle"; readonly callId: string; readonly ok: true; readonly value: unknown }
+  | {
+      readonly kind: "host_settle";
+      readonly callId: string;
+      readonly ok: false;
+      readonly error: { readonly message: string };
+    };
 
 /**
  * §3.5: the host-side handle for one worker thread running one workflow's

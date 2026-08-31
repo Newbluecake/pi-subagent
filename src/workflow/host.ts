@@ -8,6 +8,7 @@ import type {
   HostAckEnvelope,
   HostCallEnvelope,
   HostSettleEnvelope,
+  OrphanChildSummary,
   WorkerHost,
   WorkflowChildSummary,
   WorkflowRunBudget,
@@ -48,9 +49,26 @@ export interface ChildSpawner {
     label?: string;
     deadlineAt?: Millis;
     parentRunId?: string;
+    /**
+     * M3.3 Minor fix (§4.4.3 BW1/BW3): the relative budget `deriveChildBudget`
+     * computed, threaded all the way to `SpawnRequest.budgetOverride` —
+     * previously only the absolute `deadlineAt` cap was forwarded, so a
+     * `SpawnService` that (like the real one) resolves relative
+     * `totalMs`/`queueWaitMs` at the child's own enqueue time had no relative
+     * signal at all, only the CC4 ceiling.
+     */
+    budgetOverride?: { totalMs?: Millis; queueWaitMs?: Millis };
   }): Promise<ChildSpawnResult | ChildSpawnError>;
   abort(runId: RunId, cause?: string): Promise<boolean>;
   waitAll(opts: { runIds: RunId[] }): Promise<{ settled: ChildOutcome[]; pending: RunId[] }>;
+  /**
+   * M3.3 §3.7 OS1/OS4: workflow-scoped bulk stop — structurally compatible
+   * with `SpawnService.stopChildrenOf` (CC1). Optional: when absent, WL2
+   * falls back to per-call `abort()` via `CallRegistry.cancelAll` alone
+   * (still correct, just without the OS4 sweep's extra safety net for
+   * children the registry never learned about).
+   */
+  stopChildrenOf?(parentRunId: string, cause: string): Promise<{ stopped: RunId[]; pending: RunId[] }>;
 }
 
 export type GateRunner = (
@@ -73,6 +91,7 @@ export interface HostCallHandlerDeps {
     | "childBudgetPolicy"
     | "childBudgetFraction"
     | "childTotalMs"
+    | "cancelRetryWindowMs"
   >;
   /** WR2-equivalent: the workflow's own absolute deadline, computed once at enqueue and never recomputed here. */
   readonly workflowDeadlineAt?: Millis;
@@ -87,6 +106,14 @@ export interface HostCallHandler {
   readonly children: readonly WorkflowChildSummary[];
   /** Best-effort: attempts to stop every still-active child (used ahead of a future M3.3 abort pipeline; harmless no-op today if nothing is running). */
   cancelAllChildren(cause: string): void;
+  /**
+   * M3.3 §7.2 WL1/WL2/WL4 (inline): closes the gate, cascade-cancels every
+   * still-active call, waits up to `graceMs` (WT10 `abortGraceMs`) for real
+   * settlement, then force-settles and reports whatever is left as
+   * orphaned. Idempotent (WI6) — a second call (or a subsequent
+   * `WorkerHost.terminate()`'s `onTerminating`) is a no-op once this has run.
+   */
+  stopOwned(cause: string, graceMs: Millis): Promise<{ orphanChildren: readonly OrphanChildSummary[] }>;
 }
 
 const DEFAULT_AGENT_TYPE = "general-purpose";
@@ -120,16 +147,68 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const registry = createCallRegistry({
     clock: deps.clock,
     abort: (runId, cause) => deps.spawner.abort(runId, cause),
-    // WT18: `startupMs`(core default 30s) + slack, kept explicit for tests. A
-    // real assembler should thread the *actual* configured startupMs here;
-    // M3.2 uses a fixed, documented default consistent with the core's own
-    // `DEFAULT_BUDGET.startupMs` (see core/deadline.ts) + 5s slack (§4.1 WT18).
-    cancelRetryWindowMs: 35_000,
+    // WT18: `startupMs`(core default 30s) + slack by default, but honors an
+    // explicit budget override so a real assembler (or a test, via
+    // `OrchestratorTestHooks.cancelRetryWindowMsOverride`) can thread the
+    // *actual* configured window through instead of this fixed fallback.
+    cancelRetryWindowMs: deps.budget.cancelRetryWindowMs ?? 35_000,
   });
 
   function recordSettled(summary: WorkflowChildSummary): void {
     children.push(summary);
     deps.onChildSettled?.(summary);
+    if (registry.listActive().length === 0) {
+      const waiters = drainWaiters.splice(0, drainWaiters.length);
+      for (const cb of waiters) cb();
+    }
+  }
+
+  // M3.3 §7.2 WL2: event-driven (not polled) wait for "every still-active
+  // call has really settled" — `recordSettled` above notifies every waiter
+  // the instant the registry drains, so `stopOwned`'s bounded wait resolves
+  // as soon as children finish for real instead of only on a fixed poll
+  // cadence (also makes it exactly one `Clock.setTimer` per `stopOwned` call,
+  // which plays correctly with `FakeClock`-driven tests — a single
+  // `clock.advance(graceMs)` is enough to force the timeout branch).
+  const drainWaiters: Array<() => void> = [];
+
+  /** A1 (withheld): `cancel()` already synchronously settled these — they never spawned, so there is no runId to report. */
+  function settleWithheld(callId: CallId, cause: string): void {
+    const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
+    recordSettled({ callId, source: "live", status: "withheld", durationMs });
+    deps.workerHost.send({
+      kind: "host_settle",
+      callId,
+      ok: false,
+      error: { message: `workflow terminating (${cause})` },
+    } satisfies HostSettleEnvelope);
+  }
+
+  /**
+   * A2/A3/A4: still active when the workflow decided to stop. Force-settles
+   * it as `aborted` rather than waiting for the (now-moot) A2 retry loop to
+   * eventually give up on its own `cancelRetryWindowMs` clock — HR8/WL4:
+   * nothing may stay pending once the workflow itself has ended.
+   */
+  function forceSettleActive(callId: CallId, cause: string): void {
+    const state = registry.resolve(callId);
+    registry.settle(callId, deps.clock.now());
+    const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
+    recordSettled({
+      callId,
+      ...(state?.runId !== undefined ? { runId: state.runId } : {}),
+      source: "live",
+      status: "aborted",
+      durationMs,
+    });
+    // Best-effort: the port may already be closing (S5), but a send racing
+    // that close is harmless (WorkerHost.send is a no-throw best-effort primitive).
+    deps.workerHost.send({
+      kind: "host_settle",
+      callId,
+      ok: false,
+      error: { message: `workflow terminating (${cause})` },
+    } satisfies HostSettleEnvelope);
   }
 
   function remainingWorkflowMs(): Millis {
@@ -140,7 +219,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   async function handleAgent(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
     const a = args as { prompt?: unknown; opts?: { label?: unknown; agentType?: unknown } | null };
     if (typeof a.prompt !== "string") {
-      return { id: callId, ok: false, error: { message: "agent(prompt, opts?): prompt must be a string" } };
+      return {
+        kind: "host_ack",
+        id: callId,
+        ok: false,
+        error: { message: "agent(prompt, opts?): prompt must be a string" },
+      };
     }
     const opts = a.opts ?? {};
     const label = typeof opts.label === "string" ? opts.label : undefined;
@@ -159,6 +243,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     );
     if (activeCount >= budget.maxParallel) {
       return {
+        kind: "host_ack",
         id: callId,
         ok: false,
         error: { message: `agent(): maxParallel (${budget.maxParallel}) concurrent children already active` },
@@ -168,6 +253,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       registry.stats.admission + registry.stats.pre_runner + registry.stats.running + registry.stats.settled;
     if (totalEverSubmitted >= budget.maxChildren) {
       return {
+        kind: "host_ack",
         id: callId,
         ok: false,
         error: { message: `agent(): maxChildren (${budget.maxChildren}) exceeded for this workflow run` },
@@ -187,6 +273,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     );
     if (derived.capped === "expired") {
       return {
+        kind: "host_ack",
         id: callId,
         ok: false,
         error: { message: "WorkflowBudgetExhausted: no remaining budget to spawn a child (BW2)" },
@@ -202,6 +289,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       ...(label !== undefined ? { label } : {}),
       ...(derived.deadlineAt !== undefined ? { deadlineAt: derived.deadlineAt } : {}),
       ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
+      budgetOverride: { totalMs: derived.totalMs, queueWaitMs: derived.queueWaitMs },
     });
     if ("error" in spawned) {
       registry.settle(callId, deps.clock.now());
@@ -211,7 +299,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         status: "withheld",
         durationMs: deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now()),
       });
-      return { id: callId, ok: false, error: spawned.error };
+      return { kind: "host_ack", id: callId, ok: false, error: spawned.error };
     }
 
     registry.bind(callId, spawned.runId);
@@ -225,7 +313,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       if (!outcome) {
         // The spawner never settled this run (e.g. it was already gone by
         // the time waitAll looked it up) — report it honestly rather than hang.
-        const settleMsg: HostSettleEnvelope = { callId, ok: false, error: { message: "child run did not settle" } };
+        const settleMsg: HostSettleEnvelope = {
+          kind: "host_settle",
+          callId,
+          ok: false,
+          error: { message: "child run did not settle" },
+        };
         recordSettled({ callId, runId: spawned.runId, source: "live", status: "aborted", durationMs });
         deps.workerHost.send(settleMsg);
         return;
@@ -240,22 +333,23 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       });
       const settleMsg: HostSettleEnvelope =
         outcome.status === "completed"
-          ? { callId, ok: true, value: outcome.text ?? null }
-          : { callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
+          ? { kind: "host_settle", callId, ok: true, value: outcome.text ?? null }
+          : { kind: "host_settle", callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
       deps.workerHost.send(settleMsg);
     });
 
-    return { id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
+    return { kind: "host_ack", id: callId, ok: true, value: { callId, deadlineAt: derived.deadlineAt } };
   }
 
   async function handleGate(callId: CallId, args: unknown): Promise<HostAckEnvelope> {
     const a = args as { cmd?: unknown; cwd?: unknown };
     if (typeof a.cmd !== "string") {
-      return { id: callId, ok: false, error: { message: "gate(cmd, opts?): cmd must be a string" } };
+      return { kind: "host_ack", id: callId, ok: false, error: { message: "gate(cmd, opts?): cmd must be a string" } };
     }
     const timeoutMs = Math.min(budget.gateMs, remainingWorkflowMs());
     if (timeoutMs <= 0) {
       return {
+        kind: "host_ack",
         id: callId,
         ok: false,
         error: { message: "WorkflowBudgetExhausted: no remaining workflow budget for gate()" },
@@ -266,9 +360,9 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         ...(typeof a.cwd === "string" ? { cwd: a.cwd } : {}),
         timeoutMs,
       });
-      return { id: callId, ok: true, value: result };
+      return { kind: "host_ack", id: callId, ok: true, value: result };
     } catch (e) {
-      return { id: callId, ok: false, error: { message: errMsg(e) } };
+      return { kind: "host_ack", id: callId, ok: false, error: { message: errMsg(e) } };
     }
   }
 
@@ -284,6 +378,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // instead of silently answering a call from a workflow that already
       // decided to stop.
       deps.workerHost.send({
+        kind: "host_ack",
         id: envelope.id,
         ok: false,
         cancelled: true,
@@ -305,6 +400,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // whatever answer it would have produced).
     if (boundMs <= 0) {
       deps.workerHost.send({
+        kind: "host_ack",
         id: envelope.id,
         ok: false,
         error: { message: "WorkflowBudgetExhausted: no remaining workflow budget to service this host call (BW2)" },
@@ -319,6 +415,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         deps.workerHost.send(r.value);
       } else {
         deps.workerHost.send({
+          kind: "host_ack",
           id: envelope.id,
           ok: false,
           error: { message: `host call '${envelope.op}' did not complete within ${boundMs}ms (HR2)` },
@@ -340,44 +437,11 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   // instead of waiting for the (now-moot, since the workflow is over) retry
   // loop to eventually give up on its own on the `cancelRetryWindowMs` clock.
   deps.workerHost.events.onTerminating((reason) => {
+    if (terminated) return; // WL3 after WL1/WL2 already ran via stopOwned() — everything is settled, avoid double-recording.
     terminated = true;
     const cancelled = registry.cancelAll(reason);
-    for (const callId of cancelled.withheld) {
-      // A1: `cancel()` already synchronously settled these (never spawned).
-      const state = registry.resolve(callId);
-      const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
-      recordSettled({ callId, source: "live", status: "withheld", durationMs });
-      deps.workerHost.send({
-        callId,
-        ok: false,
-        error: { message: `workflow terminating (${reason})` },
-      } satisfies HostSettleEnvelope);
-      void state; // (no runId to report — it never got one)
-    }
-    for (const callId of cancelled.retrying) {
-      // A2/A3/A4: still active. HR8 force-settles it now rather than letting
-      // the A2 retry loop (still running in the background, harmlessly) be
-      // the thing that eventually calls settle() — that could be seconds away
-      // (`cancelRetryWindowMs`), and nothing may stay pending once the
-      // workflow itself has ended.
-      const state = registry.resolve(callId);
-      registry.settle(callId, deps.clock.now());
-      const durationMs = deps.clock.now() - (startedAt.get(callId) ?? deps.clock.now());
-      recordSettled({
-        callId,
-        ...(state?.runId !== undefined ? { runId: state.runId } : {}),
-        source: "live",
-        status: "aborted",
-        durationMs,
-      });
-      // Best-effort: the port is about to close (S5), but a send racing that
-      // close is harmless (WorkerHost.send is a no-throw best-effort primitive).
-      deps.workerHost.send({
-        callId,
-        ok: false,
-        error: { message: `workflow terminating (${reason})` },
-      } satisfies HostSettleEnvelope);
-    }
+    for (const callId of cancelled.withheld) settleWithheld(callId, reason);
+    for (const callId of cancelled.retrying) forceSettleActive(callId, reason);
   });
 
   return {
@@ -387,6 +451,61 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     },
     cancelAllChildren(cause) {
       registry.cancelAll(cause);
+    },
+    async stopOwned(cause, graceMs) {
+      if (terminated) return { orphanChildren: [] }; // idempotent (WI6): a prior stopOwned()/terminate() already ran.
+      // WL1: close the gate *synchronously*, before anything else — no new
+      // agent()/gate() admission can land after this point (onHostCall checks
+      // the same `terminated` flag).
+      terminated = true;
+      // WL2: cascade-cancel every still-active call (CallRegistry's bounded
+      // retry loop +, if the caller supplied one, the core's own owner-stop
+      // sweep — OS4).
+      const cancelled = registry.cancelAll(cause);
+      for (const callId of cancelled.withheld) settleWithheld(callId, cause);
+      if (deps.spawner.stopChildrenOf && deps.parentRunId !== undefined) {
+        try {
+          await deps.spawner.stopChildrenOf(deps.parentRunId, cause);
+        } catch {
+          // Best-effort sweep (OS4) — CallRegistry's own per-call retry loop
+          // (already started by cancelAll above) is the real safety net.
+        }
+      }
+      // WT10 abortGraceMs: give still-active children a real chance to
+      // settle for real (their own `handleAgent().then()` callback calls
+      // `registry.settle`/`recordSettled` with the true outcome, which wakes
+      // this wait immediately via `drainWaiters`) before WL4 gives up on
+      // them. Bounded by a single timer — not polled.
+      if (registry.listActive().length > 0) {
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const timer = deps.clock.setTimer(Math.max(0, graceMs), () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          });
+          drainWaiters.push(() => {
+            if (settled) return;
+            settled = true;
+            deps.clock.clearTimer(timer);
+            resolve();
+          });
+        });
+      }
+      // WL4 (reconcile, inline): anything still active after the grace window
+      // is force-settled and reported as orphaned (RC3) rather than left
+      // dangling in `children[]` with a non-terminal status (RC1).
+      const orphanChildren: OrphanChildSummary[] = [];
+      for (const active of registry.listActive()) {
+        forceSettleActive(active.callId, cause);
+        orphanChildren.push({
+          callId: active.callId,
+          ...(active.runId !== undefined ? { runId: active.runId } : {}),
+          reason: "cancel_retry_exhausted",
+          at: deps.clock.now(),
+        });
+      }
+      return { orphanChildren };
     },
   };
 }

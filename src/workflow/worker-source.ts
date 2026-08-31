@@ -63,6 +63,19 @@ const maxBatchItems = workerData.maxBatchItems || 1024;
 let hostCallSeq = 0;
 const pendingCalls = new Map(); // id -> { resolve, reject, timer }
 const pendingSettles = new Map(); // callId -> { resolve, reject, timer }
+// M3.3 robustness fix (found while adding real-worker end-to-end host_call
+// coverage, same protocol-robustness class as the M3.2 kind-tagging Blocker):
+// a host_settle push can in principle race ahead of its own host_ack (e.g. a
+// ChildSpawner double that resolves admission+settle on the very same
+// microtask turn, or in the limit an implausibly fast real child) — without
+// this buffer such a settle silently drops ("already timed out" is *not*
+// what happened; \`waitForSettle\` simply hadn't registered a listener for
+// this callId yet), and the script's \`await agent()\` then hangs until
+// HR1's own timeout. Buffering (bounded, self-expiring) makes delivery order
+// on the wire irrelevant to correctness, matching HR1's "never lose or hang
+// on an in-order message" intent.
+const bufferedSettles = new Map(); // callId -> { ok, value, error }
+const BUFFERED_SETTLE_TTL_MS = 5000;
 
 /** HR1: every \`callHost()\` races its own client-side deadline; a host that never acks still lets the script's \`await\` resolve (by rejecting). */
 function callHost(op, args, timeoutMs) {
@@ -83,6 +96,12 @@ const SETTLE_GRACE_MS = 5000;
 /** HR3: \`agent()\`'s ack only confirms admission (\`{ callId, deadlineAt }\`); the actual child result arrives later via a \`host_settle\` push, awaited here as a second, independently-bounded stage. */
 function waitForSettle(callId, deadlineAt) {
   return new Promise((resolve, reject) => {
+    const buffered = bufferedSettles.get(callId);
+    if (buffered) {
+      bufferedSettles.delete(callId);
+      resolve(buffered);
+      return;
+    }
     const boundMs = Math.max(0, (typeof deadlineAt === "number" ? deadlineAt - Date.now() : hostCallMs)) + SETTLE_GRACE_MS;
     const timer = setTimeout(() => {
       pendingSettles.delete(callId);
@@ -111,11 +130,19 @@ function agent(prompt, opts) {
 function gate(cmd, opts) {
   if (typeof cmd !== "string") return Promise.reject(new TypeError("gate(cmd, opts?): cmd must be a string"));
   return callHost("gate", { cmd: cmd, cwd: opts && opts.cwd }, gateMs).then(function (ack) {
+    // M3.3 fix (found alongside the real-worker e2e test): \`callHost\`'s
+    // \`host_ack\` dispatch already unwraps the envelope down to \`msg.value\`
+    // (see the \`commPort.on("message", ...)\` handler below) — for \`gate\`
+    // that value *is* the exec result object itself (\`{ ok, code, stdout,
+    // stderr }\`, see host.ts's \`handleGate\`), not a second envelope with its
+    // own \`.value\`. Returning \`ack.value\` here (the pre-fix code) was
+    // always \`undefined\` — the script got back nothing on a successful
+    // gate() call. \`ack.ok\` still correctly reflects the exec's own success.
     if (!ack.ok) {
-      var e = new Error((ack.error && ack.error.message) || "gate() failed");
+      var e = new Error("gate() command failed");
       throw e;
     }
-    return ack.value;
+    return ack;
   });
 }
 
@@ -390,7 +417,16 @@ commPort.on("message", (msg) => {
   }
   if (msg.kind === "host_settle") {
     const pending = pendingSettles.get(msg.callId);
-    if (!pending) return; // HR1: settle wait already timed out (or was never awaited) — dropped, not an error.
+    if (!pending) {
+      // Either genuinely already timed out client-side (dropped, not an
+      // error), or this settle raced ahead of its own ack — buffer it
+      // briefly so a \`waitForSettle()\` that registers moments later still
+      // picks it up instead of hanging until HR1's own timeout.
+      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error });
+      const cleanup = setTimeout(() => bufferedSettles.delete(msg.callId), BUFFERED_SETTLE_TTL_MS);
+      if (typeof cleanup.unref === "function") cleanup.unref();
+      return;
+    }
     pendingSettles.delete(msg.callId);
     clearTimeout(pending.timer);
     pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error });
