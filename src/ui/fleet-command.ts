@@ -2,7 +2,7 @@ import type { RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { Clock } from "../core/clock.js";
 import type { Millis, RunId } from "../core/types.js";
 import type { QueryService } from "../service/query-service.js";
-import { buildFleetViewModel, FleetPanel, renderFleetLines } from "./fleet-panel.js";
+import { buildFleetViewModel, FleetPanel, renderFleetLines, type FleetSection } from "./fleet-panel.js";
 
 export interface FleetCommandDeps {
   query: QueryService;
@@ -13,6 +13,8 @@ export interface FleetCommandDeps {
   clock?: Clock;
   /** Optional runId → agent-type resolver (RunSnapshot doesn't carry the type yet). */
   typeOf?: (runId: RunId) => string | undefined;
+  /** CC5 (M3.6): pre-rendered non-`RunSnapshot` sections (currently just the WORKFLOWS block) spliced in before AGENTS — called fresh on every render/refresh so it stays live. */
+  extraSections?: () => readonly FleetSection[];
 }
 
 /**
@@ -35,7 +37,12 @@ export function createFleetCommand(deps: FleetCommandDeps): Omit<RegisteredComma
           ...(deps.idleBudgetMs !== undefined ? { idleBudgetMs: deps.idleBudgetMs } : {}),
           ...(deps.typeOf ? { typeOf: deps.typeOf } : {}),
         });
-        ctx.ui.notify(renderFleetLines(model).join("\n"), "info");
+        ctx.ui.notify(
+          renderFleetLines(model, { ...(deps.extraSections ? { extraSections: deps.extraSections() } : {}) }).join(
+            "\n",
+          ),
+          "info",
+        );
         return;
       }
       await ctx.ui.custom<void>(
@@ -49,6 +56,7 @@ export function createFleetCommand(deps: FleetCommandDeps): Omit<RegisteredComma
             ...(deps.refreshMs !== undefined ? { refreshMs: deps.refreshMs } : {}),
             ...(deps.idleBudgetMs !== undefined ? { idleBudgetMs: deps.idleBudgetMs } : {}),
             ...(deps.typeOf ? { typeOf: deps.typeOf } : {}),
+            ...(deps.extraSections ? { extraSections: deps.extraSections } : {}),
           }),
         { overlay: true, overlayOptions: { width: "90%", maxHeight: "70%", anchor: "center" } },
       );

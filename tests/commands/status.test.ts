@@ -90,3 +90,36 @@ describe("X9 status usage rendering", () => {
     expect(text).not.toContain("Usage (all runs)");
   });
 });
+
+describe("M3.6 /agent status workflow section", () => {
+  it("shows nothing extra when no workflow dep is supplied (default, workflow.enabled=false)", () => {
+    const text = renderStatus(deps([snapshot()]) as never);
+    expect(text).not.toContain("Workflows:");
+  });
+
+  it("shows an active workflow row with name, phase and elapsed time when a workflow dep is supplied", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.workflow = {
+      activity: {
+        list: () => [
+          { workflowId: "wf_x", name: "refactor-api", startedAt: 0, deadlineAt: 60_000, currentPhaseId: "implement" },
+        ],
+      },
+      now: () => 10_000,
+    };
+    const text = renderStatus(d as never);
+    expect(text).toContain("Workflows: 1 active");
+    expect(text).toContain("wf_x");
+    expect(text).toContain("name=refactor-api");
+    expect(text).toContain("phase=implement");
+    expect(text).toContain("elapsed_ms=10000");
+    expect(text).toContain("deadline_remaining_ms=50000");
+  });
+
+  it("shows zero active workflows honestly (not omitted) when the dep is supplied but nothing is running", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.workflow = { activity: { list: () => [] }, now: () => 0 };
+    const text = renderStatus(d as never);
+    expect(text).toContain("Workflows: 0 active");
+  });
+});

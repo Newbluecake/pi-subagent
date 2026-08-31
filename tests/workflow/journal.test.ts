@@ -217,3 +217,65 @@ describe("JournalStore (§6.6 JS1/JS2/JS3): async append, batched flush, corrupt
     expect(result.written).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("JS6 (§6.6): oversize `value` is truncated and marked, and a truncated entry is never replayed", () => {
+  it("buildEntry() truncates a value above JOURNAL_VALUE_MAX_BYTES and sets truncated:true", () => {
+    const huge = "x".repeat(70 * 1024); // > 64KB
+    const entry = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(baseSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: baseSem.agentType,
+      value: huge,
+      completedAt: 1000,
+      durationMs: 50,
+    });
+    expect(entry.truncated).toBe(true);
+    expect(Buffer.byteLength(entry.value ?? "", "utf8")).toBeLessThanOrEqual(64 * 1024);
+    // digest covers the *truncated* bytes, not the original huge value.
+    expect(entry.digest).toBe(entryDigest({ ...entry, digest: undefined as never } as never));
+  });
+
+  it("buildEntry() leaves a value at or under the limit untouched (no truncated field at all)", () => {
+    const entry = makeEntry({ value: "short" });
+    expect(entry.truncated).toBeUndefined();
+    expect(entry.value).toBe("short");
+  });
+
+  it("a truncated entry round-trips through parseEntry with truncated:true preserved", () => {
+    const huge = "y".repeat(70 * 1024);
+    const entry = buildEntry({
+      scope: "content",
+      key: taskKeyOf(baseSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: baseSem.agentType,
+      value: huge,
+      completedAt: 1000,
+      durationMs: 50,
+    });
+    const parsed = parseEntry(JSON.stringify(entry));
+    expect(parsed).toEqual(entry);
+    expect(parsed?.truncated).toBe(true);
+  });
+
+  it("never splits a multi-byte UTF-8 codepoint at the truncation boundary", () => {
+    // A 3-byte-per-char string comfortably over the limit — if truncation
+    // sliced mid-codepoint, `Buffer#toString("utf8")` would emit U+FFFD
+    // replacement characters instead of dropping the partial tail cleanly.
+    const huge = "\u4e2d".repeat(30_000); // "中" x 30000 ~ 90KB
+    const entry = buildEntry({
+      scope: "chain",
+      key: taskKeyOf(baseSem),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: baseSem.agentType,
+      value: huge,
+      completedAt: 1000,
+      durationMs: 50,
+    });
+    expect(entry.truncated).toBe(true);
+    expect(entry.value ?? "").not.toContain("\ufffd");
+  });
+});

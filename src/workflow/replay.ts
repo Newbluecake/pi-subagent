@@ -76,7 +76,11 @@ export function buildReplayIndex(
 export type ReplayDecision =
   | { readonly kind: "hit"; readonly entry: JournalEntry }
   | { readonly kind: "miss" }
-  | { readonly kind: "skip"; readonly reason: "no_replay" | "non_deterministic" | "isolation_worktree" | "expired" };
+  | {
+      readonly kind: "skip";
+      readonly reason:
+        "no_replay" | "non_deterministic" | "isolation_worktree" | "expired" | "config_hash_unavailable" | "truncated";
+    };
 
 export interface DecideReplayInput {
   readonly index: ReplayIndex;
@@ -90,6 +94,18 @@ export interface DecideReplayInput {
   readonly now: Millis;
   /** RP6, `0`/undefined = unlimited. */
   readonly replayTtlMs?: Millis;
+  /**
+   * M3.6 (workflow design §6.3 E2, Blocker fix): `false` when this call's
+   * `agentTypeConfigHash` could not be resolved against a real
+   * `AgentTypeRegistry` (`ChildSpawner.configHashOf` absent or returned
+   * `undefined` for this `agentType`). Fail-closed: a call with no reliable
+   * hash never consults the index at all — it is unconditionally a `skip`,
+   * regardless of what may or may not be sitting in the journal under
+   * whatever fallback key `host.ts` used. Defaults to `true` (unchanged
+   * behavior for every existing caller/test that never had a config-hash
+   * concept to begin with).
+   */
+  readonly configHashAvailable?: boolean;
 }
 
 export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -102,10 +118,19 @@ export const DEFAULT_REPLAY_TTL_MS: Millis = 7 * 24 * 60 * 60 * 1000;
 export function decideReplay(input: DecideReplayInput): ReplayDecision {
   if (input.noReplay) return { kind: "skip", reason: "no_replay" };
   if (!input.deterministic) return { kind: "skip", reason: "non_deterministic" };
+  // M3.6 Blocker fix (§6.3 E2): fail-closed when this call has no reliable
+  // `agentTypeConfigHash` — never even look at the index. This is checked
+  // *before* `index.lookup` on purpose: a name-only fallback key could
+  // otherwise coincidentally collide with a genuinely-hashed entry.
+  if (input.configHashAvailable === false) return { kind: "skip", reason: "config_hash_unavailable" };
   const entry = input.index.lookup(input.taskKey, input.chainDigestBefore, input.occurrence);
   if (!entry) return { kind: "miss" };
   // RP7: isolation:"worktree" entries are never replayed, regardless of TTL.
   if (entry.isolation === "worktree") return { kind: "skip", reason: "isolation_worktree" };
+  // JS6: a value that had to be truncated on write is never a complete
+  // answer — replaying it would silently hand the script a mutilated
+  // result instead of routing it back to live.
+  if (entry.truncated === true) return { kind: "skip", reason: "truncated" };
   const ttl = input.replayTtlMs ?? DEFAULT_REPLAY_TTL_MS;
   if (ttl > 0 && input.now - entry.completedAt > ttl) return { kind: "skip", reason: "expired" };
   // RP3/RP4/RP8 are already enforced upstream (journal.ts only ever produces

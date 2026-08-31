@@ -342,3 +342,82 @@ describe("同 (K, occurrence) 多条 → 取 completedAt 最大者 (§6.5)", () 
     if (decision.kind === "hit") expect(decision.entry.value).toBe("newer");
   });
 });
+
+describe("M3.6 Blocker fix (§6.3 E2): configHashAvailable fail-closed", () => {
+  it("configHashAvailable:false skips even an entry that would otherwise hit, and does not consult the index at all", () => {
+    const entries = makeChainRun(["a"]);
+    let lookedUp = false;
+    const index = buildReplayIndex(entries, 0, "chain");
+    const spiedIndex = {
+      ...index,
+      lookup: (...args: Parameters<typeof index.lookup>) => {
+        lookedUp = true;
+        return index.lookup(...args);
+      },
+    };
+    const decision = decideReplay({
+      index: spiedIndex,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      configHashAvailable: false,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "config_hash_unavailable" });
+    expect(lookedUp).toBe(false); // fail-closed: never even looks, regardless of what might match
+  });
+
+  it("configHashAvailable:true (or omitted, default) behaves exactly as before — unaffected by the Blocker fix", () => {
+    const entries = makeChainRun(["a"]);
+    const index = buildReplayIndex(entries, 0, "chain");
+    const withTrue = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+      configHashAvailable: true,
+    });
+    const omitted = decideReplay({
+      index,
+      taskKey: taskKeyOf(sem("a")),
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+    });
+    expect(withTrue.kind).toBe("hit");
+    expect(omitted.kind).toBe("hit");
+  });
+
+  it("a truncated (JS6) entry is always skipped, never handed back as a hit", () => {
+    const key = taskKeyOf(sem("a"));
+    const truncatedEntry = buildEntry({
+      scope: "chain",
+      key,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      agentType: "gp",
+      value: "x".repeat(70 * 1024), // forces JS6 truncation
+      completedAt: 1000,
+      durationMs: 10,
+    });
+    expect(truncatedEntry.truncated).toBe(true);
+    const index = buildReplayIndex([truncatedEntry], 0, "chain");
+    const decision = decideReplay({
+      index,
+      taskKey: key,
+      chainDigestBefore: CHAIN_SEED,
+      occurrence: 0,
+      noReplay: false,
+      deterministic: true,
+      now: 2000,
+    });
+    expect(decision).toEqual({ kind: "skip", reason: "truncated" });
+  });
+});

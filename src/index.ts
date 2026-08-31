@@ -24,6 +24,11 @@ import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createStatusCommand } from "./commands/status.js";
+import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
+import type { Orchestrator } from "./workflow/orchestrator.js";
+import type { WorkflowActivityRegistry } from "./workflow/activity.js";
+import { renderWorkflowFleetSection } from "./ui/workflow-fleet-section.js";
+import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -70,13 +75,24 @@ export default function activate(pi: ExtensionAPI): void {
   pi.registerTool(createAgentTool({ spawn: forwardSpawn(holder) }));
   pi.registerTool(createResultTool({ query: forwardQuery(holder) }));
   pi.registerTool(createSteerTool({ query: forwardQuery(holder) }));
+  // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
+  // error message) unless settings.workflow.enabled — decided once here
+  // rather than per-session, since `settings` itself is loaded once.
+  pi.registerTool(
+    settings.workflow.enabled ? createWorkflowTool(forwardWorkflow(holder)) : createDisabledWorkflowToolStub(),
+  );
   pi.registerCommand(
     "agent",
     createStatusCommand({
       query: forwardQuery(holder),
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
-      fleet: { idleBudgetMs: settings.budget.idleMs, clock: systemClock },
+      workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
+      fleet: {
+        idleBudgetMs: settings.budget.idleMs,
+        clock: systemClock,
+        extraSections: () => [renderWorkflowFleetSection(forwardWorkflow(holder).activity.list(), systemClock.now())],
+      },
     }),
   );
 
@@ -153,6 +169,21 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     waitAll: (opts) => requireStack(holder).query.waitAll(opts),
     steer: (runId, text) => requireStack(holder).query.steer(runId, text),
     stop: (runId, cause) => requireStack(holder).query.stop(runId, cause),
+  };
+}
+function forwardWorkflow(holder: { current?: Stack }): {
+  defaultBudget: WorkflowRunBudget;
+  activity: WorkflowActivityRegistry;
+  createOrchestrator(workflowId: WorkflowId): Orchestrator;
+} {
+  return {
+    get defaultBudget() {
+      return requireStack(holder).workflow.defaultBudget;
+    },
+    get activity() {
+      return requireStack(holder).workflow.activity;
+    },
+    createOrchestrator: (workflowId) => requireStack(holder).workflow.createOrchestrator(workflowId),
   };
 }
 function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {

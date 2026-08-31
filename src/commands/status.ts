@@ -3,6 +3,7 @@ import type { UsageDelta } from "../core/types.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
+import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { createFleetCommand, type FleetCommandDeps } from "../ui/fleet-command.js";
 
 export interface StatusCommandDeps {
@@ -15,6 +16,8 @@ export interface StatusCommandDeps {
    * it — only QueryService is mandatory.
    */
   fleet?: Partial<FleetCommandDeps>;
+  /** M3.6: in-flight workflow rows for `/agent status`'s own WORKFLOWS section (independent of the `fleet` subcommand's CC5 splice, so plain `/agent status` shows them too). */
+  workflow?: { activity: { list(): readonly WorkflowActivitySnapshot[] }; now?: () => number };
 }
 
 /**
@@ -72,6 +75,19 @@ export function renderStatus(deps: StatusCommandDeps): string {
   const runs = deps.query.list();
   const active = runs.filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
   const lines: string[] = [];
+  if (deps.workflow) {
+    const now = deps.workflow.now?.() ?? Date.now();
+    const snapshots = deps.workflow.activity.list();
+    lines.push(`Workflows: ${snapshots.length} active`);
+    for (const s of snapshots) {
+      const elapsedMs = Math.max(0, now - s.startedAt);
+      const remaining = s.deadlineAt !== undefined ? Math.max(0, s.deadlineAt - now) : undefined;
+      lines.push(
+        `  ${s.workflowId} name=${s.name} phase=${s.currentPhaseId ?? "-"} elapsed_ms=${elapsedMs}` +
+          (remaining !== undefined ? ` deadline_remaining_ms=${remaining}` : ""),
+      );
+    }
+  }
   lines.push(`Subagent runs: ${runs.length} total, ${active.length} active`);
   for (const s of active.slice(0, 10)) {
     const currentTool = s.diag.currentTool ? ` tool=${s.diag.currentTool.name}` : "";

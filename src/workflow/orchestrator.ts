@@ -416,6 +416,20 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     // note for the *store*, just not exercised by this orchestrator slice).
     const journalConfig: JournalRunConfig | undefined =
       req.journal !== undefined && deps.journalRootDir !== undefined ? await buildJournalConfig(deps, req) : undefined;
+    // M3.6 RP11 (§6.3 RW3'): `content` scope cannot see the implicit
+    // filesystem causality between sibling `agent()` calls that `chain`
+    // scope's causal-chain digest exists specifically to cover — an
+    // opt-in, not a silent one, so every run using it gets a WARN once,
+    // ahead of boot, alongside the corresponding `subagent:workflow:*` event
+    // stream (best-effort, `deps.emit` may be absent in tests).
+    if (journalConfig?.scope === "content") {
+      console.warn(
+        `[pi-subagent] workflow "${req.workflowId}" is using replayScope:"content" — replay can reuse a result even when a` +
+          " prior sibling call in this run changed the workspace the prompt implicitly depends on. Prefer the default" +
+          ' "chain" scope unless you have verified the tasks are truly independent (§6.3 RW3\').',
+      );
+      deps.emit?.("subagent:workflow:replay_scope_risk", { workflowId: req.workflowId, scope: "content" });
+    }
 
     workerHost.events.onLog(() => {
       logLines += 1;

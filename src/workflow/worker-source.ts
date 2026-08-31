@@ -68,6 +68,11 @@ const workflowArgs = Object.prototype.hasOwnProperty.call(workerData, "args") ? 
 let hostCallSeq = 0;
 const pendingCalls = new Map(); // id -> { resolve, reject, timer }
 const pendingSettles = new Map(); // callId -> { resolve, reject, timer }
+// M3.6 (§5.2 budget.spent()): running total of live children's output-token
+// usage this run has actually accounted for (never fabricated for a call
+// whose settle carried no \`outputTokens\`, e.g. a replay hit or a
+// \`ChildSpawner\` double with no usage concept — see host.ts's doc).
+let spentOutputTokens = 0;
 // M3.3 robustness fix (found while adding real-worker end-to-end host_call
 // coverage, same protocol-robustness class as the M3.2 kind-tagging Blocker):
 // a host_settle push can in principle race ahead of its own host_ack (e.g. a
@@ -153,6 +158,10 @@ function agent(prompt, opts) {
   return callHost("agent", { prompt: prompt, opts: mergedOpts }, hostCallMs).then(function (ack) {
     return waitForSettle(ack.callId, ack.deadlineAt);
   }).then(function (outcome) {
+    // M3.6 (§5.2 budget.spent()): accumulate before resolving to the script,
+    // so a \`budget.spent()\` call made from the very next statement already
+    // sees this call's usage.
+    if (typeof outcome.outputTokens === "number") spentOutputTokens += outcome.outputTokens;
     // §5.2/§5.3: a terminal *failure* of the child (or being withheld/aborted
     // by the host) resolves to 'null' — same, deliberately-unresolvable-from-
     // "skipped", semantics as the upstream plugin. Admission-time failures
@@ -345,14 +354,16 @@ function buildSandbox(meta) {
   sandbox.args = workflowArgs;
   // §5.2: \`budget\` — pi has no token-quota directive, so \`total\` is always
   // \`null\` (matching the upstream plugin) and \`remaining()\` is always
-  // \`Infinity\`. \`spent()\` is a documented M3.4 gap (see this milestone's
-  // hand-off note in orchestrator.ts): child usage accounting isn't threaded
-  // through \`ChildSpawner\`/\`host.ts\` yet, so it always reports 0 rather than
-  // silently fabricating a number.
+  // \`Infinity\`. \`spent()\` (M3.6) sums every live child's output-token usage
+  // this run has received a \`host_settle\` for so far (\`spentOutputTokens\`,
+  // accumulated in \`agent()\`'s settle handler above) — a replay hit carries
+  // no \`outputTokens\` (it cost nothing) and a \`ChildSpawner\` double with no
+  // usage concept simply never contributes any, so this never fabricates a
+  // number for something it cannot actually account for.
   sandbox.budget = Object.freeze({
     total: null,
     spent: function () {
-      return 0;
+      return spentOutputTokens;
     },
     remaining: function () {
       return Infinity;
@@ -486,14 +497,14 @@ commPort.on("message", (msg) => {
       // error), or this settle raced ahead of its own ack — buffer it
       // briefly so a \`waitForSettle()\` that registers moments later still
       // picks it up instead of hanging until HR1's own timeout.
-      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error });
+      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens });
       const cleanup = setTimeout(() => bufferedSettles.delete(msg.callId), BUFFERED_SETTLE_TTL_MS);
       if (typeof cleanup.unref === "function") cleanup.unref();
       return;
     }
     pendingSettles.delete(msg.callId);
     clearTimeout(pending.timer);
-    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error });
+    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens });
     return;
   }
 });

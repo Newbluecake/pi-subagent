@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -7,6 +8,51 @@ export interface AgentTypeRegistry {
   reload(): Promise<{ types: AgentTypeConfig[]; errors: Array<{ path: string; error: string }> }>;
   get(name: AgentTypeName): AgentTypeConfig | undefined;
   list(): AgentTypeConfig[];
+  /**
+   * M3.6 (workflow design §6.3 E2 / `ChildSpawner.configHashOf`): a content
+   * hash of `name`'s *resolved* configuration (system prompt, tools, model,
+   * thinking level, etc — everything that changes an agent's behavior),
+   * not just its name — so editing a `.md` definition changes the hash and
+   * a workflow journal keyed on it correctly misses. `undefined` when the
+   * type is unknown (mirrors `get()`); `src/workflow/host.ts`'s `handleAgent`
+   * treats that identically to a registry-less spawner (fail-closed: no
+   * replay for that call, see the M3.6 hand-off note there).
+   */
+  configHashOf(name: AgentTypeName): string | undefined;
+}
+
+/** Stable (sorted-key) JSON stringify so field-order churn in `AgentTypeConfig` never perturbs the hash — same technique as `src/workflow/journal.ts#canonicalize`, duplicated locally rather than imported to keep `src/config/**` free of a `src/workflow/**` import edge (the dependency should point the other way: workflow's `ChildSpawner` structurally consumes this registry, not vice versa). */
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+}
+
+/** Everything that changes an agent type's *behavior* — deliberately excludes `sourcePath` (filesystem location, not behavior) so moving a `.md` file without editing it does not spuriously miss. */
+function configHashInput(config: AgentTypeConfig): Record<string, unknown> {
+  return {
+    name: config.name,
+    description: config.description,
+    systemPrompt: config.systemPrompt,
+    promptMode: config.promptMode,
+    tools: config.tools,
+    model: config.model,
+    thinkingLevel: config.thinkingLevel,
+    maxTurns: config.maxTurns,
+    canSpawn: config.canSpawn,
+  };
+}
+
+export function agentTypeConfigHash(config: AgentTypeConfig): string {
+  return createHash("sha256")
+    .update(stableStringify(configHashInput(config)), "utf8")
+    .digest("hex")
+    .slice(0, 32);
 }
 function scalar(value: string): string | boolean | number | undefined {
   const v = value.trim();
@@ -128,6 +174,10 @@ export function createAgentTypeRegistry(cwd = process.cwd(), home = homedir()): 
     },
     get: (name) => types.find((x) => x.name === name),
     list: () => [...types],
+    configHashOf(name) {
+      const config = types.find((x) => x.name === name);
+      return config ? agentTypeConfigHash(config) : undefined;
+    },
   };
 }
 export { parseFile as parseAgentType };

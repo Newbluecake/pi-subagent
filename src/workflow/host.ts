@@ -1,6 +1,6 @@
 import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
-import type { Millis, RunId } from "../core/types.js";
+import type { Millis, RunId, UsageDelta } from "../core/types.js";
 import { deriveChildBudget } from "./budget.js";
 import { createCallRegistry, type CallRegistry } from "./call-registry.js";
 import { buildEntry, CHAIN_SEED, nextChainDigest, taskKeyOf, type JournalStore } from "./journal.js";
@@ -47,6 +47,8 @@ export interface ChildOutcome {
   readonly status: "completed" | "failed" | "timed_out" | "aborted";
   readonly text?: string;
   readonly error?: { readonly message: string };
+  /** M3.6 (§5.2 `budget.spent()`, M3.5 X9 leftover): the real `SpawnService`'s `RunOutcome.usage` is structurally compatible here — threaded through so `handleAgent`'s live-settle push can report `outputTokens` for the sandbox's cumulative counter (see `HostSettleEnvelope.outputTokens`'s doc). Optional: a `ChildSpawner` double with no usage concept simply never reports any (0 spent, never fabricated). */
+  readonly usage?: UsageDelta;
 }
 export interface ChildSpawner {
   spawn(req: {
@@ -80,10 +82,12 @@ export interface ChildSpawner {
    * configuration (systemPrompt/tools/model/thinking, per the design's
    * `agentTypeConfigHash`) — the real assembler wires this to the same
    * `AgentTypeRegistry` `SpawnService` itself resolves against, so an edited
-   * `.md` definition changes the hash. Optional: when absent, `handleAgent`
-   * falls back to using the bare `type` name (documented gap — a script
-   * whose agent-type *definition* changes without its *name* changing will
-   * still replay stale results until a real hash is wired in).
+   * `.md` definition changes the hash. Optional: when absent (or when it
+   * returns `undefined` for a particular `type`), `handleAgent` **fails
+   * closed** — that call is never eligible to replay (RP `config_hash_
+   * unavailable`, M3.6 Blocker fix) rather than falling back to a bare
+   * `type`-name key that could silently reuse a stale result across a
+   * changed agent-type definition.
    */
   configHashOf?(type: string): string | undefined;
 }
@@ -392,7 +396,20 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     // resource limits below (it doesn't hold a `SlotPool`/parallel slot).
     const journal = deps.journal;
     if (journal) {
-      const agentTypeConfigHash = deps.spawner.configHashOf?.(agentType) ?? agentType;
+      // M3.6 Blocker fix (§6.3 E2 / replay.ts's `configHashAvailable`): a
+      // missing `ChildSpawner.configHashOf` (or one that returns `undefined`
+      // for this `agentType`) used to fall back to the bare type name as the
+      // hash — silently promoting "we don't know if the config changed" to
+      // "assume it didn't", which is exactly backwards for a cache. The
+      // fallback string below only feeds the journal *write* path (so a
+      // written entry still gets a taskKey distinct from any real-hash
+      // taskKey, rather than colliding); `configHashAvailable: false` below
+      // makes `decideReplay` skip the *read* path unconditionally, so no
+      // entry — written under this fallback or any other — is ever handed
+      // back as a hit while the real hash stays unresolved.
+      const resolvedHash = deps.spawner.configHashOf?.(agentType);
+      const configHashAvailable = resolvedHash !== undefined;
+      const agentTypeConfigHash = resolvedHash ?? `unresolved:${agentType}`;
       const sem: TaskSemantics = {
         agentType,
         agentTypeConfigHash,
@@ -416,6 +433,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         noReplay: journal.noReplay,
         deterministic: journal.deterministic.current,
         now: deps.clock.now(),
+        configHashAvailable,
         ...(journal.replayTtlMs !== undefined ? { replayTtlMs: journal.replayTtlMs } : {}),
       });
 
@@ -622,7 +640,13 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       journalMetaOf.delete(callId);
       const settleMsg: HostSettleEnvelope =
         outcome.status === "completed"
-          ? { kind: "host_settle", callId, ok: true, value: outcome.text ?? null }
+          ? {
+              kind: "host_settle",
+              callId,
+              ok: true,
+              value: outcome.text ?? null,
+              ...(outcome.usage?.output !== undefined ? { outputTokens: outcome.usage.output } : {}),
+            }
           : { kind: "host_settle", callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
       deps.workerHost.send(settleMsg);
     });

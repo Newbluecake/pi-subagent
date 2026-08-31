@@ -22,6 +22,21 @@ import type { JournalEntry, ReplayScope, TaskKey, TaskSemantics } from "./types.
 
 const JOURNAL_FILE = "journal.jsonl";
 
+/** JS6 (workflow design §6.6): a `text`-shaped `agent()` result above this many UTF-8 bytes is truncated before being journaled, and the entry is marked `truncated:true` so `replay.ts#decideReplay` never hands it back out (a mutilated result is worse than a miss). There is no `structured` value on this milestone's `agent()` surface (no `schema` option wired through `host.ts` yet), so only the design's `text ≤ 64KB` half of JS6 applies. */
+export const JOURNAL_VALUE_MAX_BYTES = 64 * 1024;
+
+/** Truncates `value` to `JOURNAL_VALUE_MAX_BYTES` UTF-8 bytes, walking back to the nearest complete-codepoint boundary so the result decodes cleanly — `Buffer#toString("utf8")` on a byte sequence cut mid-codepoint inserts U+FFFD replacement characters (and can even grow past the byte cap doing so) rather than silently dropping the partial tail, so the boundary must be found *before* decoding, not after. Returns the (possibly unchanged) string and whether truncation happened. */
+export function truncateJournalValue(value: string | null): { value: string | null; truncated: boolean } {
+  if (value === null) return { value: null, truncated: false };
+  const buf = Buffer.from(value, "utf8");
+  if (buf.byteLength <= JOURNAL_VALUE_MAX_BYTES) return { value, truncated: false };
+  let end = JOURNAL_VALUE_MAX_BYTES;
+  // A UTF-8 continuation byte matches 0b10xxxxxx (0x80..0xBF) — walk back
+  // until `end` lands on a lead byte (or ASCII byte), never a continuation.
+  while (end > 0 && ((buf[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return { value: buf.subarray(0, end).toString("utf8"), truncated: true };
+}
+
 /** Stable JSON stringification: sorts object keys recursively so semantically-identical objects (key order aside) hash identically (WP6-equivalent). `undefined` values are dropped, matching `JSON.stringify`'s own object-key behavior (kept for array *entries*, since `JSON.stringify` turns those into `null`, which is what we want too — the array shape itself still participates in the hash). */
 export function canonicalize(value: unknown): string {
   return stableStringify(value);
@@ -89,6 +104,10 @@ export interface BuildEntryInput {
 }
 
 export function buildEntry(input: BuildEntryInput): JournalEntry {
+  // JS6: applied before the digest is computed so a truncated entry's digest
+  // covers the *truncated* value — a corrupt-line detector re-verifying this
+  // entry later must see the same bytes that were actually hashed.
+  const { value, truncated } = truncateJournalValue(input.value);
   const fields: EntryDigestInput = {
     v: 1,
     scope: input.scope,
@@ -98,9 +117,10 @@ export function buildEntry(input: BuildEntryInput): JournalEntry {
     agentType: input.agentType,
     status: "completed",
     ...(input.isolation !== undefined ? { isolation: input.isolation } : {}),
-    value: input.value,
+    value,
     completedAt: input.completedAt,
     durationMs: input.durationMs,
+    ...(truncated ? { truncated: true } : {}),
   };
   return { ...fields, digest: entryDigest(fields) };
 }
@@ -126,6 +146,7 @@ export function parseEntry(line: string): JournalEntry | undefined {
   if (raw.status !== "completed") return undefined;
   if (raw.isolation !== undefined && raw.isolation !== "worktree") return undefined;
   if (raw.value !== null && typeof raw.value !== "string") return undefined;
+  if (raw.truncated !== undefined && raw.truncated !== true) return undefined;
   if (typeof raw.completedAt !== "number" || typeof raw.durationMs !== "number") return undefined;
   if (typeof raw.digest !== "string") return undefined;
 
@@ -141,6 +162,7 @@ export function parseEntry(line: string): JournalEntry | undefined {
     value: raw.value,
     completedAt: raw.completedAt,
     durationMs: raw.durationMs,
+    ...(raw.truncated === true ? { truncated: true as const } : {}),
   };
   // RP4: a hand-edited `value` (or any other field) without recomputing
   // `digest` demotes the whole line to corrupt — never returned as a

@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { systemClock } from "./core/clock.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { SubagentExtensionPoints } from "./core/types.js";
@@ -21,9 +23,35 @@ import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
+import { createWorkflowActivityRegistry, type WorkflowActivityRegistry } from "./workflow/activity.js";
+import { createWorkerHost } from "./workflow/lifecycle.js";
+import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
+import { buildWorkflowRunBudget } from "./workflow/run-budget.js";
+import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
+import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
 /** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack (index.ts rebuilds the stack on every session_start and never calls a stack dispose hook). */
 let previousFleetWidget: FleetWidgetController | undefined;
+
+export interface WorkflowSupport {
+  readonly enabled: boolean;
+  readonly defaultBudget: WorkflowRunBudget;
+  readonly activity: WorkflowActivityRegistry;
+  readonly journalRootDir: string;
+  /**
+   * M3.6 (hand-off note, orchestrator.ts): one `Orchestrator` per workflow
+   * run, not one per session — matching every `createOrchestrator(deps)`
+   * call site in `tests/workflow/**` and the design's `OrchestratorDeps.
+   * parentRunId` field (a single fixed value threaded into *every* spawned
+   * child's `SpawnRequest.parentRunId` for that instance's whole lifetime,
+   * §3.7's CC1 `stopChildrenOf` anchor). A shared session-lifetime instance
+   * would have to pick one `parentRunId` for every workflow invocation in
+   * the session, which breaks CC1's per-run cascade-stop anchoring the
+   * instant two workflow runs are in flight at once. `workflowId` doubles as
+   * that anchor (the same X3 pattern nested `Agent` delegation already uses).
+   */
+  createOrchestrator(workflowId: WorkflowId): Orchestrator;
+}
 
 export interface Stack {
   spawn: SpawnService;
@@ -33,6 +61,7 @@ export interface Stack {
   mention: MentionRegistry;
   scheduler: Scheduler;
   rpc: RPCServer;
+  workflow: WorkflowSupport;
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -149,5 +178,46 @@ export function buildSessionStack(
   }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
-  return { spawn, query, orphans: reaper.registry, notifier, mention, scheduler, rpc };
+
+  // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —
+  // built unconditionally (cheap: a spawner adapter closure + a budget
+  // object + an empty activity map), but `workflow.enabled` gates whether
+  // `index.ts` ever registers the `SubagentWorkflow` tool that would
+  // actually call `createOrchestrator()` (settings.workflow.enabled default
+  // `false` — the engine stays entirely inert until then).
+  const workflowActivity = createWorkflowActivityRegistry();
+  const workflowChildSpawner = createWorkflowChildSpawner(spawn, types);
+  const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
+  const workflow: WorkflowSupport = {
+    enabled: settings.workflow.enabled,
+    defaultBudget: buildWorkflowRunBudget(settings),
+    activity: workflowActivity,
+    journalRootDir: workflowJournalRootDir,
+    createOrchestrator(workflowId) {
+      return createOrchestrator({
+        clock: systemClock,
+        createWorkerHost: () => createWorkerHost({ clock: systemClock }),
+        spawner: workflowChildSpawner,
+        gateRunner: async (cmd, opts) => {
+          const result = await pi.exec("bash", ["-c", cmd], {
+            timeout: opts.timeoutMs,
+            ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+          });
+          return {
+            ok: result.code === 0 && !result.killed,
+            code: result.code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          };
+        },
+        parentRunId: workflowId,
+        journalRootDir: workflowJournalRootDir,
+        emit: (channel, payload) => {
+          pi.events.emit(channel, payload);
+          workflowActivity.onEvent(channel, payload);
+        },
+      });
+    },
+  };
+  return { spawn, query, orphans: reaper.registry, notifier, mention, scheduler, rpc, workflow };
 }

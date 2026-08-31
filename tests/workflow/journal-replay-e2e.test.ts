@@ -34,17 +34,19 @@ const REAL_BUDGET: Partial<WorkflowRunBudget> = {
   maxBatchItems: 50,
 };
 
-/** A `ChildSpawner` that actually "executes" prompts (records calls, lets the test control per-prompt result/delay/configHash) — mirrors m34-script-api.test.ts's `completingSpawner`, extended with `configHashOf` (M3.5 E2). */
+/** A `ChildSpawner` that actually "executes" prompts (records calls, lets the test control per-prompt result/delay/configHash) — mirrors m34-script-api.test.ts's `completingSpawner`, extended with `configHashOf` (M3.5 E2). Defaults to a *working* config-hash resolver (stable per `type`) so every pre-existing test in this file exercises the same "production always has a real hash" path `stack.ts`'s real `AgentTypeRegistry`-backed adapter provides — M3.6's fail-closed behavior (host.ts's `handleAgent`) only activates when a test deliberately asks for `configHashOf: "unavailable"` (see the dedicated M3.6 Blocker test below). */
 function makeSpawner(
   opts: {
     resultOf?(prompt: string): string;
     delayMsOf?(prompt: string): number;
-    configHashOf?(type: string): string | undefined;
+    configHashOf?: ((type: string) => string | undefined) | "unavailable";
   } = {},
 ): { spawner: ChildSpawner; spawnedPrompts: string[] } {
   const spawnedPrompts: string[] = [];
   let n = 0;
   const promptByRunId = new Map<string, string>();
+  const configHashOf =
+    opts.configHashOf === "unavailable" ? undefined : (opts.configHashOf ?? ((type) => `cfg:${type}`));
   const spawner: ChildSpawner = {
     spawn: async (req) => {
       spawnedPrompts.push(req.prompt);
@@ -65,7 +67,7 @@ function makeSpawner(
       );
       return { settled, pending: [] };
     },
-    ...(opts.configHashOf ? { configHashOf: opts.configHashOf } : {}),
+    ...(configHashOf ? { configHashOf } : {}),
   };
   return { spawner, spawnedPrompts };
 }
@@ -348,5 +350,45 @@ describe("M3.5 JS1: journal writes never block the host_settle round trip", () =
     expect(elapsedMs).toBeLessThan(2_000);
     expect(appended).toHaveLength(1); // append() *was* called (fire-and-forget), just never awaited.
     await host.terminate("test_done");
+  });
+});
+
+describe("M3.6 Blocker fix (§6.3 E2): configHashOf fail-closed end-to-end (real worker, real journal.jsonl)", () => {
+  it("no configHashOf on the ChildSpawner at all: a second identical run never replays (fails closed, not open)", async () => {
+    const script = scriptWith('return await agent("same prompt every time");');
+    const run1 = makeSpawner({ configHashOf: "unavailable" });
+    await runWithJournal(script, run1.spawner);
+    expect(run1.spawnedPrompts).toEqual(["same prompt every time"]);
+
+    const run2 = makeSpawner({ configHashOf: "unavailable" });
+    const outcome2 = await runWithJournal(script, run2.spawner);
+    // Fail-closed: even though run1 journaled an entry for the exact same
+    // prompt/agentType, run2 (also missing a real hash) must still spawn
+    // live — the pre-fix bug would have silently hit here via the bare
+    // `type`-name fallback key both runs shared.
+    expect(run2.spawnedPrompts).toEqual(["same prompt every time"]);
+    expect(outcome2.replay).toEqual({ hits: 0, misses: 0, skipped: 1, corruptLines: 0 });
+  });
+
+  it("configHashOf returning undefined for one specific type (not the function being absent) also fails closed for that call only", async () => {
+    const script = scriptWith('return await agent("x", { agentType: "flaky" });');
+    const configHashOf = (type: string) => (type === "flaky" ? undefined : `cfg:${type}`);
+    const run1 = makeSpawner({ configHashOf });
+    await runWithJournal(script, run1.spawner);
+    const run2 = makeSpawner({ configHashOf });
+    const outcome2 = await runWithJournal(script, run2.spawner);
+    expect(run2.spawnedPrompts).toEqual(["x"]); // still live, not a hit
+    expect(outcome2.replay).toEqual({ hits: 0, misses: 0, skipped: 1, corruptLines: 0 });
+  });
+
+  it("once a real configHashOf is wired back in, replay resumes working normally (the fix only closes the gap, doesn't disable replay forever)", async () => {
+    const script = scriptWith('return await agent("resumable");');
+    const workingHash = () => "cfg:gp-v1";
+    const run1 = makeSpawner({ configHashOf: workingHash });
+    await runWithJournal(script, run1.spawner);
+    const run2 = makeSpawner({ configHashOf: workingHash });
+    const outcome2 = await runWithJournal(script, run2.spawner);
+    expect(run2.spawnedPrompts).toEqual([]); // hit
+    expect(outcome2.replay).toEqual({ hits: 1, misses: 0, skipped: 0, corruptLines: 0 });
   });
 });

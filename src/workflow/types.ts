@@ -131,6 +131,8 @@ export interface JournalEntry {
   readonly isolation?: "worktree";
   /** The value the sandboxed script's `agent()` call resolved to on this run (`outcome.text ?? null`, mirroring host.ts's live settle path). */
   readonly value: string | null;
+  /** JS6 (§6.6): `true` when `value` had to be truncated to `JOURNAL_VALUE_MAX_BYTES` at write time — `replay.ts#decideReplay` always `skip`s such an entry (a mutilated result must never be handed back out as a hit). Absent (not `false`) on untruncated entries, matching every other optional `JournalEntry` field's "undefined means no" convention. */
+  readonly truncated?: true;
   readonly completedAt: Millis;
   readonly durationMs: Millis;
   /** RP4: sha256 hex over the canonical form of every other field above — recomputed and checked at load time; a mismatch (hand-edited `value` without updating `digest`, or vice versa) demotes the line to `corruptLines`, never to a returned-but-wrong replay hit. */
@@ -220,7 +222,8 @@ export interface WorkflowDiagnostics {
   /** M3.3 §3.6 CR6: calls whose A2 bounded-retry cancel loop is still in flight at the moment this snapshot was taken (only meaningful on `outcomeAt1()`-shaped, `pendingReconcile:true` snapshots — always 0 once `pendingReconcile` is `false`, since WL4's reconcile finalizes every call one way or another). */
   readonly retryingCancels?: number;
   /** M3.3 EI5: set when `resolve_settled` itself failed to apply (a defect in the effect pipeline, not in the workflow) and this outcome is the EI5 fallback rather than a normally-reconciled one. */
-  readonly degraded?: "settlement_apply_failed";
+  /** M3.3 EI5: set when `resolve_settled` itself failed to apply (a defect in the effect pipeline, not in the workflow) and this outcome is the EI5 fallback rather than a normally-reconciled one. M3.6 TL3 adds `"settlement_timeout"`: the *tool* layer's own WT17 grace window (`settlementGraceMs`) elapsed before `Orchestrator.settled()` ever resolved — `src/tools/workflow-tool.ts` sets this on the `outcomeAt1()`/skeleton snapshot it falls back to, so a caller can tell "this is not a confirmed final state" from the outcome alone, not just from prose in the rendered text. */
+  readonly degraded?: "settlement_apply_failed" | "settlement_timeout";
   /** M3.4 §9.1/§9.2: the phase the script's most recent `phase(title)` call declared, if any — diagnostic only (`/agent status`-equivalent), not authoritative for `WorkflowChildSummary.phaseId` (each call records its own phase at submission time). */
   readonly currentPhaseId?: PhaseId;
 }
@@ -439,7 +442,14 @@ export type HostAckEnvelope =
  * actually route it.
  */
 export type HostSettleEnvelope =
-  | { readonly kind: "host_settle"; readonly callId: string; readonly ok: true; readonly value: unknown }
+  | {
+      readonly kind: "host_settle";
+      readonly callId: string;
+      readonly ok: true;
+      readonly value: unknown;
+      /** M3.6 (workflow design §5.2 `budget.spent()`): this call's live child's output-token usage, so the sandbox's cumulative counter can advance. Absent (not `0`) for a replay hit — a cached result costs nothing, and `budget.spent()`'s doc explicitly promises it "never fabricates a number" for anything it cannot actually account for. */
+      readonly outputTokens?: number;
+    }
   | {
       readonly kind: "host_settle";
       readonly callId: string;
