@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget } from "../core/types.js";
 
@@ -75,4 +78,25 @@ export function loadSettings(source: unknown): AgentSettings {
           }
         : { ...DEFAULT_SETTINGS.worktree },
   });
+}
+
+/** Default user-level settings file: ~/.pi/agent/pi-subagent.json */
+export function defaultSettingsPath(): string {
+  return join(homedir(), ".pi", "agent", "pi-subagent.json");
+}
+
+/**
+ * Load user settings from a JSON file. Missing file → defaults; malformed
+ * file → WARN + defaults. Never throws.
+ */
+export function loadSettingsFromFile(path: string = defaultSettingsPath()): AgentSettings {
+  try {
+    if (!existsSync(path)) return loadSettings(undefined);
+    return loadSettings(JSON.parse(readFileSync(path, "utf8")));
+  } catch (error) {
+    console.warn(
+      `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
+    );
+    return loadSettings(undefined);
+  }
 }

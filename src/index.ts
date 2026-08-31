@@ -6,7 +6,7 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
-import { loadSettings, type AgentSettings } from "./config/settings.js";
+import { loadSettingsFromFile, type AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
@@ -54,7 +54,7 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): void {
  * through to the current session's stack. session_shutdown drains bounded.
  */
 export default function activate(pi: ExtensionAPI): void {
-  const settings = loadSettings(undefined);
+  const settings = loadSettingsFromFile();
   wireWorktree(pi, settings);
   const types = createAgentTypeRegistry();
   const caps = detectPiCapabilities(pi);
