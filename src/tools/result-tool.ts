@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
+import { toPiToolUsage } from "./usage.js";
 
 /**
  * "get_subagent_result" — drop-in replacement for @tintinweb/pi-subagents'
@@ -22,6 +23,16 @@ export const ResultToolParams = Type.Object({
 export type ResultToolParams = Static<typeof ResultToolParams>;
 
 export function createResultTool(deps: { query: QueryService }): ToolDefinition<typeof ResultToolParams> {
+  // pi usage accounting dedupe: a background run's spend is attached to the
+  // FIRST tool result that reports its terminal outcome — get_subagent_result
+  // can be called repeatedly for the same run, and re-attaching usage each
+  // time would double-count the cost in pi's session totals.
+  const usageReported = new Set<string>();
+  const usageOnce = (runId: string, usage?: Parameters<typeof toPiToolUsage>[0]) => {
+    if (!usage || usageReported.has(runId)) return {};
+    usageReported.add(runId);
+    return { usage: toPiToolUsage(usage) };
+  };
   return {
     name: "get_subagent_result",
     label: "Get Subagent Result",
@@ -41,6 +52,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
           : `Run ${params.run_id} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
         return {
           content: [{ type: "text" as const, text }],
+          ...(snapshot.outcome ? usageOnce(params.run_id, snapshot.outcome.usage) : {}),
           details: {
             status: snapshot.status,
             usage: snapshot.diag.usage,
@@ -65,6 +77,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
       }
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
+        ...usageOnce(params.run_id, waited.outcome.usage),
         details: {
           status: waited.outcome.status,
           usage: waited.outcome.usage,

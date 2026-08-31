@@ -172,6 +172,11 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
       expect(details.toolCounts).toEqual({ bash: 3, read: 2, edit: 1 });
       expect(details.costUsd).toBeCloseTo(0.156);
       expect(result.content[0]).toEqual({ type: "text", text: "done" });
+      // pi usage accounting: the child session's spend rides on the tool result
+      const usage = (result as { usage?: { totalTokens: number; cost: { total: number } } }).usage;
+      expect(usage).toBeDefined();
+      expect(usage!.cost.total).toBeCloseTo(0.156);
+      expect(usage!.totalTokens).toBe(4204 + 590);
     } finally {
       vi.useRealTimers();
     }

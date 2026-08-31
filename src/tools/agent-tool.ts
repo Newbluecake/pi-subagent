@@ -4,6 +4,7 @@ import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding
 import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
+import { toPiToolUsage } from "./usage.js";
 
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
@@ -285,6 +286,9 @@ export function createAgentTool(deps: {
                 : (outcome.text ?? "(subagent completed with no text output)"),
           },
         ],
+        // pi usage accounting: the child session's spend rides on this tool
+        // result so pi's own totals (footer, /session, RPC) include it.
+        ...(outcome.usage ? { usage: toPiToolUsage(outcome.usage) } : {}),
         details: {
           runId: outcome.runId,
           status: outcome.status,

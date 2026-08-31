@@ -82,3 +82,38 @@ describe("X9 get_subagent_result usage output", () => {
     expect((result.details as { usage?: UsageDelta }).usage).toEqual(usage);
   });
 });
+
+describe("pi usage accounting: tool-result usage attach + first-terminal dedupe", () => {
+  const query = (): QueryService => ({
+    get: () => completedSnapshot(),
+    list: () => [],
+    wait: async () => ({ ok: true, outcome: completedSnapshot().outcome! }),
+    waitAll: async () => ({ settled: [], pending: [] }),
+    steer: async () => undefined,
+    stop: async () => false,
+  });
+  type WithUsage = { usage?: { totalTokens: number; cost: { total: number } } };
+
+  it("attaches pi-shaped usage to the FIRST terminal retrieval only (no double counting)", async () => {
+    const tool = createResultTool({ query: query() });
+    const first = (await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never)) as WithUsage;
+    expect(first.usage).toBeDefined();
+    expect(first.usage!.cost.total).toBeCloseTo(0.0055);
+    expect(first.usage!.totalTokens).toBe(42 + 17 + 3);
+    const second = (await tool.execute("tc2", { run_id: "r1" }, undefined, () => undefined, {} as never)) as WithUsage;
+    expect(second.usage).toBeUndefined();
+    // a different run is still reported
+    const other = (await tool.execute("tc3", { run_id: "r2", wait: true }, undefined, () => undefined, {} as never)) as WithUsage;
+    expect(other.usage).toBeDefined();
+  });
+
+  it("does not attach usage while the run is still active", async () => {
+    const running = completedSnapshot();
+    running.status = "running";
+    delete (running as { outcome?: unknown }).outcome;
+    const q: QueryService = { ...query(), get: () => running };
+    const tool = createResultTool({ query: q });
+    const result = (await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never)) as WithUsage;
+    expect(result.usage).toBeUndefined();
+  });
+});
