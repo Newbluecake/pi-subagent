@@ -392,3 +392,26 @@ describe("M3.6 Blocker fix (§6.3 E2): configHashOf fail-closed end-to-end (real
     expect(outcome2.replay).toEqual({ hits: 1, misses: 0, skipped: 0, corruptLines: 0 });
   });
 });
+
+describe("RP11: content scope emits a WARN + event (never silent)", () => {
+  it("warns once per run when replayScope is content; chain stays silent", async () => {
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg?: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      const script = scriptWith('return await agent("A");');
+      const run = makeSpawner();
+      await runWithJournal(script, run.spawner, { replayScope: "content" });
+      expect(warns.filter((w) => w.includes('replayScope:"content"'))).toHaveLength(1);
+
+      warns.length = 0;
+      const run2 = makeSpawner();
+      await runWithJournal(script, run2.spawner, { replayScope: "chain" });
+      expect(warns.filter((w) => w.includes("replayScope"))).toHaveLength(0);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+});

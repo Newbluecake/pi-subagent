@@ -121,3 +121,36 @@ describe("CC3: workflow settings", () => {
     });
   });
 });
+
+describe("configHashOf sensitivity (X4 replay safety)", () => {
+  it("changes when systemPrompt changes; stable for identical config; undefined for unknown type", async () => {
+    const { mkdtemp, writeFile, mkdir } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-hash-"));
+    const dir = join(root, ".pi", "agents");
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, "worker.md");
+    const write = (prompt: string) => writeFile(file, `---\nname: worker\ndescription: d\n---\n${prompt}\n`);
+
+    await write("prompt A");
+    const r1 = createAgentTypeRegistry(root, join(root, "nohome"));
+    await r1.reload();
+    const hashA = r1.configHashOf("worker");
+    expect(hashA).toMatch(/^[0-9a-f]{16,}$/);
+
+    // reload without changes -> stable
+    const r2 = createAgentTypeRegistry(root, join(root, "nohome"));
+    await r2.reload();
+    expect(r2.configHashOf("worker")).toBe(hashA);
+
+    // change systemPrompt -> hash MUST change (otherwise replay would reuse
+    // results produced under a different agent definition)
+    await write("prompt B");
+    const r3 = createAgentTypeRegistry(root, join(root, "nohome"));
+    await r3.reload();
+    expect(r3.configHashOf("worker")).not.toBe(hashA);
+
+    expect(r3.configHashOf("nonexistent")).toBeUndefined();
+  });
+});
