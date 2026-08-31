@@ -9,6 +9,8 @@ import { createAgentTypeRegistry } from "./config/agent-types.js";
 import { loadSettingsFromFile, type AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
+import { buildSessionStack, type Stack } from "./stack.js";
+import { installMentionInput } from "./mention/mention.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
@@ -22,13 +24,6 @@ import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createStatusCommand } from "./commands/status.js";
-
-interface Stack {
-  spawn: SpawnService;
-  query: QueryService;
-  orphans: OrphanRegistry;
-  notifier: Notifier;
-}
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -59,85 +54,6 @@ export default function activate(pi: ExtensionAPI): void {
   const compat = assertCompatible(caps);
   const holder: { current?: Stack } = {};
 
-  const buildStack = (ctx: ExtensionContext): Stack => {
-    const merged = mergeExtensionPoints(extensionPoints);
-    // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
-    // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
-    // stores + WARN instead of throwing inside the session_start handler.
-    const readBack = probeReadBackEntries(ctx);
-    if (!readBack)
-      console.warn(
-        "[pi-subagent] ctx.sessionManager.getEntries unavailable; run-log/outbox degrade to in-memory (G5a read-back verification off).",
-      );
-    const runLogHost = { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager };
-    const store = readBack ? wrapWithRunLog(new MemoryRunStore(), runLogHost) : new MemoryRunStore();
-    const pool = new SingleSlotPool(systemClock, settings.concurrencyLimit);
-    const reaper = new EscalatingReaper(systemClock);
-    const watchdog = new EventWatchdog({
-      clock: systemClock,
-      budget: settings.budget,
-      // The runner enforces its one hard deadline (total) itself via a real
-      // setTimeout race (runtime/runner.ts guard()); sub-phase watchdog
-      // ticks are not wired to a cross-run dispatch loop in M1 - documented
-      // limitation, not a fake pass.
-      getState: () => undefined,
-      dispatch: () => undefined,
-    });
-    const outbox = readBack
-      ? createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager })
-      : new MemoryOutboxStore<PersistedDelivery>();
-    const notifier = createNotifier({
-      store: outbox,
-      clock: systemClock,
-      maxAttempts: settings.deliveryAttempts,
-      backoffMs: settings.deliveryBackoffMs,
-      reconcileTtlMs: settings.reconcileTtlMs,
-      maxReconcileRounds: settings.maxReconcileRounds,
-      maxBatch: settings.maxReconcileBatch,
-      ...(merged.onDelivery ? { onDelivery: merged.onDelivery } : {}), // H4
-      sender: (payload) => {
-        // G5b: sendMessage has no ack (arch. §2.5); failures stay inside
-        // Notifier's own retry/backoff loop, never surfaced to run status.
-        pi.sendMessage({
-          customType: "subagent:notification",
-          content: `Subagent run ${payload.runId} ${payload.status}${payload.textPreview ? `: ${payload.textPreview.slice(0, 200)}` : ""}`,
-          display: true,
-          details: payload,
-        });
-      },
-    });
-    // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
-    const spawnRef: { current?: SpawnService } = {};
-    const runner = createRuntimeRunnerAdapter({
-      clock: systemClock,
-      driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
-      pool,
-      store,
-      watchdog,
-      reaper,
-      notifier,
-      extensions: [merged],
-      onLifecycle: (event) =>
-        pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
-      nestedSpawn: () => spawnRef.current,
-      onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
-    });
-    const spawn = createSpawnService({
-      types,
-      pool,
-      runner,
-      budget: settings.budget,
-      maxNestedDepth: settings.maxNestedDepth,
-      onSnapshot: (snapshot) => {
-        if (snapshot.diag.startedAt !== undefined && snapshot.diag.startedAt === snapshot.diag.enqueuedAt)
-          pi.events.emit("subagent:started", { runId: snapshot.runId, at: snapshot.updatedAt });
-      },
-    });
-    spawnRef.current = spawn;
-    const query = createQueryService({ registry: createRunRegistry(store), runner, clock: systemClock });
-    return { spawn, query, orphans: reaper.registry, notifier };
-  };
-
   if (!compat.ok) {
     pi.registerTool({
       name: "Agent",
@@ -164,16 +80,33 @@ export default function activate(pi: ExtensionAPI): void {
     }),
   );
 
+  // X6: @handle mentions. Registered once; resolves through the current
+  // session's stack like the tools above. Conservative by contract: unknown
+  // labels and @file/paths fall through to pi untouched.
+  installMentionInput(pi, {
+    registry: {
+      register: () => false, // registrations flow from spawn labels inside the stack
+      resolve: (label) => holder.current?.mention.resolve(label),
+      labels: () => holder.current?.mention.labels() ?? [],
+    },
+    query: forwardQuery(holder),
+    spawn: forwardSpawn(holder),
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
     await types.reload();
-    holder.current = buildStack(ctx);
-    holder.current.notifier.reconcile(); // RC5: reconcile() is synchronous, never blocks startup.
+    const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)]);
+    holder.current = stack;
+    stack.notifier.reconcile(); // RC5: synchronous, never blocks startup
+    await stack.scheduler.start(); // X5
   });
 
   pi.on("session_shutdown", async () => {
     const stack = holder.current;
     if (!stack) return;
+    stack.scheduler.stop(); // X5
+    stack.rpc.close(); // X8
     const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);
     const pending = stack.query
       .list()

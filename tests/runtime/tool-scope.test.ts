@@ -69,11 +69,38 @@ describe("runtime/tool-scope: createToolScopeEnforcer (X11 late-registration gua
     expect(handle.calls).toEqual([["Bash", "Read"]]); // setActiveTools actually called to strip it back out
   });
 
-  it("TS4: blockedNewcomers are never silent — onBlocked fires with the exact names", () => {
+  it("TS4: bind-time strips are silent; late registrations are reported exactly once", () => {
+    const active = ["Read", "steer_subagent"];
+    const handle: ScopeSessionHandle & { calls: string[][] } = {
+      calls: [],
+      getActiveTools: () => [...active],
+      setActiveTools: (names) => {
+        handle.calls.push([...names]);
+        active.length = 0;
+        active.push(...names);
+      },
+    };
+    const blocked: string[][] = [];
+    const enforcer = createToolScopeEnforcer({ onBlocked: (names) => blocked.push([...names]) });
+    const policy = buildToolScopePolicy({});
+    enforcer.onBind(handle, policy);
+    expect(blocked).toEqual([]); // steer_subagent was active at bind: stripped by design, no WARN
+    // A genuinely late-registered reserved tool (e.g. nested Agent arriving
+    // mid-run via MCP-style late registration) is the reportable event.
+    active.push("Agent");
+    enforcer.onTurnBoundary(handle, policy);
+    expect(blocked).toEqual([["Agent"]]);
+    // Same tool blocked again next turn: still stripped, but not re-reported.
+    active.push("Agent");
+    enforcer.onTurnBoundary(handle, policy);
+    expect(blocked).toEqual([["Agent"]]);
+  });
+
+  it("TS4 fail-safe: without a bind baseline, blocked names are still reported", () => {
     const handle = fakeHandle(["Read", "steer_subagent"]);
     const blocked: string[][] = [];
     const enforcer = createToolScopeEnforcer({ onBlocked: (names) => blocked.push([...names]) });
-    enforcer.onBind(handle, buildToolScopePolicy({}));
+    enforcer.onTurnBoundary(handle, buildToolScopePolicy({}));
     expect(blocked).toEqual([["steer_subagent"]]);
   });
 

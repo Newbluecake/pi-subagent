@@ -14,11 +14,17 @@ import type {
 import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
 import { TombstoneStore } from "./tombstone.js";
 
+export interface SpawnLabelTarget {
+  readonly runId: RunId;
+  readonly type: SpawnRequest["type"];
+}
 export interface SpawnService {
   spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
+  /** Resolve a label without exposing the mutable internal index. */
+  getLabel?(label: string): SpawnLabelTarget | undefined;
 }
 export interface SpawnServiceDeps {
   types: AgentTypeRegistry;
@@ -28,6 +34,8 @@ export interface SpawnServiceDeps {
   budget?: Partial<DeadlineBudget>;
   onSnapshot?: (snapshot: RunSnapshot) => void;
   onLifecycle?: LifecycleSink;
+  /** X6 bridge: fired when a label is first registered (mention registry feed). */
+  onLabel?: (label: string, target: SpawnLabelTarget) => void;
   tombstones?: TombstoneStore;
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Default 3. */
   maxNestedDepth?: number;
@@ -40,7 +48,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
   const running = new Set<RunId>();
   const resumeLocks = new Set<string>();
-  const labels = new Map<string, RunId>();
+  const labels = new Map<string, SpawnLabelTarget>();
   const tombstones = deps.tombstones ?? new TombstoneStore(30 * 60 * 1000, now);
   // X3: nested-delegation bookkeeping. `nesting` holds, for every currently
   // *running* top-level or nested run, the depth it was spawned at plus the
@@ -191,7 +199,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       let resolvedReq = req;
       let lockKeys: string[] = [];
       if (req.resumeFrom) {
-        const targetId = labels.get(req.resumeFrom) ?? req.resumeFrom;
+        const targetId = labels.get(req.resumeFrom)?.runId ?? req.resumeFrom;
         if (running.has(targetId))
           return {
             error: {
@@ -220,7 +228,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       const runId = randomUUID();
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
-      if (req.label) labels.set(req.label, runId);
+      if (req.label && !labels.has(req.label)) {
+        labels.set(req.label, { runId, type: req.type });
+        deps.onLabel?.(req.label, { runId, type: req.type });
+      } else if (req.label) {
+        console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
+      }
       nesting.set(runId, { depth, ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}) });
       if (req.parentRunId) {
         parentOf.set(runId, req.parentRunId);
@@ -279,6 +292,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       );
       return { settled, pending };
     },
+    getLabel: (label) => labels.get(label),
     snapshots: () => [...records.values()],
   };
   return service;
