@@ -62,8 +62,18 @@ export interface FleetWidgetRenderOptions {
   maxRows?: number;
   /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
   terminalLingerMs?: number;
+  /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. */
+  workflows?: readonly WorkflowGroupInput[];
   /** Color injector, same tones as the panel (warn/crit/muted); default plain text. */
   color?: FleetColorize;
+}
+
+/** M9: one in-flight workflow's header data (from WorkflowActivityRegistry, elapsed precomputed by the controller). */
+export interface WorkflowGroupInput {
+  workflowId: string;
+  name: string;
+  phase?: string;
+  elapsedMs: number;
 }
 
 /** M-C: one run's tree-row detail: "重构用户模块 #223b8f1e architect kimi-k3 tool_exec 8m32s bash×3 ▸edit $1.05".
@@ -128,27 +138,52 @@ export function buildFleetWidgetLines(
   const color: FleetColorize = opts.color ?? ((_tone, text) => text);
   const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
   const lingerMs = opts.terminalLingerMs ?? 5000;
+  const workflows = (opts.workflows ?? []).slice(0, 3);
   const activeRows = model.rows.filter((r) => !r.terminal);
   // M6: just-finished runs linger dimmed for a few seconds so a completion is
   // perceivable instead of vanishing between two ticks.
   const recentTerminal = model.rows.filter(
     (r) => r.terminal && r.settledAgoMs !== undefined && r.settledAgoMs <= lingerMs,
   );
-  if (model.activeCount === 0 && recentTerminal.length === 0) return undefined;
+  if (model.activeCount === 0 && recentTerminal.length === 0 && workflows.length === 0) return undefined;
   const worst = activeRows[0]?.highlight ?? "none";
-  const ordered = treeOrder(activeRows).slice(0, maxRows);
-  const hidden = model.activeCount - ordered.length;
+  // M9: workflow children (parentRunId === workflowId) are claimed by their
+  // workflow's ⚙ group; everything else goes through the regular run tree.
+  const workflowIds = new Set(workflows.map((w) => w.workflowId));
+  const grouped = new Map<string, FleetRow[]>();
+  const general: FleetRow[] = [];
+  for (const row of activeRows) {
+    if (row.parentRunId !== undefined && workflowIds.has(row.parentRunId)) {
+      const list = grouped.get(row.parentRunId) ?? [];
+      list.push(row);
+      grouped.set(row.parentRunId, list);
+    } else general.push(row);
+  }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
+  const lines: string[] = [];
+  let runRowsLeft = maxRows;
+  let shownRuns = 0;
+  for (const wf of workflows) {
+    lines.push(color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`));
+    for (const row of (grouped.get(wf.workflowId) ?? []).slice(0, Math.max(0, runRowsLeft))) {
+      lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ↳ ${widgetRowDetail(row)}`));
+      runRowsLeft--;
+      shownRuns++;
+    }
+  }
+  for (const { row, depth } of treeOrder(general).slice(0, Math.max(0, runRowsLeft))) {
+    const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
+    lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`));
+    runRowsLeft--;
+    shownRuns++;
+  }
+  const hidden = model.activeCount - shownRuns;
   const header =
     `${color(worst, "●")} ${model.activeCount} active` +
     (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
-  const lines = [header];
-  for (const { row, depth } of ordered) {
-    const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
-    lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`));
-  }
-  for (const row of recentTerminal.slice(0, Math.max(0, maxRows - ordered.length))) {
+  lines.unshift(header);
+  for (const row of recentTerminal.slice(0, Math.max(0, runRowsLeft))) {
     const mark = row.status === "completed" ? "✓" : "✗";
     lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
   }
@@ -180,6 +215,8 @@ export interface FleetWidgetDeps {
   idleBudgetMs?: Millis;
   /** Run rows below the header. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
+  /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
+  workflows?: () => readonly { workflowId: string; name: string; startedAt: number; currentPhaseId?: string }[];
   typeOf?: (runId: RunId) => string | undefined;
   color?: FleetColorize;
 }
@@ -228,6 +265,16 @@ export class FleetWidgetController {
     const lines = buildFleetWidgetLines(model, {
       ...(this.deps.maxRows !== undefined ? { maxRows: this.deps.maxRows } : {}),
       ...(this.deps.color ? { color: this.deps.color } : {}),
+      ...(this.deps.workflows
+        ? {
+            workflows: this.deps.workflows().map((w) => ({
+              workflowId: w.workflowId,
+              name: w.name,
+              ...(w.currentPhaseId === undefined ? {} : { phase: w.currentPhaseId }),
+              elapsedMs: Math.max(0, this.clock.now() - w.startedAt),
+            })),
+          }
+        : {}),
     });
     this.push(lines);
   }

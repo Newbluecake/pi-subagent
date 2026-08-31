@@ -156,7 +156,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         return `[${tone}]${text}`;
       },
     })!;
-    expect(tones[0]).toEqual(["crit", "●"]);
+    expect(tones).toContainEqual(["crit", "●"]);
     expect(lines[1]).toContain("[crit]✗ stuck-00");
     expect(lines[2]).toContain("[none]  calm-000");
   });
@@ -395,5 +395,46 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(0);
     expect(clock.pendingTimers).toBe(0);
     expect(() => widget.dispose()).not.toThrow();
+  });
+});
+
+describe("M9: workflow group headers in the tree", () => {
+  it("children with parentRunId === workflowId are grouped under a ⚙ header; others stay in the general tree", () => {
+    const wfChild1 = snapshot({
+      runId: "child-a00",
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_000, lastEventAt: 9_900, label: "评审A" }),
+    });
+    const wfChild2 = snapshot({
+      runId: "child-b00",
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_500, lastEventAt: 9_900, label: "评审B" }),
+    });
+    const loner = snapshot({ runId: "loner-000", diag: diag({ createdAt: 7_000, lastEventAt: 9_900 }) });
+    const model = buildFleetViewModel([wfChild1, wfChild2, loner], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      workflows: [{ workflowId: "wf-1", name: "plan-review", phase: "review", elapsedMs: 121_000 }],
+    })!;
+    expect(lines[0]).toContain("3 active");
+    expect(lines[1]).toBe("⚙ plan-review · review · 2m01s");
+    expect(lines[2]).toContain("↳ 评审A #child-a0");
+    expect(lines[3]).toContain("↳ 评审B #child-b0");
+    expect(lines[4]).toContain("loner-00");
+    expect(lines[4]).not.toContain("↳");
+  });
+
+  it("a workflow with no visible children still shows its header; widget visible even with 0 active runs", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      workflows: [{ workflowId: "wf-2", name: "nightly", elapsedMs: 5_000 }],
+    })!;
+    expect(lines[0]).toContain("0 active");
+    expect(lines[1]).toBe("⚙ nightly · - · 5s");
+  });
+
+  it("without workflows opt, workflow-orphaned children keep the plain ↳ top-level rendering", () => {
+    const child = snapshot({ runId: "child-a00", parentRunId: "wf-1", diag: diag({ createdAt: 8_000, lastEventAt: 9_900 }) });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([child], OPTS))!;
+    expect(lines[1]).toContain("↳ child-a0");
   });
 });

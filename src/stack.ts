@@ -201,6 +201,8 @@ export function buildSessionStack(
   });
   spawnRef.current = spawn;
   const query = createQueryService({ registry: createLiveRunRegistry(spawn, store), runner, clock: systemClock });
+  // M9: created early — the fleet widget below lists in-flight workflows.
+  const workflowActivity = createWorkflowActivityRegistry();
   // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).
   const usageBroadcaster = new UsageBroadcaster({
     list: () => query.list(),
@@ -218,6 +220,10 @@ export function buildSessionStack(
       query,
       clock: systemClock,
       idleBudgetMs: settings.budget.idleMs,
+      // M9: ⚙ workflow group headers in the agent tree — children (parentRunId
+      // === workflowId) are indented under their workflow instead of floating
+      // as orphan ↳ rows.
+      workflows: () => workflowActivity.list(),
     });
     widgetRef.current = widget;
     previousFleetWidget = widget;
@@ -231,7 +237,7 @@ export function buildSessionStack(
   // `index.ts` ever registers the `SubagentWorkflow` tool that would
   // actually call `createOrchestrator()` (settings.workflow.enabled default
   // `false` — the engine stays entirely inert until then).
-  const workflowActivity = createWorkflowActivityRegistry();
+  // (M9: created above the fleet widget, which lists in-flight workflows.)
   const workflowChildSpawner = createWorkflowChildSpawner(spawn, types);
   const workflowJournalRootDir = settings.workflow.journalDir ?? join(homedir(), ".pi", "agent", "workflows");
   const workflow: WorkflowSupport = {
