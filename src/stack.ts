@@ -215,11 +215,32 @@ export function buildSessionStack(
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
   // modes; settings.fleetWidget=false skips it entirely.
   if (settings.fleetWidget) {
+    // M10: theme-color injector — ctx.ui.theme is pi's live Theme (falls back
+    // to plain text on older pi builds without it).
+    const uiTheme = (ctx.ui as { theme?: { fg(color: string, text: string): string } } | undefined)?.theme;
     const widget = new FleetWidgetController({
       ui: ctx.ui,
       query,
       clock: systemClock,
       idleBudgetMs: settings.budget.idleMs,
+      ...(uiTheme
+        ? {
+            color: (tone, text) => {
+              switch (tone) {
+                case "warn":
+                  return uiTheme.fg("warning", text);
+                case "crit":
+                  return uiTheme.fg("error", text);
+                case "muted":
+                  return uiTheme.fg("muted", text);
+                case "header":
+                  return uiTheme.fg("accent", text);
+                default:
+                  return text;
+              }
+            },
+          }
+        : {}),
       // M9: ⚙ workflow group headers in the agent tree — children (parentRunId
       // === workflowId) are indented under their workflow instead of floating
       // as orphan ↳ rows.

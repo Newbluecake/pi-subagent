@@ -76,17 +76,24 @@ export interface WorkflowGroupInput {
   elapsedMs: number;
 }
 
-/** M-C: one run's tree-row detail: "重构用户模块 #223b8f1e architect kimi-k3 tool_exec 8m32s bash×3 ▸edit $1.05".
- *  The #shortRunId ties the row back to its Agent tool call / completion
- *  notification (which reference the run id) — label alone is ambiguous when
- *  the same description is reused. */
-function widgetRowDetail(row: FleetRow): string {
-  const parts = [row.label ? `${row.label} #${row.shortRunId}` : row.shortRunId, row.type ?? "·"];
-  if (row.model) parts.push(row.model);
-  parts.push(row.phase, formatDuration(row.elapsedMs));
+/** M-C: one run's tree-row detail. M10: segment-colored when a colorizer is
+ *  provided — label plain (the eye-catcher), #id/type/model/phase/elapsed/cost
+ *  muted, the in-flight `▸tool` segment accent — so rows have visual depth
+ *  instead of a uniform white line. warn/crit rows pass the identity colorizer
+ *  here and get whole-line tone coloring from the caller instead (nesting SGR
+ *  sequences would reset the outer color mid-line). */
+function widgetRowDetail(row: FleetRow, color: FleetColorize = (_t, s) => s): string {
+  const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
+  const meta: string[] = [row.type ?? "·"];
+  if (row.model) meta.push(row.model);
+  meta.push(row.phase, formatDuration(row.elapsedMs));
+  const parts = [name, color("muted", meta.join(" "))];
   const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
-  if (trail) parts.push(trail);
-  if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
+  if (trail) {
+    const idx = trail.indexOf("▸");
+    parts.push(idx >= 0 ? trail.slice(0, idx) + color("header", trail.slice(idx)) : trail);
+  }
+  if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
   return parts.join(" ");
 }
 
@@ -118,6 +125,13 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
   };
   for (const root of roots) visit(root, 0);
   return out;
+}
+
+/** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors. */
+function renderRunLine(row: FleetRow, indent: string, color: FleetColorize): string {
+  if (row.highlight !== "none")
+    return color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`);
+  return `${WIDGET_MARK.none} ${indent}${widgetRowDetail(row, color)}`;
 }
 
 /**
@@ -166,14 +180,14 @@ export function buildFleetWidgetLines(
   for (const wf of workflows) {
     lines.push(color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`));
     for (const row of (grouped.get(wf.workflowId) ?? []).slice(0, Math.max(0, runRowsLeft))) {
-      lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ↳ ${widgetRowDetail(row)}`));
+      lines.push(renderRunLine(row, "↳ ", color));
       runRowsLeft--;
       shownRuns++;
     }
   }
   for (const { row, depth } of treeOrder(general).slice(0, Math.max(0, runRowsLeft))) {
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
-    lines.push(color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`));
+    lines.push(renderRunLine(row, indent, color));
     runRowsLeft--;
     shownRuns++;
   }

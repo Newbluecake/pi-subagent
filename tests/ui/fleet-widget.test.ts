@@ -158,7 +158,10 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     })!;
     expect(tones).toContainEqual(["crit", "●"]);
     expect(lines[1]).toContain("[crit]✗ stuck-00");
-    expect(lines[2]).toContain("[none]  calm-000");
+    // calm row: segment-colored (muted meta), never whole-line tone-wrapped
+    expect(lines[2]).toContain("calm-000");
+    expect(lines[2]).toContain("[muted]· model_turn");
+    expect(lines[2]).not.toContain("[crit]");
   });
 
   it("marks: ✗ crit, ! warn, space otherwise", () => {
