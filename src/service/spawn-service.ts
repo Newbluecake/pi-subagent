@@ -25,6 +25,16 @@ export interface SpawnService {
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
   /** Resolve a label without exposing the mutable internal index. */
   getLabel?(label: string): SpawnLabelTarget | undefined;
+  /**
+   * CC1 (workflow design §8.2 / §3.7 OS1–OS4): the only owner-stop entry
+   * point for a caller whose own id is never a tracked run (e.g. a future
+   * workflow orchestrator's `WorkflowId` — it has no session/RunState, so
+   * `abort(workflowId)` would return `false` at its first-line `!running.has`
+   * guard without ever cascading). Reuses the exact same recursive cascade
+   * `abort()` already performs (`cascadeChildren`) — there is only ever one
+   * cascade implementation, never a second one (OS1).
+   */
+  stopChildrenOf(parentId: RunId, cause?: StopCause): Promise<{ stopped: RunId[]; pending: RunId[] }>;
 }
 export interface SpawnServiceDeps {
   types: AgentTypeRegistry;
@@ -157,8 +167,32 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       for (const key of resumeLockKeys) resumeLocks.delete(key);
     }
   };
+  /**
+   * CC1: extracted, byte-for-byte, from abort()'s pre-existing children loop
+   * (the recursion below re-enters `service.abort`, which is what actually
+   * disambiguates already-finished/never-started children via `running.has`
+   * — unchanged from before this extraction). Both `abort()` and the new
+   * `stopChildrenOf()` call this and nothing else; there is exactly one
+   * cascade implementation (OS1/OS3).
+   */
+  async function cascadeChildren(runId: RunId, cause: StopCause): Promise<RunId[]> {
+    const children = [...(childrenOf.get(runId) ?? [])].filter((c) => running.has(c));
+    if (children.length) await Promise.all(children.map((c) => service.abort(c, cause)));
+    return children;
+  }
   const service: SpawnService & { snapshots(): readonly RunSnapshot[] } = {
     async spawn(req) {
+      // CC4/CP1 (workflow design §4.4.1 F2, CP1-a/b/c): must be the first
+      // statement in spawn() — strictly before ANY mutable state write
+      // (resumeLocks/labels/nesting/parentOf/childrenOf/running below). A
+      // rejected resume request must never write a resumeLocks entry that
+      // only `start()`'s `finally` would ever clean up (that path never runs
+      // for a request rejected here), which would otherwise permanently lock
+      // out the resume target (same failure class as the already-fixed
+      // "leaks the targetId lock forever" bug in this file). Zero side
+      // effects: no runId, no index writes, no H2, no worktree, no slot.
+      if (req.deadlineAt !== undefined && req.deadlineAt <= now())
+        return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
       const config = deps.types.get(req.type);
       if (!config) return { error: { kind: "config", message: `unknown agent type: ${req.type}`, retryable: false } };
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
@@ -267,10 +301,24 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       // this run's own cancellation actually fires — `running.has()` /
       // createCancelHandle's already-aborted guard make the second pass a
       // no-op rather than an infinite loop.
-      const children = [...(childrenOf.get(runId) ?? [])].filter((c) => running.has(c));
-      if (children.length) await Promise.all(children.map((c) => service.abort(c, "parent_abort")));
+      await cascadeChildren(runId, "parent_abort");
       if (deps.runner.abort) return (await deps.runner.abort(runId, cause)).ok;
       return false;
+    },
+    async stopChildrenOf(parentId, cause = "parent_abort") {
+      // CC1 (OS1/OS2): the only owner-stop entry point that works when
+      // `parentId` itself is not (and never will be) a tracked run — unlike
+      // abort(), this never calls `running.has(parentId)` and never calls
+      // `deps.runner.abort` on `parentId`. Reuses the identical cascade
+      // abort() uses; the only difference is the guard swapped from
+      // `running.has` to "does this id have any children at all".
+      const stopped = await cascadeChildren(parentId, cause);
+      // OS4: snapshot taken AFTER the cascade attempt, for the caller's own
+      // sweep pass — children that hadn't actually finished yet (still
+      // tracked in childrenOf; cascadeChildren's fire of `service.abort` does
+      // not itself remove them, only their eventual `finish()` does).
+      const pending = [...(childrenOf.get(parentId) ?? [])];
+      return { stopped, pending };
     },
     async waitAll(opts = {}) {
       const ids = opts.runIds ?? [...running];

@@ -302,7 +302,23 @@ export function reduce(
   if (terminal(state.status)) return terminalUpdate(state, input);
   if (input.kind === "enqueued") {
     if (state.diag.enqueuedAt !== undefined) return illegal(state, input);
-    const deadlineAt = input.budget.totalMs === 0 ? undefined : input.at + input.budget.totalMs;
+    // CC4/CP3: the absolute deadlineAt cap (threaded from SpawnRequest.deadlineAt
+    // via RunInput.enqueued.deadlineCapAt, see service/request-threading.ts) may
+    // already be expired by the time this run is actually enqueued (H2 extension
+    // hooks can take seconds). Caught here, strictly before pool.acquire is ever
+    // reached — this run never occupies a slot or creates a session.
+    if (input.deadlineCapAt !== undefined && input.deadlineCapAt <= input.at)
+      return finish(state, "failed", input.at, budget, {
+        lastEventType: "config",
+        error: { kind: "config", message: "deadlineAt already expired at enqueue", retryable: false },
+      });
+    const raw = input.budget.totalMs === 0 ? undefined : input.at + input.budget.totalMs;
+    const cap = input.deadlineCapAt;
+    // CC4/FF1: deadlineAt only ever tightens the run's deadline, never loosens it
+    // — min() makes that automatic. Computed exactly once, right here (FF2: the
+    // core B1 invariant — "algorithm decides once, never recomputes" — is
+    // unaffected: what changed is *what* gets algorithm-decided, not *when*).
+    const deadlineAt = cap === undefined ? raw : raw === undefined ? cap : Math.min(raw, cap);
     const queueDeadlineAt = input.budget.queueWaitMs === 0 ? undefined : input.at + input.budget.queueWaitMs;
     let armedTimers: TimerId[] = [];
     const effects: RunEffect[] = [];

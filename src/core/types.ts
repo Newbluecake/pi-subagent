@@ -118,6 +118,19 @@ export interface SpawnRequest {
    * terminal state (host-side) — architecture §7.2 X10 "双重校验".
    */
   schema?: JsonSchema;
+  /**
+   * CC4: absolute wall-clock upper bound (epoch millis) on this run's
+   * deadline. Semantics:
+   *   ① the run's deadlines.deadlineAt = min(enqueuedAt + budget.totalMs, deadlineAt)
+   *   ② only tightens, never loosens (min() makes this automatic)
+   *   ③ computed once at enqueue time, then frozen forever (core invariant B1)
+   *   ④ if already expired at enqueue time -> failed(config, "deadlineAt already expired"),
+   *      without acquiring a slot or creating a session (see CP1/CP2/CP3)
+   *   ⑤ must be threaded through every hop explicitly (service/request-threading.ts)
+   *      or it is silently dropped — this repo has prior art for that failure mode
+   *      (see ResolvedSpawnRequest.parentRunId below).
+   */
+  deadlineAt?: Millis;
 }
 export interface UsageDelta {
   input: number;
@@ -239,7 +252,7 @@ export interface RunSnapshot {
 }
 
 export type RunInput =
-  | { kind: "enqueued"; at: Millis; budget: DeadlineBudget }
+  | { kind: "enqueued"; at: Millis; budget: DeadlineBudget; deadlineCapAt?: Millis }
   | { kind: "slot_acquired"; at: Millis }
   | { kind: "slot_denied"; at: Millis; reason: "queue_timeout" | "aborted" }
   | { kind: "phase_entered"; at: Millis; phase: RunPhase }

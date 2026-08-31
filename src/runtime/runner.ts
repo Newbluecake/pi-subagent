@@ -30,6 +30,14 @@ export interface ResolvedSpawnRequest extends SessionSpec {
   slotless?: boolean;
   /** X3: propagated through so RunState/RunSnapshot.parentRunId (core §5.1) is actually populated for nested runs — previously always undefined because nothing threaded it past RunnerSpec.request. */
   parentRunId?: string;
+  /**
+   * CC4: absolute deadline cap threaded from SpawnRequest.deadlineAt. Must be
+   * explicitly propagated by the adapter (service/runtime-adapter.ts) into the
+   * object literal it builds here — same failure mode as parentRunId above:
+   * silently dropped if a hop forgets to spread it. See service/request-threading.ts
+   * for the compile-time guard against exactly that.
+   */
+  deadlineAt?: Millis;
   /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
   toolScope?: { policy: ToolScopePolicy; enforcer: ToolScopeEnforcer };
 }
@@ -278,7 +286,17 @@ export class RuntimeRunner implements Runner {
     };
     this.dispatchers.set(req.runId, { gen, fn: dispatch });
     try {
-      dispatch({ kind: "enqueued", at: this.d.clock.now(), budget });
+      dispatch({
+        kind: "enqueued",
+        at: this.d.clock.now(),
+        budget,
+        ...(req.deadlineAt === undefined ? {} : { deadlineCapAt: req.deadlineAt }),
+      });
+      // CC4/CP3: an already-expired deadlineAt cap settles the run as
+      // failed(config) directly inside the `enqueued` reducer branch, before
+      // any timer is armed. Must be checked here — before pool.acquire — or
+      // this run would still occupy a slot despite already being terminal.
+      if (state.outcome) return state.outcome;
       const acq = await this.guard(
         this.d.pool.acquire(req.runId, {
           ...(req.slotless === undefined ? {} : { slotless: req.slotless }),

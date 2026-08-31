@@ -26,6 +26,7 @@ import type { SessionDriver } from "../runtime/session-driver.js";
 import type { SlotPool } from "../runtime/slot-pool.js";
 import { buildToolScopePolicy, createToolScopeEnforcer } from "../runtime/tool-scope.js";
 import type { Watchdog } from "../runtime/watchdog.js";
+import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
@@ -150,6 +151,14 @@ function buildPrompt(spec: RunnerSpec): string {
 export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   const merged = mergeExtensionPoints(deps.extensions ?? []);
   const perRun = new Map<string, RunnerCallbacks>();
+  // CC2: runs spawned with a parentRunId (i.e. workflow/nested children, X3)
+  // must not enqueue a top-level completion notification (workflow design
+  // §7.4 gap ① "child ownership" / §8.2 CC2). Tracked by runId, set at the
+  // start of run() (before any await) and cleared in its `finally`, so the
+  // shared enqueue_delivery interpreter below — which only sees the effect
+  // payload, not the originating RunnerSpec — can still tell child runs
+  // apart from top-level ones.
+  const childRunIds = new Set<string>();
   let runtime!: RuntimeRunner;
   const effects = new BasicEffectInterpreter(
     {
@@ -160,6 +169,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
       },
       enqueue_delivery: (e) => {
         if (e.kind !== "enqueue_delivery") return;
+        // CC2: child runs are consumed exclusively by their owner (the parent
+        // run / future workflow orchestrator), never by the top-level outbox
+        // — otherwise every child of a busy parent would independently spam a
+        // top-level completion notification (workflow design §8.2 CC2).
+        if (childRunIds.has(e.payload.runId)) return;
         deps.notifier.enqueue(e.payload);
       },
       emit_lifecycle: (e) => {
@@ -234,12 +248,25 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   return {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
+      if (spec.request.parentRunId !== undefined) childRunIds.add(spec.runId); // CC2
       // X10: captures the last StructuredOutput submission for this run, if
       // any. Populated (only) by the injected tool's onSubmit below; read
       // again, independently, after the run settles (host-side re-validation
       // — architecture §7.2 X10 "双重校验").
       const structured: { value?: unknown } = {};
       try {
+        // CC4/CP2: re-check the absolute deadline cap as the first thing
+        // inside this run's own execution, before any sessionSpec/customTools
+        // construction or H2 invocation — catches drift accrued between
+        // SpawnService's admission check (CP1) and this run actually
+        // starting (e.g. queued behind other synchronous work). H2 is not
+        // invoked on this path, so no worktree is created.
+        if (spec.request.deadlineAt !== undefined && spec.request.deadlineAt <= deps.clock.now())
+          return settleConfigFailure(spec.runId, {
+            kind: "config",
+            message: "deadlineAt already expired",
+            retryable: false,
+          });
         let sessionSpec: SessionSpec = {
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
@@ -324,10 +351,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           runId: spec.runId,
           ...sessionSpec,
           prompt: buildPrompt(spec),
-          ...(spec.request.signal === undefined ? {} : { signal: spec.request.signal }),
-          ...(spec.request.slotless === undefined ? {} : { slotless: spec.request.slotless }),
-          ...(spec.request.resumeFrom === undefined ? {} : { resumeFrom: spec.request.resumeFrom }),
-          ...(spec.request.parentRunId === undefined ? {} : { parentRunId: spec.request.parentRunId }),
+          ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
           toolScope,
         };
         let outcome = await runtime.run(req, spec.budget);
@@ -337,6 +361,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         return outcome;
       } finally {
         perRun.delete(spec.runId);
+        childRunIds.delete(spec.runId); // CC2
       }
     },
     abort(runId, cause) {

@@ -191,3 +191,86 @@ describe("SpawnService: X3 cascading abort", () => {
     expect(abortCalls.some((c) => c.runId === childOfA.runId)).toBe(false);
   });
 });
+
+/**
+ * CC1 (workflow design §8.2 / §3.7 OS1–OS4): stopChildrenOf is the owner-stop
+ * entry point for a caller whose own id (e.g. a future workflow's WorkflowId)
+ * is never a tracked SpawnService run — abort() would short-circuit at its
+ * `!running.has` guard and never cascade for such an id.
+ */
+describe("SpawnService: CC1 stopChildrenOf (owner-stop)", () => {
+  const worker: AgentTypeConfig = {
+    name: "worker",
+    description: "x",
+    systemPrompt: "",
+    promptMode: "append",
+    canSpawn: ["worker"],
+  };
+
+  it("cascades to all children and grandchildren of an id that is never itself a tracked run", async () => {
+    const { runner, abortCalls } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([worker]), pool, runner, now: () => 0 });
+    const ownerId = "wf_never_a_run"; // never passed to svc.spawn as a run
+
+    const child = await svc.spawn({ type: "worker", prompt: "a", parentRunId: ownerId });
+    if ("error" in child) throw new Error(child.error.message);
+    const grandchild = await svc.spawn({ type: "worker", prompt: "b", parentRunId: child.runId });
+    if ("error" in grandchild) throw new Error(grandchild.error.message);
+
+    const result = await svc.stopChildrenOf(ownerId);
+
+    // Depth-first, same order as the cascade abort() already performs.
+    expect(abortCalls).toEqual([
+      { runId: grandchild.runId, cause: "parent_abort" },
+      { runId: child.runId, cause: "parent_abort" },
+    ]);
+    expect(result.stopped).toEqual([child.runId]);
+  });
+
+  it("never calls abort on parentId itself (OS2) — only its children are stopped", async () => {
+    const { runner, abortCalls } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([worker]), pool, runner, now: () => 0 });
+    const ownerId = "wf_owner";
+    const child = await svc.spawn({ type: "worker", prompt: "a", parentRunId: ownerId });
+    if ("error" in child) throw new Error(child.error.message);
+
+    await svc.stopChildrenOf(ownerId, "timeout");
+
+    expect(abortCalls.every((c) => c.runId !== ownerId)).toBe(true);
+    expect(abortCalls).toEqual([{ runId: child.runId, cause: "timeout" }]);
+  });
+
+  it("filters out already-finished children (OS3/OS4): only the still-running child is stopped", async () => {
+    const { runner, abortCalls, settle } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([worker]), pool, runner, now: () => 0 });
+    const ownerId = "wf_mixed";
+    const done = await svc.spawn({ type: "worker", prompt: "a", parentRunId: ownerId });
+    if ("error" in done) throw new Error(done.error.message);
+    const alive = await svc.spawn({ type: "worker", prompt: "b", parentRunId: ownerId });
+    if ("error" in alive) throw new Error(alive.error.message);
+
+    settle(done.runId); // finish() removes it from running + childrenOf before the cascade runs
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = await svc.stopChildrenOf(ownerId);
+
+    expect(abortCalls).toEqual([{ runId: alive.runId, cause: "parent_abort" }]);
+    expect(result.stopped).toEqual([alive.runId]);
+  });
+
+  it("returns a pending snapshot (OS4) reflecting children not yet settled, for the caller's sweep pass", async () => {
+    const { runner } = controllableRunner();
+    const svc = createSpawnService({ types: typesRegistry([worker]), pool, runner, now: () => 0 });
+    const ownerId = "wf_sweep";
+    const child = await svc.spawn({ type: "worker", prompt: "a", parentRunId: ownerId });
+    if ("error" in child) throw new Error(child.error.message);
+
+    // controllableRunner's abort() resolves but never itself settles the run
+    // (only an explicit settle() call does) — so the child is still tracked
+    // in childrenOf after the cascade, exactly the case OS4's sweep exists for.
+    const result = await svc.stopChildrenOf(ownerId);
+
+    expect(result.pending).toEqual([child.runId]);
+  });
+});

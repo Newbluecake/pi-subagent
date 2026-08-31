@@ -209,11 +209,25 @@ export interface FleetRenderOptions {
   color?: FleetColorize;
   /** Append the key-hint footer (panel chrome; off for the one-shot text fallback). */
   hints?: boolean;
+  /**
+   * CC5 (workflow design §8.2 / §9.3): pre-rendered lines for external
+   * (non-`RunSnapshot`) sections — e.g. a future workflow engine's own
+   * fleet rows — spliced in *before* the AGENTS section. Kept as opaque
+   * pre-rendered lines rather than a new row shape so this file (and
+   * `buildFleetViewModel`, which only ever consumes `RunSnapshot[]`) never
+   * has to know what a workflow row looks like.
+   */
+  extraSections?: readonly FleetSection[];
+}
+/** CC5: one external section's already-rendered, already-colored lines. */
+export interface FleetSection {
+  readonly lines: readonly string[];
 }
 
 export function renderFleetLines(model: FleetViewModel, opts: FleetRenderOptions = {}): string[] {
   const color: FleetColorize = opts.color ?? ((_tone, text) => text);
   const lines: string[] = [];
+  for (const section of opts.extraSections ?? []) lines.push(...section.lines);
   lines.push(color("header", `Subagent fleet — ${model.activeCount} active / ${model.totalCount} total`));
   if (model.rows.length === 0) {
     lines.push(color("muted", "  No subagent runs recorded this session."));
@@ -258,6 +272,8 @@ export interface FleetPanelDeps {
   maxActiveRows?: number;
   recentTerminal?: number;
   typeOf?: (runId: RunId) => string | undefined;
+  /** CC5: called fresh on every render so external sections (e.g. a future workflow panel) stay live. */
+  extraSections?: () => readonly FleetSection[];
 }
 
 /**
@@ -339,9 +355,11 @@ export class FleetPanel {
   }
 
   render(width: number): string[] {
-    return renderFleetLines(this.model, { color: this.colorize, hints: true }).map((line) =>
-      truncateToWidth(line, width),
-    );
+    return renderFleetLines(this.model, {
+      color: this.colorize,
+      hints: true,
+      ...(this.deps.extraSections ? { extraSections: this.deps.extraSections() } : {}),
+    }).map((line) => truncateToWidth(line, width));
   }
 
   dispose(): void {

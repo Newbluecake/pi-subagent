@@ -154,3 +154,33 @@ describe("X2 resume lock lifecycle (P1 regression)", () => {
     await service.waitAll({ waitMs: 10 });
   });
 });
+
+/**
+ * CC4/CP1-c (workflow design §4.4.1): CP1 must run strictly before the
+ * `resumeLocks.add()` writes (lines 224/225 in the reference implementation)
+ * — otherwise a resume request rejected for an expired deadlineAt would
+ * leave its resumeLocks entries behind forever (the cleanup only happens in
+ * `start()`'s `finally`, a path a CP1-rejected request never reaches). This
+ * is the same failure class as the already-fixed "leaks the targetId lock
+ * forever" bug this file's other tests guard against.
+ */
+describe("X2 resume lock lifecycle: CC4 CP1 must not leak the resume lock", () => {
+  it("two consecutive expired-deadlineAt resumes of the same tombstone both fail the same way (no leaked lock)", async () => {
+    const runner: Runner = { run: async (spec) => outcome(spec.runId) };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first", label: "cp1" });
+
+    const one = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "cp1", deadlineAt: -1 });
+    const two = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "cp1", deadlineAt: -1 });
+
+    // If CP1 ran after resumeLocks.add() (or was skipped on the resume path),
+    // the second call would instead fail with "already has a resume in
+    // progress" — proving the first rejected attempt leaked its lock.
+    expect(one).toEqual({ error: { kind: "config", message: "deadlineAt already expired", retryable: false } });
+    expect(two).toEqual({ error: { kind: "config", message: "deadlineAt already expired", retryable: false } });
+
+    // A real (non-expired) resume of the same target must still succeed afterwards.
+    const real = await service.spawn({ type: "worker", prompt: "again", resumeFrom: "cp1" });
+    expect(real).toHaveProperty("runId");
+  });
+});

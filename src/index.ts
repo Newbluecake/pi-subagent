@@ -140,6 +140,9 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     spawnAndWait: (req) => requireStack(holder).spawn.spawnAndWait(req),
     abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
     waitAll: (opts) => requireStack(holder).spawn.waitAll(opts),
+    // CC1: forwarded for parity with the rest of SpawnService; no caller yet
+    // (the workflow orchestrator that will use this lands in M3.1+).
+    stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),
   };
 }
 function forwardQuery(holder: { current?: Stack }): QueryService {

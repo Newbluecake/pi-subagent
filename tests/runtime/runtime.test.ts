@@ -199,3 +199,48 @@ describe("turn error surfacing (regression: empty success)", () => {
     expect(outcome.error?.message).toContain("includes");
   });
 });
+
+/**
+ * CC4 F3/F4 (workflow design §4.4.1): `ResolvedSpawnRequest.deadlineAt` must
+ * actually reach the state machine as `RunInput.enqueued.deadlineCapAt` —
+ * this is the runner.ts half of the transport (the adapter half is
+ * `service/request-threading.ts`, tested separately).
+ */
+describe("CC4: ResolvedSpawnRequest.deadlineAt threads through to the enqueued deadline cap", () => {
+  it("a deadlineAt tighter than the relative budget wins, and survives to the terminal outcome", async () => {
+    const clock = new FakeClock();
+    const d = deps(clock, { create: async () => handle(), bind: async () => undefined, onLateArrival() {} });
+    // budget.totalMs = 30 (see module-level `budget`) -> raw deadline = 0+30 = 30.
+    // deadlineAt = 5 is tighter and must win.
+    const outcome = await new RuntimeRunner(d).run({ ...request, runId: "r-cap", deadlineAt: 5 }, budget);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.diag.deadlineAt).toBe(5);
+  });
+
+  it("an already-expired deadlineAt fails the run before pool.acquire is ever reached (CP3)", async () => {
+    const clock = new FakeClock();
+    let createCalled = false;
+    const d = deps(clock, {
+      create: async () => {
+        createCalled = true;
+        return handle();
+      },
+      bind: async () => undefined,
+      onLateArrival() {},
+    });
+    const outcome = await new RuntimeRunner(d).run({ ...request, runId: "r-expired", deadlineAt: -1 }, budget);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error?.kind).toBe("config");
+    expect(outcome.error?.message).toContain("already expired");
+    expect(createCalled).toBe(false);
+    expect(d.pool.stats.inUse).toBe(0);
+  });
+
+  it("omitting deadlineAt leaves the relative-only deadline calculation exactly as before CC4", async () => {
+    const clock = new FakeClock();
+    const d = deps(clock, { create: async () => handle(), bind: async () => undefined, onLateArrival() {} });
+    const outcome = await new RuntimeRunner(d).run({ ...request, runId: "r-no-cap" }, budget);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.diag.deadlineAt).toBe(30); // 0 (enqueue at) + budget.totalMs (30), unaffected by CC4
+  });
+});

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentTypeRegistry } from "../../src/config/agent-types.js";
-import { loadSettings, mergeBudget } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, DEFAULT_WORKFLOW_BUDGET, loadSettings, mergeBudget } from "../../src/config/settings.js";
 
 describe("agent config", () => {
   it("loads BOM files from precedence order and skips malformed files", async () => {
@@ -51,5 +51,73 @@ describe("built-in agent types", () => {
     expect(gp?.description).toBe("custom override"); // file wins
     expect(gp?.sourcePath).toBeDefined();
     expect(registry.get("Plan")?.sourcePath).toBeUndefined(); // still built-in
+  });
+});
+
+/**
+ * CC3 (workflow design §8.2): the `workflow` settings block, default
+ * disabled, with a `loadSettings` parser that tolerates missing/malformed
+ * input the same way every other field in this file already does.
+ */
+describe("CC3: workflow settings", () => {
+  it("defaults to disabled with the documented conservative defaults", () => {
+    expect(DEFAULT_SETTINGS.workflow).toEqual({
+      enabled: false,
+      budget: {},
+      replayTtlMs: 7 * 24 * 60 * 60 * 1_000,
+      replayScope: "chain",
+      runawayPolicy: "diagnose_only",
+    });
+  });
+
+  it("loadSettings(undefined) (no config file at all) also yields the disabled default", () => {
+    expect(loadSettings(undefined).workflow).toEqual(DEFAULT_SETTINGS.workflow);
+  });
+
+  it("parses a fully-specified workflow block, validating budget keys against DEFAULT_WORKFLOW_BUDGET", () => {
+    const settings = loadSettings({
+      workflow: {
+        enabled: true,
+        budget: { workflowTotalMs: 1_800_000, scriptSliceMs: 1_000, bogusKey: 999 },
+        journalDir: "/tmp/wf-journal",
+        replayTtlMs: 0,
+        replayScope: "content",
+        runawayPolicy: "terminate_on_stall",
+      },
+    });
+    expect(settings.workflow).toEqual({
+      enabled: true,
+      budget: { workflowTotalMs: 1_800_000, scriptSliceMs: 1_000 }, // bogusKey silently dropped, not merged in
+      journalDir: "/tmp/wf-journal",
+      replayTtlMs: 0,
+      replayScope: "content",
+      runawayPolicy: "terminate_on_stall",
+    });
+  });
+
+  it("falls back field-by-field on malformed values, without throwing", () => {
+    const settings = loadSettings({
+      workflow: { enabled: "yes", replayScope: "bogus", runawayPolicy: "bogus", replayTtlMs: -5, budget: "nope" },
+    });
+    expect(settings.workflow).toEqual(DEFAULT_SETTINGS.workflow);
+  });
+
+  it("a non-object workflow block falls back to the full default", () => {
+    expect(loadSettings({ workflow: 42 }).workflow).toEqual(DEFAULT_SETTINGS.workflow);
+  });
+
+  it("DEFAULT_WORKFLOW_BUDGET matches the WT1-WT19 matrix defaults (§4.1)", () => {
+    expect(DEFAULT_WORKFLOW_BUDGET).toEqual({
+      scriptLoadMs: 5_000,
+      scriptSliceMs: 2_000,
+      workerBootMs: 10_000,
+      hostCallMs: 60_000,
+      gateMs: 600_000,
+      phaseTotalMs: 0,
+      workflowTotalMs: 3_600_000,
+      heartbeatStallMs: 10_000,
+      abortGraceMs: 10_000,
+      terminateConfirmMs: 2_000,
+    });
   });
 });

@@ -238,6 +238,27 @@ describe("renderFleetLines (plain + injected color)", () => {
   });
 });
 
+/** CC5 (workflow design §8.2 / §9.3): FleetPanelDeps.extraSections — an optional injection point for a future workflow panel's own pre-rendered lines, spliced in before the AGENTS section. */
+describe("renderFleetLines: CC5 extraSections", () => {
+  const opts = { now: 10_000, idleBudgetMs: 1000 };
+
+  it("prepends every extra section's lines before the AGENTS header, in order", () => {
+    const model = buildFleetViewModel([], opts);
+    const lines = renderFleetLines(model, {
+      extraSections: [{ lines: ["WORKFLOWS (1)", " wf_a91c running"] }, { lines: ["---"] }],
+    });
+    expect(lines.slice(0, 3)).toEqual(["WORKFLOWS (1)", " wf_a91c running", "---"]);
+    expect(lines[3]).toContain("Subagent fleet");
+  });
+
+  it("omitting extraSections leaves rendering byte-for-byte identical to before CC5 (default behavior unchanged)", () => {
+    const s = snapshot({ runId: "plain-001" });
+    const model = buildFleetViewModel([s], opts);
+    expect(renderFleetLines(model)).toEqual(renderFleetLines(model, { extraSections: undefined }));
+    expect(renderFleetLines(model)[0]).toContain("Subagent fleet");
+  });
+});
+
 describe("FleetPanel component", () => {
   function fakeQuery(runs: RunSnapshot[]): QueryService & { runs: RunSnapshot[] } {
     const holder = {
@@ -312,6 +333,24 @@ describe("FleetPanel component", () => {
     ]);
     const panel = new FleetPanel({ query, clock, done: () => undefined });
     for (const line of panel.render(40)) expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+    panel.dispose();
+  });
+
+  it("CC5: calls deps.extraSections() fresh on every render and splices its lines in", () => {
+    const clock = new FakeClock(10_000);
+    const query = fakeQuery([]);
+    let calls = 0;
+    const panel = new FleetPanel({
+      query,
+      clock,
+      done: () => undefined,
+      extraSections: () => {
+        calls++;
+        return [{ lines: [`WORKFLOWS tick ${calls}`] }];
+      },
+    });
+    expect(panel.render(120)[0]).toBe("WORKFLOWS tick 1");
+    expect(panel.render(120)[0]).toBe("WORKFLOWS tick 2"); // re-invoked, not cached
     panel.dispose();
   });
 });

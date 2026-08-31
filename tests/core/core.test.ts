@@ -1601,3 +1601,117 @@ describe("seeded property invariants", () => {
     }
   });
 });
+
+/* -------------------------------------------------------------------------
+ * CC4 (workflow design §4.4.1 F4 / §4.4.1 CP3 / WP12): the `enqueued`
+ * reducer branch takes `min(rawDeadline, deadlineCapAt)`, and treats an
+ * already-expired cap as an immediate `failed(config)` — strictly before any
+ * timer is armed (i.e. before this run could ever look like it's occupying
+ * anything).
+ * ------------------------------------------------------------------------- */
+describe("CC4: enqueued deadlineCapAt (state-machine min() + CP3)", () => {
+  function enqueuedAt(at: number, totalMs: number, deadlineCapAt?: number): ReturnType<typeof reduce> {
+    const b = { ...DEFAULT_BUDGET, totalMs, queueWaitMs: 0 };
+    return reduce(
+      createInitialState("r", 1, 0),
+      {
+        generation: 1,
+        input: { kind: "enqueued", at, budget: b, ...(deadlineCapAt === undefined ? {} : { deadlineCapAt }) },
+      },
+      b,
+    );
+  }
+
+  it("cap tighter than the relative deadline wins (min())", () => {
+    const result = enqueuedAt(0, 10_000, 4_000); // raw = 10_000, cap = 4_000
+    expect(result.state.deadlines.deadlineAt).toBe(4_000);
+    expect(result.state.diag.deadlineAt).toBe(4_000);
+  });
+
+  it("cap looser than the relative deadline never loosens it (FF1: only tightens)", () => {
+    const result = enqueuedAt(0, 4_000, 10_000); // raw = 4_000, cap = 10_000
+    expect(result.state.deadlines.deadlineAt).toBe(4_000);
+  });
+
+  it("cap exactly equal to the relative deadline is a no-op", () => {
+    const result = enqueuedAt(0, 5_000, 5_000);
+    expect(result.state.deadlines.deadlineAt).toBe(5_000);
+  });
+
+  it("no cap (undefined) leaves the pre-CC4 relative-only calculation untouched", () => {
+    const withoutCap = enqueuedAt(100, 5_000);
+    expect(withoutCap.state.deadlines.deadlineAt).toBe(5_100);
+  });
+
+  it("totalMs=0 (unlimited) + a cap: the cap alone becomes the deadline", () => {
+    const result = enqueuedAt(0, 0, 7_000);
+    expect(result.state.deadlines.deadlineAt).toBe(7_000);
+  });
+
+  it("CP3: a cap already expired at enqueue time fails immediately, arms no timers, occupies nothing", () => {
+    const result = enqueuedAt(1_000, 5_000, 999); // cap (999) <= at (1000)
+    expect(result.state.status).toBe("failed");
+    expect(result.state.diag.error).toEqual({
+      kind: "config",
+      message: "deadlineAt already expired at enqueue",
+      retryable: false,
+    });
+    expect(result.state.armedTimers).toEqual([]);
+    expect(result.state.slotHeld).toBe(false);
+    expect(result.effects.some((e) => e.effect.kind === "arm_timer")).toBe(false);
+  });
+
+  it("CP3 boundary: cap === at (not yet strictly in the past) also counts as expired", () => {
+    const result = enqueuedAt(1_000, 5_000, 1_000);
+    expect(result.state.status).toBe("failed");
+  });
+
+  it("CP3 boundary: cap one tick after at is NOT expired (still enqueues normally)", () => {
+    const result = enqueuedAt(1_000, 5_000, 1_001);
+    expect(result.state.status).toBe("queued");
+    expect(result.state.deadlines.deadlineAt).toBe(1_001); // min(6000, 1001)
+  });
+
+  /**
+   * WP12 (§10.3): for 2000 random (totalMs, at, capOffset) combinations, the
+   * resulting deadlineAt never exceeds either input, and an already-expired
+   * cap never produces an `arm_timer` effect (FF1/FF3 as a property, not a
+   * handful of examples).
+   */
+  it("WP12: min() never exceeds either input; an expired cap never arms a timer", () => {
+    function mulberry32(seed: number): () => number {
+      let t = seed;
+      return () => {
+        t |= 0;
+        t = (t + 0x6d2b79f5) | 0;
+        let x = Math.imul(t ^ (t >>> 15), 1 | t);
+        x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+        return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    for (let seed = 1; seed <= 2000; seed++) {
+      const rnd = mulberry32(seed);
+      const at = Math.floor(rnd() * 10_000);
+      const totalMs = rnd() < 0.1 ? 0 : Math.floor(rnd() * 20_000);
+      const hasCap = rnd() < 0.8;
+      // capOffset spans well before `at` to well after, so both "already
+      // expired" and "comfortably in the future" are exercised.
+      const capOffset = Math.floor((rnd() - 0.5) * 30_000);
+      const cap = hasCap ? at + capOffset : undefined;
+      const result = enqueuedAt(at, totalMs, cap);
+      const raw = totalMs === 0 ? undefined : at + totalMs;
+      const armedTotal = result.effects.some((e) => e.effect.kind === "arm_timer" && e.effect.timer === "total");
+      if (cap !== undefined && cap <= at) {
+        expect(result.state.status).toBe("failed");
+        expect(result.effects.some((e) => e.effect.kind === "arm_timer")).toBe(false);
+        continue;
+      }
+      const deadlineAt = result.state.deadlines.deadlineAt;
+      if (raw !== undefined) expect(deadlineAt).toBeLessThanOrEqual(raw);
+      if (cap !== undefined) expect(deadlineAt).toBeLessThanOrEqual(cap);
+      if (raw === undefined && cap === undefined) expect(deadlineAt).toBeUndefined();
+      else expect(deadlineAt).toBeDefined();
+      expect(armedTotal).toBe(deadlineAt !== undefined);
+    }
+  });
+});
