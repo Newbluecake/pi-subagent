@@ -35,6 +35,8 @@ export interface FleetRow {
   toolTrail: string | undefined;
   /** M-C: parent link for tree grouping in the widget (undefined = top-level). */
   parentRunId: RunId | undefined;
+  /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻重试2/3 …) for presentation surfaces. */
+  phaseLabel: string;
   status: RunStatus;
   phase: RunPhase;
   /** now - diag.createdAt, clamped ≥ 0. */
@@ -73,6 +75,36 @@ export interface FleetViewOptions {
   recentTerminal?: number;
   /** Optional runId → agent-type resolver (RunSnapshot doesn't carry the type; see file header). */
   typeOf?: (runId: RunId) => string | undefined;
+}
+
+/**
+ * M11: human-friendly phase label for the presentation surfaces (tree rows,
+ * foreground card). Diagnostic surfaces (/agent status) keep the raw
+ * RunPhase. retry shows its attempt counter when known.
+ */
+export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">): string {
+  switch (phase) {
+    case "queue_wait":
+      return "⏸排队";
+    case "resolve_config":
+    case "session_create":
+    case "extension_bind":
+      return "⚡启动";
+    case "prompt_dispatch":
+    case "model_turn":
+      return "🧠思考";
+    case "tool_exec":
+      return "🔧工具";
+    case "retry_backoff":
+      return diag?.retry ? `♻重试${diag.retry.attempt}/${diag.retry.maxAttempts}` : "♻重试";
+    case "compaction":
+      return "🗜压缩";
+    case "abort_grace":
+    case "reap":
+      return "⏹停止中";
+    case "settled":
+      return "已结束";
+  }
 }
 
 /** Milliseconds since the last observed driver event (or since the current phase started). */
@@ -130,10 +162,7 @@ export function formatUsage(u: UsageDelta): string {
  * into `name×k` (failed ones render `name✗`), only the last `maxTokens`
  * tokens are kept, and an in-flight call is appended as `▸name`.
  */
-export function toolTrailOf(
-  diag: Pick<RunDiagnostics, "toolHistory">,
-  maxTokens = 4,
-): string | undefined {
+export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens = 4): string | undefined {
   const history = diag.toolHistory;
   if (!history?.length) return undefined;
   const tokens: Array<{ key: string; name: string; failed: boolean; count: number }> = [];
@@ -183,6 +212,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     model: snapshot.diag.model?.id,
     toolTrail: toolTrailOf(snapshot.diag),
     parentRunId: snapshot.parentRunId,
+    phaseLabel: phaseLabel(snapshot.phase, snapshot.diag),
     status: snapshot.status,
     phase: snapshot.phase,
     elapsedMs: Math.max(0, opts.now - snapshot.diag.createdAt),
@@ -221,4 +251,3 @@ export function buildFleetViewModel(snapshots: readonly RunSnapshot[], opts: Fle
     usageTotal: sumUsage(snapshots.map((s) => s.diag.usage)),
   };
 }
-

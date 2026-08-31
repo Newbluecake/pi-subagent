@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
-import { formatDuration } from "../ui/fleet-panel.js";
+import { formatDuration, phaseLabel } from "../ui/fleet-panel.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 
@@ -56,7 +56,7 @@ export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3)
   const d = snap.diag;
   const header = `⏳ ${[
     d.model?.id ?? d.agentType ?? snap.status,
-    snap.phase,
+    phaseLabel(snap.phase, d),
     `turn ${d.turns + 1}`,
     formatDuration(Math.max(0, now - d.createdAt)),
     ...(d.usage ? [formatWidgetCost(d.usage.costUsd)] : []),

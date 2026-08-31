@@ -62,7 +62,7 @@ describe("M-B: buildProgressLines", () => {
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.0412 },
       }),
     });
-    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ kimi-k3 · model_turn · turn 3 · 42s · $0.04");
+    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ kimi-k3 · 🧠思考 · turn 3 · 42s · $0.04");
   });
 
   it("falls back to agentType then status when no model is known", () => {
@@ -81,11 +81,7 @@ describe("M-B: buildProgressLines", () => {
       }),
     });
     const lines = buildProgressLines(snap, 12_000);
-    expect(lines.slice(1)).toEqual([
-      "✓ bash ls -la (1s)",
-      "✗ bash npm test (8s)",
-      "▸ edit src/x.ts (running…)",
-    ]);
+    expect(lines.slice(1)).toEqual(["✓ bash ls -la (1s)", "✗ bash npm test (8s)", "▸ edit src/x.ts (running…)"]);
   });
 
   it("caps the trail at maxTools (most recent kept)", () => {
@@ -143,9 +139,10 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
     vi.useFakeTimers();
     try {
       const snap = snapshot({
-        diag: diag({ model: { provider: "p", id: "kimi-k3" }, toolHistory: [
-          { name: "bash", toolCallId: "a", startedAt: 0, argsPreview: "ls" },
-        ] }),
+        diag: diag({
+          model: { provider: "p", id: "kimi-k3" },
+          toolHistory: [{ name: "bash", toolCallId: "a", startedAt: 0, argsPreview: "ls" }],
+        }),
       });
       const final = completed();
       const { spawn, progress, release } = ports(snap, final);

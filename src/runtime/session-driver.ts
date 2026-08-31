@@ -172,7 +172,9 @@ class PiSessionHandle implements SessionHandle {
    *  carried no override and the agent type declared no model). */
   getModelRef(): { provider: string; id: string } | undefined {
     const m = this.session.model as { provider?: unknown; id?: unknown } | undefined;
-    return typeof m?.provider === "string" && typeof m?.id === "string" ? { provider: m.provider, id: m.id } : undefined;
+    return typeof m?.provider === "string" && typeof m?.id === "string"
+      ? { provider: m.provider, id: m.id }
+      : undefined;
   }
   /** pi resolves prompt() even when the final turn died (stopReason
    *  "error", e.g. provider crash) — without this check a dead turn looks

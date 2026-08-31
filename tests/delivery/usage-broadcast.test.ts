@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import type { RunDiagnostics, RunSnapshot } from "../../src/core/types.js";
-import {
-  buildUsageEvent,
-  UsageBroadcaster,
-  type SubagentUsageEvent,
-} from "../../src/delivery/usage-broadcast.js";
+import { buildUsageEvent, UsageBroadcaster, type SubagentUsageEvent } from "../../src/delivery/usage-broadcast.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
   return {
@@ -93,9 +89,7 @@ describe("M-E: UsageBroadcaster ticker", () => {
   });
 
   it("poke on an idle fleet emits one frame and does not arm a timer", () => {
-    const { clock, events, broadcaster } = harness([
-      snapshot({ status: "completed", phase: "settled" }),
-    ]);
+    const { clock, events, broadcaster } = harness([snapshot({ status: "completed", phase: "settled" })]);
     broadcaster.poke();
     expect(events).toHaveLength(1);
     expect(clock.pendingTimers).toBe(0);

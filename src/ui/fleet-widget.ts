@@ -86,7 +86,7 @@ function widgetRowDetail(row: FleetRow, color: FleetColorize = (_t, s) => s): st
   const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
   const meta: string[] = [row.type ?? "·"];
   if (row.model) meta.push(row.model);
-  meta.push(row.phase, formatDuration(row.elapsedMs));
+  meta.push(row.phaseLabel, formatDuration(row.elapsedMs));
   const parts = [name, color("muted", meta.join(" "))];
   const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
   if (trail) {

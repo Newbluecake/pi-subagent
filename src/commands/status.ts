@@ -88,9 +88,7 @@ function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | unde
  */
 export function renderRunDetail(query: QueryService, idArg: string): string {
   const runs = query.list();
-  const matches = runs.filter(
-    (s) => s.runId === idArg || s.runId.startsWith(idArg) || s.diag.label === idArg,
-  );
+  const matches = runs.filter((s) => s.runId === idArg || s.runId.startsWith(idArg) || s.diag.label === idArg);
   if (matches.length === 0) return `No run matches "${idArg}".`;
   if (matches.length > 1)
     return `Ambiguous "${idArg}" — matches: ${matches.map((s) => s.runId.slice(0, 8)).join(", ")}`;

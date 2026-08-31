@@ -287,7 +287,13 @@ export type RunInput =
   | { kind: "slot_acquired"; at: Millis }
   | { kind: "slot_denied"; at: Millis; reason: "queue_timeout" | "aborted" }
   | { kind: "phase_entered"; at: Millis; phase: RunPhase }
-  | { kind: "session_created"; at: Millis; sessionId: string; sessionFile?: string; model?: { provider: string; id: string } }
+  | {
+      kind: "session_created";
+      at: Millis;
+      sessionId: string;
+      sessionFile?: string;
+      model?: { provider: string; id: string };
+    }
   | {
       kind: "startup_failed";
       at: Millis;

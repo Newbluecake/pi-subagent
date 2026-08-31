@@ -168,7 +168,7 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
     const a = detailed();
     const q = deps([a]).query as never;
     expect(renderRunDetail(q, "重构用户模块")).toContain("Run 223b8f1e");
-    expect(renderRunDetail(q, "nope")).toContain('No run matches');
+    expect(renderRunDetail(q, "nope")).toContain("No run matches");
     const twin = detailed();
     twin.runId = "223b8f1e-aaaa-bbbb-cccc-111111111111";
     const q2 = deps([a, twin]).query as never;
@@ -191,13 +191,24 @@ describe("M7 renderCosts", () => {
     const { renderCosts } = await import("../../src/commands/status.js");
     const cheap = snapshot({
       runId: "cheap-000",
-      diag: { ...snapshot().diag, label: "便宜任务", settledAt: 10_000, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 } },
+      diag: {
+        ...snapshot().diag,
+        label: "便宜任务",
+        settledAt: 10_000,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 },
+      },
     });
     const pricey = snapshot({
       runId: "pricey-00",
       status: "running",
       phase: "model_turn",
-      diag: { ...snapshot().diag, label: "贵任务", agentType: "architect", model: { provider: "p", id: "opus-5" }, usage: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0, costUsd: 1.5 } },
+      diag: {
+        ...snapshot().diag,
+        label: "贵任务",
+        agentType: "architect",
+        model: { provider: "p", id: "opus-5" },
+        usage: { input: 9, output: 9, cacheRead: 0, cacheWrite: 0, costUsd: 1.5 },
+      },
     });
     const text = renderCosts({ ...({} as object), list: () => [cheap, pricey] } as never);
     const lines = text.split("\n");

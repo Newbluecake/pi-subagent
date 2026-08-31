@@ -186,4 +186,3 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.usageTotal?.costUsd).toBeCloseTo(0.003, 10);
   });
 });
-

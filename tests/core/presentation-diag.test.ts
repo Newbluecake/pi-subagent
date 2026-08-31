@@ -74,9 +74,7 @@ describe("M-A: tool trail (toolHistory / toolCounts)", () => {
     let s = runningState();
     s = sessionEvent(s, { t: "tool_start", toolCallId: "c1", toolName: "bash", argsPreview: "ls -la" }, 10);
     expect(s.phase).toBe("tool_exec");
-    expect(s.diag.toolHistory).toEqual([
-      { name: "bash", toolCallId: "c1", startedAt: 10, argsPreview: "ls -la" },
-    ]);
+    expect(s.diag.toolHistory).toEqual([{ name: "bash", toolCallId: "c1", startedAt: 10, argsPreview: "ls -la" }]);
     s = sessionEvent(s, { t: "tool_end", toolCallId: "c1", toolName: "bash", isError: true }, 22);
     expect(s.diag.toolHistory).toEqual([
       { name: "bash", toolCallId: "c1", startedAt: 10, endedAt: 22, isError: true, argsPreview: "ls -la" },

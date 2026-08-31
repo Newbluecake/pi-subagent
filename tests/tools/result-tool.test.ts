@@ -103,7 +103,13 @@ describe("pi usage accounting: tool-result usage attach + first-terminal dedupe"
     const second = (await tool.execute("tc2", { run_id: "r1" }, undefined, () => undefined, {} as never)) as WithUsage;
     expect(second.usage).toBeUndefined();
     // a different run is still reported
-    const other = (await tool.execute("tc3", { run_id: "r2", wait: true }, undefined, () => undefined, {} as never)) as WithUsage;
+    const other = (await tool.execute(
+      "tc3",
+      { run_id: "r2", wait: true },
+      undefined,
+      () => undefined,
+      {} as never,
+    )) as WithUsage;
     expect(other.usage).toBeDefined();
   });
 

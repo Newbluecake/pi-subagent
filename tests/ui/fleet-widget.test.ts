@@ -73,10 +73,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: NOW - 8 * 60_000 - 32_000, lastEventAt: 9_900, usage: usage(1.05) }),
     });
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
-    expect(buildFleetWidgetLines(model)).toEqual([
-      "● 1 active · $1.05",
-      "  aaaaaaaa architect model_turn 8m32s $1.05",
-    ]);
+    expect(buildFleetWidgetLines(model)).toEqual(["● 1 active · $1.05", "  aaaaaaaa architect 🧠思考 8m32s $1.05"]);
   });
 
   it("M-A meta: label, agentType and model from diag are rendered on the row", () => {
@@ -90,7 +87,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect kimi-k3 model_turn 1s");
+    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect kimi-k3 🧠思考 1s");
   });
 
   it("tool trail: prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
@@ -106,7 +103,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))![1]).toBe(
-      "  aaaaaaaa · model_turn 1s bash×2 ▸edit",
+      "  aaaaaaaa · 🧠思考 1s bash×2 ▸edit",
     );
     const withTool = snapshot({
       diag: diag({
@@ -115,7 +112,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         currentTool: { name: "bash", toolCallId: "t", startedAt: 9_900 },
       }),
     });
-    expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))![1]).toBe("  aaaaaaaa · model_turn 1s ▸bash");
+    expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))![1]).toBe("  aaaaaaaa · 🧠思考 1s ▸bash");
   });
 
   it("tree: a child whose parent is shown is indented under it (↳), not severity-sorted away", () => {
@@ -130,16 +127,16 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
       "● 3 active",
-      "  parent-0 · model_turn 9s",
-      "  ↳ child-00 · model_turn 5s",
-      "  other-00 · model_turn 8s",
+      "  parent-0 · 🧠思考 9s",
+      "  ↳ child-00 · 🧠思考 5s",
+      "  other-00 · 🧠思考 8s",
     ]);
   });
 
   it("nested run whose parent is NOT shown still gets the ↳ marker at top level", () => {
     const nested = snapshot({ parentRunId: "p", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     const lines = buildFleetWidgetLines(buildFleetViewModel([nested], OPTS))!;
-    expect(lines[1]).toBe("  ↳ aaaaaaaa · model_turn 1s");
+    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🧠思考 1s");
   });
 
   it("highlight-priority: crit run's row is first among roots and the bullet takes the worst tone", () => {
@@ -160,7 +157,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toContain("[crit]✗ stuck-00");
     // calm row: segment-colored (muted meta), never whole-line tone-wrapped
     expect(lines[2]).toContain("calm-000");
-    expect(lines[2]).toContain("[muted]· model_turn");
+    expect(lines[2]).toContain("[muted]· 🧠思考");
     expect(lines[2]).not.toContain("[crit]");
   });
 
@@ -180,8 +177,14 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
   });
 
   it("header cost sums active rows only and is omitted at $0", () => {
-    const a = snapshot({ runId: "a-0000000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900, usage: usage(0.002) }) });
-    const b = snapshot({ runId: "b-0000000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900, usage: usage(0.001) }) });
+    const a = snapshot({
+      runId: "a-0000000",
+      diag: diag({ createdAt: 9_000, lastEventAt: 9_900, usage: usage(0.002) }),
+    });
+    const b = snapshot({
+      runId: "b-0000000",
+      diag: diag({ createdAt: 9_000, lastEventAt: 9_900, usage: usage(0.001) }),
+    });
     expect(buildFleetWidgetLines(buildFleetViewModel([a, b], OPTS))![0]).toBe("● 2 active · $0.0030");
     const free = snapshot({ diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     expect(buildFleetWidgetLines(buildFleetViewModel([free], OPTS))![0]).toBe("● 1 active");
@@ -199,7 +202,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
   });
 
   it("overflow boundary: exactly maxRows runs → no '+more'; maxRows 1 → header + 1 row", () => {
-    const two = [0, 1].map((i) => snapshot({ runId: `r${i}0000000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }));
+    const two = [0, 1].map((i) =>
+      snapshot({ runId: `r${i}0000000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
+    );
     const exact = buildFleetWidgetLines(buildFleetViewModel(two, OPTS))!;
     expect(exact).toHaveLength(3);
     expect(exact[0]).not.toContain("more");
@@ -234,9 +239,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(model)!;
     expect(lines[0]).toContain("1 active");
     expect(lines[1]).toContain("live-000");
-    expect(lines.some((l) => l.startsWith("✓ 刚完成 #done-000") && l.includes("completed") && l.includes("$0.11"))).toBe(
-      true,
-    );
+    expect(
+      lines.some((l) => l.startsWith("✓ 刚完成 #done-000") && l.includes("completed") && l.includes("$0.11")),
+    ).toBe(true);
     expect(lines.some((l) => l.startsWith("✗ fail-000") && l.includes("failed"))).toBe(true);
     expect(lines.join("\n")).not.toContain("old-0000"); // 9s ago → expired
     // all-terminal fleet: still shown while lingering, hidden once expired
@@ -301,7 +306,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active", "  live-000 · model_turn 1s"]);
+    expect(ui.calls[0]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -333,7 +338,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active", "  live-000 · model_turn 1s"]);
+    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s"]);
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });
@@ -436,7 +441,11 @@ describe("M9: workflow group headers in the tree", () => {
   });
 
   it("without workflows opt, workflow-orphaned children keep the plain ↳ top-level rendering", () => {
-    const child = snapshot({ runId: "child-a00", parentRunId: "wf-1", diag: diag({ createdAt: 8_000, lastEventAt: 9_900 }) });
+    const child = snapshot({
+      runId: "child-a00",
+      parentRunId: "wf-1",
+      diag: diag({ createdAt: 8_000, lastEventAt: 9_900 }),
+    });
     const lines = buildFleetWidgetLines(buildFleetViewModel([child], OPTS))!;
     expect(lines[1]).toContain("↳ child-a0");
   });
