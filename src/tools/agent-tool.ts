@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, RunId, RunOutcome, SpawnRequest } from "../core/types.js";
 
@@ -105,6 +106,26 @@ export function createAgentTool(deps: {
     promptSnippet:
       "Agent(description, prompt, subagent_type, model?, resume?, schema?, run_in_background?) - spawn or resume a bounded subagent",
     parameters: AgentToolParams,
+    /**
+     * Without a renderCall the TUI falls back to the bare tool name while a
+     * run executes — an Agent card with zero context about *what* is running.
+     * Show the label + type (and background/resume markers) like the built-in
+     * tools show their key argument (e.g. bash renders `$ <command>`).
+     */
+    renderCall(args, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const title = theme.fg("toolTitle", theme.bold(`Agent: ${args?.description ?? "…"}`));
+      const meta = [
+        args?.subagent_type ? `type: ${args.subagent_type}` : undefined,
+        args?.run_in_background ? "background" : undefined,
+        args?.resume ? `resume: ${args.resume}` : undefined,
+        args?.isolation ? `isolation: ${args.isolation}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      text.setText(meta ? `${title}\n${theme.fg("muted", meta)}` : title);
+      return text;
+    },
     async execute(_toolCallId, params, signal) {
       if (deps.allowedTypes && !deps.allowedTypes.includes(params.subagent_type)) {
         throw new Error(

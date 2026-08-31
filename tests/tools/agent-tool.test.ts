@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Text } from "@earendil-works/pi-tui";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
 import type { RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
@@ -125,5 +126,56 @@ describe("tools/agent-tool: timeout_ms budget override", () => {
       {} as never,
     );
     expect(port2.seen?.budgetOverride).toBeUndefined();
+  });
+});
+
+describe("tools/agent-tool: renderCall (TUI call card)", () => {
+  // Bare-minimum Theme stand-in: renderCall only uses fg()/bold().
+  const theme = { fg: (_color: string, t: string) => t, bold: (t: string) => t };
+  const ctx = (lastComponent?: unknown) => ({ lastComponent, state: {} });
+
+  it("renders the task description and subagent_type instead of a bare tool name", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const comp = tool.renderCall!(
+      { description: "analyze project", prompt: "p", subagent_type: "general-purpose" },
+      theme as never,
+      ctx() as never,
+    );
+    const out = (comp as Text).render(120).join("\n");
+    expect(out).toContain("Agent: analyze project");
+    expect(out).toContain("type: general-purpose");
+  });
+
+  it("marks background / resume / isolation runs and reuses the last component", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const first = tool.renderCall!(
+      {
+        description: "d",
+        prompt: "p",
+        subagent_type: "worker",
+        run_in_background: true,
+        resume: "old-label",
+        isolation: "worktree",
+      },
+      theme as never,
+      ctx() as never,
+    ) as Text;
+    const out = first.render(120).join("\n");
+    expect(out).toContain("background");
+    expect(out).toContain("resume: old-label");
+    expect(out).toContain("isolation: worktree");
+    const second = tool.renderCall!(
+      { description: "d2", prompt: "p", subagent_type: "worker" },
+      theme as never,
+      ctx(first) as never,
+    );
+    expect(second).toBe(first); // same Text instance, mutated in place (bash-tool convention)
+    expect((second as Text).render(120).join("\n")).toContain("Agent: d2");
+  });
+
+  it("tolerates partial streaming args (no description yet)", () => {
+    const tool = createAgentTool({ spawn: fakePort() });
+    const comp = tool.renderCall!({}, theme as never, ctx() as never) as Text;
+    expect(comp.render(120).join("\n")).toContain("Agent:");
   });
 });
