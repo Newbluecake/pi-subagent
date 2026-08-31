@@ -72,6 +72,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     runId: RunId,
     config: NonNullable<ReturnType<AgentTypeRegistry["get"]>>,
     budget: DeadlineBudget,
+    resumeLockKeys: readonly string[] = [],
   ) => {
     running.add(runId);
     try {
@@ -115,7 +116,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         error: toErrorInfo(error),
       });
     } finally {
-      if (req.resumeFrom) resumeLocks.delete(req.resumeFrom);
+      // Release every key acquired at spawn time (targetId AND sessionFile) —
+      // deleting only req.resumeFrom leaks the targetId lock forever once
+      // resumeFrom has been rewritten to the session file (P1: repeat-resume
+      // of the same session was permanently rejected).
+      for (const key of resumeLockKeys) resumeLocks.delete(key);
     }
   };
   const service: SpawnService & { snapshots(): readonly RunSnapshot[] } = {
@@ -123,6 +128,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const config = deps.types.get(req.type);
       if (!config) return { error: { kind: "config", message: `unknown agent type: ${req.type}`, retryable: false } };
       let resolvedReq = req;
+      let lockKeys: string[] = [];
       if (req.resumeFrom) {
         const targetId = labels.get(req.resumeFrom) ?? req.resumeFrom;
         if (running.has(targetId))
@@ -149,11 +155,12 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         resumeLocks.add(targetId);
         resumeLocks.add(tombstone.sessionFile);
         resolvedReq = { ...req, resumeFrom: tombstone.sessionFile };
+        lockKeys = [targetId, tombstone.sessionFile];
       }
       const runId = randomUUID();
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
       if (req.label) labels.set(req.label, runId);
-      void start(resolvedReq, runId, config, budget);
+      void start(resolvedReq, runId, config, budget, lockKeys);
       return { runId };
     },
     async spawnAndWait(req) {

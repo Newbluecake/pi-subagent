@@ -111,3 +111,46 @@ describe("X2 resume", () => {
     expect(store.get("r")).toBeUndefined();
   });
 });
+
+describe("X2 resume lock lifecycle (P1 regression)", () => {
+  it("allows sequential resumes of the same session after each completes", async () => {
+    const resumes: string[] = [];
+    const runner: Runner = {
+      run: async (spec) => {
+        if (spec.request.resumeFrom) resumes.push(spec.request.resumeFrom);
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first", label: "seq" });
+    const r1 = await service.spawn({ type: "worker", prompt: "second", resumeFrom: "seq" });
+    expect(r1).toHaveProperty("runId");
+    await service.waitAll({ waitMs: 10 });
+    // P1: the targetId lock must be released after the first resume settles —
+    // a second sequential resume must not be rejected.
+    const r2 = await service.spawn({ type: "worker", prompt: "third", resumeFrom: "seq" });
+    expect(r2).toHaveProperty("runId");
+    await service.waitAll({ waitMs: 10 });
+    expect(resumes).toEqual(["/tmp/session.jsonl", "/tmp/session.jsonl"]);
+  });
+
+  it("rejects resume of a still-running run with a steer hint", async () => {
+    let release!: () => void;
+    const runner: Runner = {
+      run: async (spec) => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawn({ type: "worker", prompt: "slow", label: "busy2" });
+    const rejected = await service.spawn({ type: "worker", prompt: "x", resumeFrom: "busy2" });
+    expect(rejected).toMatchObject({
+      error: { message: expect.stringContaining("still running; use steer_subagent instead") },
+    });
+    release();
+    await service.waitAll({ waitMs: 10 });
+  });
+});
