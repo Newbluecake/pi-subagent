@@ -5,6 +5,11 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "exports": {
     ".": "./dist/index.js"
   },

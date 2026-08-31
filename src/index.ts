@@ -1,12 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
-import { MemoryRunStore } from "./core/store.js";
-import { assertCompatible, detectPiCapabilities } from "./adapters/pi-compat.js";
+import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
+import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
 import { loadSettings } from "./config/settings.js";
-import { createNotifier, type Notifier } from "./delivery/notifier.js";
+import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
@@ -43,8 +43,16 @@ export default function activate(pi: ExtensionAPI): void {
   const holder: { current?: Stack } = {};
 
   const buildStack = (ctx: ExtensionContext): Stack => {
+    // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
+    // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
+    // stores + WARN instead of throwing inside the session_start handler.
+    const readBack = probeReadBackEntries(ctx);
+    if (!readBack)
+      console.warn(
+        "[pi-subagent] ctx.sessionManager.getEntries unavailable; run-log/outbox degrade to in-memory (G5a read-back verification off).",
+      );
     const runLogHost = { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager };
-    const store = wrapWithRunLog(new MemoryRunStore(), runLogHost);
+    const store = readBack ? wrapWithRunLog(new MemoryRunStore(), runLogHost) : new MemoryRunStore();
     const pool = new SingleSlotPool(systemClock, settings.concurrencyLimit);
     const reaper = new EscalatingReaper(systemClock);
     const watchdog = new EventWatchdog({
@@ -57,7 +65,9 @@ export default function activate(pi: ExtensionAPI): void {
       getState: () => undefined,
       dispatch: () => undefined,
     });
-    const outbox = createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager });
+    const outbox = readBack
+      ? createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager })
+      : new MemoryOutboxStore<PersistedDelivery>();
     const notifier = createNotifier({
       store: outbox,
       clock: systemClock,

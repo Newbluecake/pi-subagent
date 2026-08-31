@@ -41,6 +41,18 @@ export interface MinimalPiHost {
   sessionManager?: { getEntries?: unknown };
 }
 
+/**
+ * Session-time probe (NOT load-time): `sessionManager` only exists on the
+ * ExtensionContext passed to session_start handlers — the module-load-time
+ * ExtensionAPI has no such field (pi-coding-agent extensions/loader.js:
+ * createExtensionAPI never defines it; types.d.ts:219 puts it on the event
+ * ctx). Gating on it at load time would disable the extension on every real
+ * pi. Probe it once per session_start instead.
+ */
+export function probeReadBackEntries(host: { sessionManager?: { getEntries?: unknown } } | undefined): boolean {
+  return typeof host?.sessionManager?.getEntries === "function";
+}
+
 const ASSUMED_EVENTS_PRESENT = {
   tool_execution_start: true,
   tool_execution_end: true,
@@ -73,16 +85,16 @@ export type CompatResult = { ok: true; warning?: string } | { ok: false; reason:
  *  - any critical capability missing -> reject (caller must register a
  *    stub-only tool set instead of the real ones, see index.ts)
  *
- * Critical = required for G5a (read-back verified persistence) and G5b
- * (notification delivery) plus the pi.events lifecycle contract (§6.2).
- * setActiveTools/getActiveTools are not critical here: nothing in M1
- * (no X11 dynamic tool scoping yet) depends on them.
+ * Critical = required for G5b (notification delivery) plus the pi.events
+ * lifecycle contract (§6.2). G5a's read-back (`sessionManager.getEntries`)
+ * is NOT load-time critical: it is only available on the session_start ctx
+ * (see probeReadBackEntries), and its absence degrades G5a to in-memory +
+ * best-effort appendEntry with a WARN instead of disabling the extension.
  */
 export function assertCompatible(caps: PiCapabilities): CompatResult {
   const missing: string[] = [];
   if (!caps.canSendMessage) missing.push("sendMessage");
   if (!caps.canAppendEntry) missing.push("appendEntry");
-  if (!caps.canReadBackEntries) missing.push("sessionManager.getEntries");
   if (!caps.canUseEvents) missing.push("events.on/emit");
   if (missing.length > 0) {
     return {
@@ -90,7 +102,9 @@ export function assertCompatible(caps: PiCapabilities): CompatResult {
       reason: `pi ${caps.version} is missing required capabilities: ${missing.join(", ")}. Upgrade pi (tested range ${TESTED_PI_RANGE}).`,
     };
   }
-  const outsideTestedRange = !isWithinTestedRange(caps.version);
+  // Only warn when we actually know the version; "unknown" means the host
+  // did not expose one, and warning every session_start would be pure noise.
+  const outsideTestedRange = caps.version !== "unknown" && !isWithinTestedRange(caps.version);
   return outsideTestedRange
     ? {
         ok: true,
