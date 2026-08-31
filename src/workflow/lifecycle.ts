@@ -5,6 +5,7 @@ import { withDeadline } from "../core/deadline.js";
 import type { Millis } from "../core/types.js";
 import { buildWorkerSource } from "./worker-source.js";
 import type {
+  HostCallEnvelope,
   SerializedError,
   WorkerBootOutcome,
   WorkerHost,
@@ -99,6 +100,8 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
   const onScriptThrew: Array<(error: SerializedError) => void> = [];
   const onExit: Array<(code: number, expected: boolean) => void> = [];
   const onError: Array<(error: SerializedError) => void> = [];
+  const onHostCall: Array<(envelope: HostCallEnvelope) => void> = [];
+  const onTerminating: Array<(reason: string) => void> = [];
 
   const events: WorkerHostEvents = {
     onMetaError: (cb) => onMetaError.push(cb),
@@ -107,6 +110,8 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
     onScriptThrew: (cb) => onScriptThrew.push(cb),
     onExit: (cb) => onExit.push(cb),
     onError: (cb) => onError.push(cb),
+    onHostCall: (cb) => onHostCall.push(cb),
+    onTerminating: (cb) => onTerminating.push(cb),
   };
 
   function isDetachedOrLater(): boolean {
@@ -148,6 +153,12 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
         for (const cb of onScriptThrew) cb(error);
         return;
       }
+      case "host_call": {
+        const raw = msg as { id?: unknown; op?: unknown; args?: unknown };
+        if (typeof raw.id !== "string" || typeof raw.op !== "string") return; // HR7: malformed envelope, drop silently.
+        for (const cb of onHostCall) cb({ id: raw.id, op: raw.op as HostCallEnvelope["op"], args: raw.args });
+        return;
+      }
       default:
         return; // HR7-equivalent: unrecognized payload shapes are ignored, not thrown on.
     }
@@ -176,6 +187,9 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
       heartbeatMs: init.heartbeatMs,
       scriptSliceMs: init.scriptSliceMs,
       scriptSource: init.scriptSource,
+      hostCallMs: init.hostCallMs ?? 60_000,
+      gateMs: init.gateMs ?? 600_000,
+      maxBatchItems: init.maxBatchItems ?? 1024,
     };
 
     try {
@@ -236,6 +250,14 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
     }
   }
 
+  function send(msg: unknown): void {
+    try {
+      hostPort?.postMessage(msg);
+    } catch {
+      // Same best-effort contract as postCancel: the worker/port may already be gone.
+    }
+  }
+
   function scheduleOrphanProbe(w: WorkerLike, attempt: number): void {
     if (attempt >= orphanProbeMaxAttempts) return;
     deps.clock.setTimer(orphanProbeMs, () => {
@@ -259,13 +281,16 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
       lifecycle = "closing";
       epoch += 1;
 
+      // HR8: give host.ts (the owner of the host-call pending table) a chance
+      // to reject every still-pending ack/settle *before* S5 physically closes
+      // the port — synchronous, so there is no race with S5/S6 below.
+      for (const cb of onTerminating) cb(reason);
+
       // S3: best-effort notice, not awaited.
       postCancel(reason);
 
-      // S4: host-side pending-call rejection is a no-op in M3.1 — there is no
-      // host RPC table yet (that lands with `agent()` in M3.2). This branch is
-      // named explicitly so M3.2 has an obvious place to add it, rather than
-      // silently missing it.
+      // S4 (M3.2): host-side pending-call rejection now happens above, via
+      // `onTerminating` — host.ts is the actual owner of that table (HR8).
 
       // S5: physically cut off further inbound messages, independent of S7.
       try {
@@ -324,6 +349,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
     },
     readHeartbeat,
     postCancel,
+    send,
     terminate,
     events,
     stats,

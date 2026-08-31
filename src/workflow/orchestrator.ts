@@ -1,9 +1,11 @@
 import type { Clock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
+import { attachHostCallHandler, type ChildSpawner, type GateRunner } from "./host.js";
 import { assertHeartbeatBudgetInvariant, startRunawayWatchdog } from "./runaway.js";
 import type {
   SerializedError,
   WorkerHost,
+  WorkflowChildSummary,
   WorkflowDiagnostics,
   WorkflowHeartbeatDiag,
   WorkflowId,
@@ -15,19 +17,23 @@ import type {
 } from "./types.js";
 
 /**
- * M3.1 (workflow design §3.8, §11 M3.1 row): the orchestrator *skeleton*.
+ * M3.1/M3.2 (workflow design §3.8, §11 M3.1/M3.2 rows): the orchestrator.
  * This is deliberately not yet the reduce-based effect-interpreter state
- * machine from §3.4/§3.8 — that lands with abort propagation in M3.3. What
- * M3.1 delivers is exactly the linear slice the milestone scopes: boot the
- * worker, parse the script's meta, run it to completion/failure, settle to a
- * bounded `WorkflowOutcome`. No host call surface exists yet (`agent()` is
- * M3.2), so a script can only `log()` and `return` a value.
+ * machine from §3.4/§3.8 — that lands with abort propagation in M3.3. M3.1
+ * delivered the linear slice: boot the worker, parse the script's meta, run
+ * it to completion/failure, settle to a bounded `WorkflowOutcome`. M3.2
+ * (this milestone) adds the host-call surface (§3.3/§3.5, `host.ts`):
+ * `agent()`/`gate()`/`log()`/`parallel()`/`pipeline()` now actually run when
+ * a `ChildSpawner` is supplied.
  *
- * Even without the full state machine, the M3.1 exit criteria (§11) already
- * require the real isolation/termination guarantees to hold end-to-end:
- * `GW1a`/`GW1b`'s upper bounds (deadlineAt + terminateConfirmMs, no host RPC
- * to reconcile yet so `pendingReconcile` is always `false`) are enforced
- * here, not deferred to a later milestone.
+ * Even without the full state machine, the exit criteria already require
+ * the real isolation/termination guarantees to hold end-to-end: `GW1a`/
+ * `GW1b`'s upper bounds (deadlineAt + terminateConfirmMs, §4.3.2) are
+ * enforced here. `pendingReconcile` stays permanently `false` (M3.2 slice,
+ * see `WorkflowOutcome`'s doc comment) — `attachHostCallHandler`'s HR8
+ * termination hook (`onTerminating`) already resolves every still-pending
+ * child summary before `terminate()`'s promise settles, so by the time this
+ * function's `settle()` runs there is nothing left needing reconciliation.
  */
 
 const MAX_SCRIPT_BYTES = 512 * 1024;
@@ -52,6 +58,18 @@ export interface OrchestratorDeps {
   readonly clock: Clock;
   createWorkerHost(): WorkerHost;
   emit?(channel: string, payload: unknown): void;
+  /**
+   * M3.2: structurally compatible with `SpawnService` (src/service/) without
+   * importing it (WI2 — see host.ts's doc comment). Optional: scripts that
+   * never call `agent()` keep working with no spawner configured (M3.1
+   * behavior, unchanged); calling `agent()` without one rejects with a clear
+   * configuration error instead of hanging.
+   */
+  spawner?: ChildSpawner;
+  /** M3.2: required only if the script calls `gate()`; same "clear error, not a hang" default as `spawner`. */
+  gateRunner?: GateRunner;
+  /** M3.2 §3.7: threaded into every spawned child's `SpawnRequest.parentRunId` (CC1 `stopChildrenOf` anchor for a future M3.3). */
+  parentRunId?: string;
 }
 
 export interface Orchestrator {
@@ -98,6 +116,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     let heartbeat: WorkflowHeartbeatDiag = { seq: 0, observedAt: createdAt, stalledMs: 0 };
     let logLines = 0;
     let orphanWorker: WorkflowDiagnostics["orphanWorker"];
+    let children: readonly WorkflowChildSummary[] = [];
 
     const settle = (
       status: WorkflowTerminalStatus,
@@ -121,9 +140,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const outcome: WorkflowOutcome = {
         workflowId: req.workflowId,
         status,
-        pendingReconcile: false, // M3.1: no children exist yet, nothing to reconcile.
+        // M3.2 slice: see WorkflowOutcome's doc comment — HR8's onTerminating
+        // hook already resolves every pending child before terminate()
+        // settles, so there is never anything left to reconcile by here.
+        pendingReconcile: false,
         durationMs: settledAt - createdAt,
         diag,
+        children: children ?? [],
         ...(extra.result !== undefined ? { result: extra.result } : {}),
         ...(extra.error ? { error: extra.error } : {}),
         ...(extra.timeoutReason ? { timeoutReason: extra.timeoutReason } : {}),
@@ -168,6 +191,40 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       logLines += 1;
     });
 
+    // M3.2 §3.3/§3.5: wired *before* `boot()` — the worker can start sending
+    // `host_call` envelopes as soon as its script begins executing, which can
+    // race `boot()`'s own resolution (it resolves on the native 'online'
+    // event, not on "script finished its first turn"). `onHostCall` is a
+    // plain listener registration (no dependency on boot), so attaching it
+    // here means no `agent()`/`gate()` call can ever arrive before a listener
+    // exists to answer it.
+    const spawner: ChildSpawner = deps.spawner ?? {
+      spawn: async () => ({
+        error: {
+          message: "workflow: agent() requires the orchestrator to be configured with a ChildSpawner (SpawnService)",
+        },
+      }),
+      abort: async () => false,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const gateRunner: GateRunner =
+      deps.gateRunner ??
+      (async () => {
+        throw new Error("workflow: gate() requires the orchestrator to be configured with a gateRunner");
+      });
+    const hostHandler = attachHostCallHandler({
+      clock: deps.clock,
+      workerHost,
+      spawner,
+      gateRunner,
+      budget: req.budget,
+      ...(deadlineAt !== undefined ? { workflowDeadlineAt: deadlineAt } : {}),
+      ...(deps.parentRunId !== undefined ? { parentRunId: deps.parentRunId } : {}),
+      onChildSettled: () => {
+        children = hostHandler.children;
+      },
+    });
+
     const bootOutcome = await workerHost.boot({
       scriptSource: req.script,
       scriptSliceMs: req.budget.scriptSliceMs,
@@ -180,6 +237,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       ...(req.budget.maxYoungGenerationSizeMb !== undefined
         ? { maxYoungGenerationSizeMb: req.budget.maxYoungGenerationSizeMb }
         : {}),
+      ...(req.budget.hostCallMs !== undefined ? { hostCallMs: req.budget.hostCallMs } : {}),
+      ...(req.budget.gateMs !== undefined ? { gateMs: req.budget.gateMs } : {}),
+      ...(req.budget.maxBatchItems !== undefined ? { maxBatchItems: req.budget.maxBatchItems } : {}),
     });
 
     if (!bootOutcome.ok) {

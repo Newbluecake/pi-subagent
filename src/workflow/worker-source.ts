@@ -18,10 +18,13 @@
  * private `MessageChannel` is used instead of the Worker's implicit default
  * channel — §2.3.1 S5 / WC09):
  *   host -> worker : { kind: "cancel", reason: string }
+ *                  | { kind: "host_ack", id, ok, value } | { ..., ok:false, error } | { ..., ok:false, cancelled:true, cause } (§3.3/§3.5, M3.2)
+ *                  | { kind: "host_settle", callId, ok, value } | { ..., ok:false, error } (HR3, M3.2)
  *   worker -> host : { kind: "meta_error", message: string }
  *                  | { kind: "log", line: string }
  *                  | { kind: "script_returned", result: unknown }
  *                  | { kind: "script_threw", message: string, stack?: string }
+ *                  | { kind: "host_call", id, op: "agent"|"gate", args } (§3.3/§3.5, M3.2)
  * Everything the scaffold needs to start (script source, slice timeout,
  * heartbeat period, the heartbeat `SharedArrayBuffer`, the port itself) is
  * passed once via `workerData` at construction — there is no separate "boot"
@@ -47,6 +50,121 @@ const heartbeatSab = workerData.heartbeatSab || null;
 const heartbeatMs = workerData.heartbeatMs || 0;
 const scriptSliceMs = workerData.scriptSliceMs;
 const scriptSource = workerData.scriptSource;
+const hostCallMs = workerData.hostCallMs || 60000;
+const gateMs = workerData.gateMs || 600000;
+const maxBatchItems = workerData.maxBatchItems || 1024;
+
+// M3.2 (§3.3/§3.5): the worker-side half of the call/ack/settle protocol.
+// This lives in the *trusted scaffold* scope (outside vm), same as \`send\`
+// and the heartbeat timer above — the functions built from these tables are
+// what gets installed onto the sandbox (buildSandbox below), but their
+// closures execute with the scaffold's real \`setTimeout\`/\`Map\`/\`Promise\`,
+// never inside vm.
+let hostCallSeq = 0;
+const pendingCalls = new Map(); // id -> { resolve, reject, timer }
+const pendingSettles = new Map(); // callId -> { resolve, reject, timer }
+
+/** HR1: every \`callHost()\` races its own client-side deadline; a host that never acks still lets the script's \`await\` resolve (by rejecting). */
+function callHost(op, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const id = String(++hostCallSeq);
+    const timer = setTimeout(() => {
+      pendingCalls.delete(id);
+      reject(new Error("host call '" + op + "' timed out after " + timeoutMs + "ms (HR1)"));
+    }, timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    pendingCalls.set(id, { resolve, reject, timer });
+    send({ kind: "host_call", id: id, op: op, args: args });
+  });
+}
+
+const SETTLE_GRACE_MS = 5000;
+
+/** HR3: \`agent()\`'s ack only confirms admission (\`{ callId, deadlineAt }\`); the actual child result arrives later via a \`host_settle\` push, awaited here as a second, independently-bounded stage. */
+function waitForSettle(callId, deadlineAt) {
+  return new Promise((resolve, reject) => {
+    const boundMs = Math.max(0, (typeof deadlineAt === "number" ? deadlineAt - Date.now() : hostCallMs)) + SETTLE_GRACE_MS;
+    const timer = setTimeout(() => {
+      pendingSettles.delete(callId);
+      reject(new Error("agent() child did not settle before its deadline (HR1)"));
+    }, boundMs);
+    if (typeof timer.unref === "function") timer.unref();
+    pendingSettles.set(callId, { resolve, reject, timer });
+  });
+}
+
+function agent(prompt, opts) {
+  if (typeof prompt !== "string") return Promise.reject(new TypeError("agent(prompt, opts?): prompt must be a string"));
+  return callHost("agent", { prompt: prompt, opts: opts || null }, hostCallMs).then(function (ack) {
+    return waitForSettle(ack.callId, ack.deadlineAt);
+  }).then(function (outcome) {
+    // §5.2/§5.3: a terminal *failure* of the child (or being withheld/aborted
+    // by the host) resolves to 'null' — same, deliberately-unresolvable-from-
+    // "skipped", semantics as the upstream plugin. Admission-time failures
+    // (unknown type, budget exhausted, HR1/HR2 timeout) reject instead — see
+    // the rejection path above and §5.3's "narrowed" agentType row.
+    if (!outcome.ok) return null;
+    return outcome.value;
+  });
+}
+
+function gate(cmd, opts) {
+  if (typeof cmd !== "string") return Promise.reject(new TypeError("gate(cmd, opts?): cmd must be a string"));
+  return callHost("gate", { cmd: cmd, cwd: opts && opts.cwd }, gateMs).then(function (ack) {
+    if (!ack.ok) {
+      var e = new Error((ack.error && ack.error.message) || "gate() failed");
+      throw e;
+    }
+    return ack.value;
+  });
+}
+
+/** §5.2: parallel(thunks) — barrier over a thunk array; a thunk that throws (sync or async) resolves that slot to null without failing its siblings. */
+function parallel(thunks) {
+  if (!Array.isArray(thunks)) throw new TypeError("parallel(thunks) expects an array of zero-arg functions");
+  if (thunks.length > maxBatchItems) throw new Error("parallel(): " + thunks.length + " items exceeds maxBatchItems (" + maxBatchItems + ")");
+  return Promise.all(
+    thunks.map(function (thunk) {
+      return Promise.resolve()
+        .then(function () {
+          return thunk();
+        })
+        .catch(function () {
+          return null;
+        });
+    }),
+  );
+}
+
+/** §5.2: pipeline(items, ...stages) — no barrier between stages; a stage throwing skips the remaining stages for that item only, settling it to null. */
+function pipeline(items) {
+  if (!Array.isArray(items)) throw new TypeError("pipeline(items, ...stages) expects items to be an array");
+  if (items.length > maxBatchItems) throw new Error("pipeline(): " + items.length + " items exceeds maxBatchItems (" + maxBatchItems + ")");
+  var stages = Array.prototype.slice.call(arguments, 1);
+  return Promise.all(
+    items.map(function (item, index) {
+      return stages
+        .reduce(function (chain, stage) {
+          return chain.then(function (state) {
+            if (state.skipped) return state;
+            return Promise.resolve()
+              .then(function () {
+                return stage(state.value, item, index);
+              })
+              .then(function (v) {
+                return { skipped: false, value: v };
+              })
+              .catch(function () {
+                return { skipped: true, value: null };
+              });
+          });
+        }, Promise.resolve({ skipped: false, value: undefined }))
+        .then(function (s) {
+          return s.value;
+        });
+    }),
+  );
+}
 
 let heartbeatTimer = null;
 
@@ -146,6 +264,15 @@ function buildSandbox(meta) {
   sandbox.log = function log(message) {
     send({ kind: "log", line: typeof message === "string" ? message : JSON.stringify(message) });
   };
+  // M3.2 (§5.2): agent()/gate()/parallel()/pipeline() are installed as plain
+  // scaffold-scope functions (defined above, outside vm) — calling them from
+  // sandboxed script code runs their *body* in the scaffold's trusted realm
+  // (closures keep the realm they were defined in), the same trust boundary
+  // \`log\` above already relies on.
+  sandbox.agent = agent;
+  sandbox.gate = gate;
+  sandbox.parallel = parallel;
+  sandbox.pipeline = pipeline;
   function DisabledDate() {
     throw new Error("Date is disabled inside workflow scripts (non-deterministic; would break replay). See DET2.");
   }
@@ -234,10 +361,40 @@ function run() {
 }
 
 commPort.on("message", (msg) => {
-  if (msg && msg.kind === "cancel") {
-    // M3.1: no host RPC exists yet (that's M3.2), so there is nothing
-    // in-flight to reject here. Kept as a real message handler (not a no-op
-    // stub silently absent) so M3.2 has a concrete seam to extend.
+  if (!msg || typeof msg !== "object") return;
+  if (msg.kind === "cancel") {
+    // HR6: reject every worker-side pending call/settle wait immediately —
+    // the workflow is stopping, so nothing still "in flight" from this
+    // worker's perspective can ever be honored.
+    for (const [id, p] of pendingCalls) {
+      clearTimeout(p.timer);
+      p.reject(new Error("host call cancelled: " + (msg.reason || "workflow stopping")));
+    }
+    pendingCalls.clear();
+    for (const [callId, p] of pendingSettles) {
+      clearTimeout(p.timer);
+      p.reject(new Error("agent() cancelled: " + (msg.reason || "workflow stopping")));
+    }
+    pendingSettles.clear();
+    return;
+  }
+  if (msg.kind === "host_ack") {
+    const pending = pendingCalls.get(msg.id);
+    if (!pending) return; // HR1: already timed out and rejected client-side — a late ack is dropped, not an error.
+    pendingCalls.delete(msg.id);
+    clearTimeout(pending.timer);
+    if (msg.ok) pending.resolve(msg.value);
+    else if (msg.cancelled) pending.reject(Object.assign(new Error("WorkflowCancelled: " + msg.cause), { cancelled: true }));
+    else pending.reject(new Error((msg.error && msg.error.message) || ("host call '" + msg.id + "' failed")));
+    return;
+  }
+  if (msg.kind === "host_settle") {
+    const pending = pendingSettles.get(msg.callId);
+    if (!pending) return; // HR1: settle wait already timed out (or was never awaited) — dropped, not an error.
+    pendingSettles.delete(msg.callId);
+    clearTimeout(pending.timer);
+    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error });
+    return;
   }
 });
 

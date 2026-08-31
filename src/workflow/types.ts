@@ -1,4 +1,4 @@
-import type { Millis } from "../core/types.js";
+import type { Millis, RunId } from "../core/types.js";
 import type { RunawayPolicy } from "../config/settings.js";
 
 /**
@@ -15,6 +15,57 @@ import type { RunawayPolicy } from "../config/settings.js";
  */
 
 export type WorkflowId = string;
+
+/**
+ * M3.2 (workflow design §3.6): one `agent()`/`gate()` host call. In M3.2
+ * there is no journal/replay (M3.5) and no reduce-based `CallPhase` state
+ * machine wired to `QueryService` (M3.3), so `CallId` is just the RPC
+ * envelope id the worker minted for the call — reusing it (instead of a
+ * second identifier scheme) keeps `CallRegistry` trivially correlatable
+ * with the wire protocol in worker-source.ts/host.ts.
+ */
+export type CallId = string;
+
+/**
+ * §3.6 `CallPhase`, M3.2 slice: `runner_startup`/`running` are collapsed
+ * into a single observable `"running"` phase (CR8 in the full design wants
+ * phase transitions driven only by `QueryService`/H1 lifecycle events; that
+ * plumbing is M3.3). The A2 bounded-retry cancel loop (§3.6 "A2 窗口的处置")
+ * does not actually need to distinguish `runner_startup` from `running` —
+ * both retry `SpawnService.abort(runId)` identically — so this is a
+ * documented simplification, not a silent one.
+ */
+export type CallPhase = "admission" | "pre_runner" | "running" | "settled";
+
+export interface CallCancelIntent {
+  readonly cause: string;
+  readonly at: Millis;
+  attempts: number;
+  lastAttemptAt: Millis;
+}
+
+export interface CallState {
+  readonly callId: CallId;
+  readonly submittedAt: Millis;
+  phase: CallPhase;
+  runId?: RunId;
+  settledAt?: Millis;
+  cancelIntent?: CallCancelIntent;
+}
+
+/** §3.6: `cancel()`'s honest, non-lying report of what actually happened (CR6). */
+export type CallCancelEffect = "withheld" | "retrying" | "stopped" | "already_settled" | "unknown";
+
+/** §3.3 `WorkflowChildSummary`, M3.2 slice: no `taskKey`/`occurrence`/`phaseId`/`source` yet (those need journal/phase tracking, M3.4/M3.5) beyond a fixed `"live"` (no replay exists in M3.2). */
+export interface WorkflowChildSummary {
+  readonly callId: CallId;
+  readonly runId?: RunId;
+  readonly label?: string;
+  readonly source: "live";
+  readonly status: "completed" | "failed" | "timed_out" | "aborted" | "withheld" | "running" | "stopping";
+  readonly durationMs: Millis;
+  readonly textPreview?: string;
+}
 
 /** §2.3.1: the worker's terminated-after state machine, S1 (spawning/ready) through S8 (orphan probe). */
 export type WorkerLifecycle = "spawning" | "ready" | "closing" | "detached" | "terminated" | "orphaned";
@@ -66,6 +117,17 @@ export interface WorkflowOutcome {
   readonly stopCause?: WorkflowStopCause;
   readonly durationMs: Millis;
   readonly diag: WorkflowDiagnostics;
+  /**
+   * M3.2 (§3.3, slice): every `agent()` call submitted during this run, in
+   * submission order (stable, assertable — mirrors the full design's
+   * `WorkflowChildSummary[]`). Always `[]` for scripts that never call
+   * `agent()`. `pendingReconcile` stays permanently `false` in M3.2 (no
+   * abort/reconcile pipeline yet, M3.3) — by the time `run()` resolves, the
+   * host's own accounting has every submitted call in a terminal phase
+   * (settled or withheld), because `terminate()`'s S4 (host.ts) rejects
+   * whatever is still pending before the orchestrator ever calls `settle()`.
+   */
+  readonly children: readonly WorkflowChildSummary[];
 }
 
 /** §2.3/§4.1 WT2/WT3/WT9/WT11: the M3.1 slice of `WorkflowBudget` actually consumed by the isolation shell. */
@@ -80,6 +142,20 @@ export interface WorkflowRunBudget {
   readonly runawayPolicy: RunawayPolicy;
   readonly maxOldGenerationSizeMb?: number;
   readonly maxYoungGenerationSizeMb?: number;
+  /** M3.2 WT4: per-host-call (non-`agent`-settle, non-`gate`) double-sided timeout (HR1+HR2). Optional — defaults applied by orchestrator.ts/host.ts so M3.1-era budgets (scripts that never call `agent()`/`gate()`) keep compiling and behaving unchanged. */
+  readonly hostCallMs?: Millis;
+  /** M3.2 WT6: `gate()` shell command upper bound (`pi.exec`-equivalent timeout + host-side `withDeadline`). Optional, see `hostCallMs`. */
+  readonly gateMs?: Millis;
+  /** M3.2 §5.3: local concurrency gate on top of the core `SlotPool` (D-W3) — a workflow-scoped, not global, cap. Optional, see `hostCallMs`. */
+  readonly maxParallel?: number;
+  /** M3.2: hard cap on `agent()` calls per workflow run (anti spawn-bomb). Optional, see `hostCallMs`. */
+  readonly maxChildren?: number;
+  /** M3.2: `parallel()`/`pipeline()` item cap. Optional, see `hostCallMs`. */
+  readonly maxBatchItems?: number;
+  /** §4.4.3 BW4–BW6: how a child's absolute deadline is derived from the workflow's remaining budget. Optional, see `hostCallMs`. */
+  readonly childBudgetPolicy?: "inherit_remaining" | "fixed" | "fraction";
+  readonly childBudgetFraction?: number;
+  readonly childTotalMs?: Millis;
 }
 
 /** §3.5: what `WorkerHost.boot()` needs to start the worker thread and its sandboxed script. */
@@ -93,6 +169,12 @@ export interface WorkerHostInit {
   readonly terminateConfirmMs: Millis;
   readonly maxOldGenerationSizeMb?: number;
   readonly maxYoungGenerationSizeMb?: number;
+  /** M3.2 HR1: worker-side client timeout for the `agent()`/`gate()` ack round trip. */
+  readonly hostCallMs?: Millis;
+  /** M3.2 HR1: worker-side client timeout for `gate()`'s single-segment RPC (its ack IS its result). */
+  readonly gateMs?: Millis;
+  /** M3.2 §5.3: `parallel()`/`pipeline()` item cap, enforced sandbox-side so an oversize batch fails fast without a host round trip. */
+  readonly maxBatchItems?: number;
 }
 
 export type WorkerBootOutcome =
@@ -125,6 +207,15 @@ export interface WorkerHostEvents {
   onExit(cb: (code: number, expected: boolean) => void): void;
   /** Native `Worker` 'error' (e.g. `ERR_WORKER_OUT_OF_MEMORY`). */
   onError(cb: (error: SerializedError) => void): void;
+  /** M3.2 §3.5: a `HostCallEnvelope` arrived from the worker (`agent`/`gate`/`log`). */
+  onHostCall(cb: (envelope: HostCallEnvelope) => void): void;
+  /**
+   * M3.2 HR8: fired synchronously at the start of `terminate()` (S2), before
+   * any I/O — the one hook host.ts needs to flush its own host-side pending
+   * call table (ack-not-yet-sent, settle-not-yet-pushed) in the same breath
+   * lifecycle.ts flushes its own worker-facing state, rather than racing it.
+   */
+  onTerminating(cb: (reason: string) => void): void;
 }
 
 export interface WorkerHostStats {
@@ -133,6 +224,24 @@ export interface WorkerHostStats {
   /** WT11/S7: `terminate()` calls whose native `worker.terminate()` did not confirm within `terminateConfirmMs`. */
   terminateForced: number;
 }
+
+/** M3.2 §3.5: the worker->host half of the call/ack two-segment protocol (§3.3). `log` stays a fire-and-forget one-way message (unchanged from M3.1) — it never needs an ack/settle round trip, so it is deliberately not part of this envelope. */
+export interface HostCallEnvelope {
+  readonly id: string;
+  readonly op: "agent" | "gate";
+  readonly args: unknown;
+}
+
+/** M3.2 §3.5: the host->worker ack segment. `agent` acks carry `{ callId, deadlineAt }` (HR3); `gate` acks carry the finished exec result (single-segment RPC, §4.1 WT6). */
+export type HostAckEnvelope =
+  | { readonly id: string; readonly ok: true; readonly value: unknown }
+  | { readonly id: string; readonly ok: false; readonly error: { readonly message: string } }
+  | { readonly id: string; readonly ok: false; readonly cancelled: true; readonly cause: string };
+
+/** M3.2 §3.3 HR3: the host->worker settle segment, pushed asynchronously once an `agent()` child reaches a terminal state. */
+export type HostSettleEnvelope =
+  | { readonly callId: string; readonly ok: true; readonly value: unknown }
+  | { readonly callId: string; readonly ok: false; readonly error: { readonly message: string } };
 
 /**
  * §3.5: the host-side handle for one worker thread running one workflow's
@@ -147,6 +256,8 @@ export interface WorkerHost {
   readHeartbeat(): WorkflowHeartbeatDiag;
   /** S3: best-effort, non-blocking notification to the worker. Never throws. */
   postCancel(reason: string): void;
+  /** M3.2 §3.5: generic best-effort send to the worker (host_ack/host_settle envelopes). Never throws — same S3/S5 best-effort contract as `postCancel`. */
+  send(msg: unknown): void;
   /** §2.3.1 S1–S8, idempotent (WK: repeat calls return the cached first result). */
   terminate(reason: string): Promise<WorkerTerminateOutcome>;
   readonly events: WorkerHostEvents;
