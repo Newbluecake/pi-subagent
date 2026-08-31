@@ -91,6 +91,9 @@ export function createRPCServer(deps: RPCServerDeps): RPCServer {
     }
     if (inFlight.has(raw.requestId)) {
       warn(`RPC request rejected: duplicate requestId ${raw.requestId}`);
+      // Reply instead of dropping silently — a silent reject forces the
+      // caller to wait out its full timeout for no reason.
+      send(raw.requestId, { ok: false, error: { ...error(`duplicate requestId: ${raw.requestId}`), retryable: true } });
       return;
     }
     inFlight.add(raw.requestId);

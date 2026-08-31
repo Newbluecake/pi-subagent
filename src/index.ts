@@ -95,6 +95,12 @@ export default function activate(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
+    // Defensive: if pi ever fires session_start without a paired shutdown,
+    // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
+    if (holder.current) {
+      holder.current.scheduler.stop();
+      holder.current.rpc.close();
+    }
     await types.reload();
     const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)]);
     holder.current = stack;

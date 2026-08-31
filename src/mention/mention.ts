@@ -61,7 +61,7 @@ export async function routeMention(
     deps.reportError?.(error);
     return { handled: true, action: "error", error };
   }
-  const error = `cannot route @${parsed.label}: target is unavailable`;
+  const error = `cannot route @${parsed.label}: run is ${snapshot?.status ?? "unknown"} (not ready yet — retry once it is running, or after it settles)`;
   deps.reportError?.(error);
   return { handled: true, action: "error", error };
 }
