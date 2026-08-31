@@ -54,6 +54,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
           content: [{ type: "text" as const, text }],
           ...(snapshot.outcome ? usageOnce(params.run_id, snapshot.outcome.usage) : {}),
           details: {
+            runId: params.run_id,
             status: snapshot.status,
             usage: snapshot.diag.usage,
             ...(snapshot.outcome?.structuredResult !== undefined
@@ -79,6 +80,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
         ...usageOnce(params.run_id, waited.outcome.usage),
         details: {
+          runId: params.run_id,
           status: waited.outcome.status,
           usage: waited.outcome.usage,
           ...(waited.outcome.structuredResult !== undefined

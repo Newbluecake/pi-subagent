@@ -11,6 +11,7 @@ import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import type { AgentSettings } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
@@ -33,6 +34,8 @@ import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
 /** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack (index.ts rebuilds the stack on every session_start and never calls a stack dispose hook). */
 let previousFleetWidget: FleetWidgetController | undefined;
+/** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
+let previousUsageBroadcaster: UsageBroadcaster | undefined;
 
 export interface WorkflowSupport {
   readonly enabled: boolean;
@@ -79,13 +82,19 @@ export function buildSessionStack(
   // (stop its tick + setWidget(key, undefined)) before the new one mounts.
   previousFleetWidget?.dispose();
   previousFleetWidget = undefined;
+  previousUsageBroadcaster?.dispose();
+  previousUsageBroadcaster = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
   // the runner is built — hence a late-bound ref (same pattern as spawnRef).
   const widgetRef: { current?: FleetWidgetController } = {};
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
-  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints]);
+  // M-E: real-time cost broadcast — poked on run start (onSnapshot below) and
+  // every lifecycle event so the final terminal frame is always emitted.
+  const usageRef: { current?: UsageBroadcaster } = {};
+  const usagePoints: SubagentExtensionPoints = { onLifecycle: () => usageRef.current?.poke() };
+  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints, usagePoints]);
 
   // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
   // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
@@ -178,10 +187,19 @@ export function buildSessionStack(
         announcedStarts.add(snapshot.runId);
         pi.events.emit("subagent:started", { runId: snapshot.runId, at: snapshot.updatedAt });
       }
+      usageRef.current?.poke(); // M-E: start/refresh the 1Hz cost broadcast
     },
   });
   spawnRef.current = spawn;
   const query = createQueryService({ registry: createLiveRunRegistry(spawn, store), runner, clock: systemClock });
+  // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).
+  const usageBroadcaster = new UsageBroadcaster({
+    list: () => query.list(),
+    emit: (event) => pi.events.emit("subagent:usage", event),
+    clock: systemClock,
+  });
+  usageRef.current = usageBroadcaster;
+  previousUsageBroadcaster = usageBroadcaster;
   // X7b: always-on fleet widget above the editor. The controller self-probes
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
   // modes; settings.fleetWidget=false skips it entirely.
