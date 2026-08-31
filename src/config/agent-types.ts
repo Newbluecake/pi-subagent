@@ -74,6 +74,31 @@ function parseFile(text: string, path: string): AgentTypeConfig {
   if (typeof fields.color === "string") config.color = fields.color;
   return config;
 }
+/**
+ * Built-in fallbacks so a fresh install has usable types even with no agent
+ * files on disk (the old @tintinweb/pi-subagents shipped equivalents —
+ * dev-flow style workflows assume `general-purpose` and `Plan` exist).
+ * Agent files always win: a file type with the same name shadows the
+ * built-in, because built-ins are appended last and first-registered wins.
+ */
+const BUILTIN_AGENT_TYPES: AgentTypeConfig[] = [
+  {
+    name: "general-purpose",
+    description: "Autonomous general-purpose agent for multi-step coding and research tasks.",
+    systemPrompt:
+      "You are an autonomous general-purpose subagent. Work the task end-to-end: gather what you need, make the change, verify it, and report concrete results (files, commands, outcomes). Do not claim completion without evidence.",
+    promptMode: "append",
+  },
+  {
+    name: "Plan",
+    description: "Read-only planning agent: explores the codebase and produces an implementation plan.",
+    systemPrompt:
+      "You are a planning subagent. Investigate the codebase read-only and produce a concrete, step-by-step implementation plan with file-level precision. Do not modify files.",
+    promptMode: "append",
+    tools: ["read", "bash", "web_search", "memory"],
+  },
+];
+
 export function createAgentTypeRegistry(cwd = process.cwd(), home = homedir()): AgentTypeRegistry {
   let types: AgentTypeConfig[] = [];
   return {
@@ -97,6 +122,7 @@ export function createAgentTypeRegistry(cwd = process.cwd(), home = homedir()): 
           }
         }
       }
+      for (const builtin of BUILTIN_AGENT_TYPES) if (!loaded.some((x) => x.name === builtin.name)) loaded.push(builtin);
       types = loaded;
       return { types: [...types], errors };
     },

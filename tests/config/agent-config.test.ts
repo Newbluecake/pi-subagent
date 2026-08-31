@@ -16,7 +16,7 @@ describe("agent config", () => {
     await writeFile(join(root, ".pi/agents/bad.md"), "---\nname: bad\n---\n");
     const registry = createAgentTypeRegistry(root, join(root, "home"));
     const result = await registry.reload();
-    expect(result.types.map((x) => x.name)).toEqual(["good"]);
+    expect(result.types.map((x) => x.name)).toEqual(["good", "general-purpose", "Plan"]); // built-ins appended after file types
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]?.path).toContain("bad.md");
     expect(registry.get("good")?.tools).toEqual(["one", "two"]);
@@ -24,5 +24,22 @@ describe("agent config", () => {
   it("merges request budget over agent and defaults", () => {
     expect(mergeBudget({ totalMs: 10 }, { idleMs: 20 })).toMatchObject({ totalMs: 10, idleMs: 20, startupMs: 30_000 });
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);
+  });
+});
+
+describe("built-in agent types", () => {
+  it("provides general-purpose and Plan when no agent files define them", async () => {
+    const registry = createAgentTypeRegistry("/nonexistent-cwd", "/nonexistent-home");
+    await registry.reload();
+    expect(registry.get("general-purpose")).toBeDefined();
+    expect(registry.get("Plan")).toBeDefined();
+  });
+  it("file-defined types shadow built-ins", async () => {
+    // The real home dir has agent files (Explore.md etc.) but no
+    // general-purpose.md; built-ins must still fill the gap.
+    const registry = createAgentTypeRegistry("/nonexistent-cwd");
+    await registry.reload();
+    const gp = registry.get("general-purpose");
+    expect(gp?.sourcePath).toBeUndefined(); // built-in, not file-backed
   });
 });
