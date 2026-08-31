@@ -50,6 +50,17 @@ function wireWorktree(pi: ExtensionAPI, settings: AgentSettings): SubagentExtens
  * through to the current session's stack. session_shutdown drains bounded.
  */
 export default function activate(pi: ExtensionAPI): void {
+  // Child subagent sessions bind extensions too (pi's bindExtensions), which
+  // re-activates this extension inside every child. Without a guard, the
+  // child instance registers its own Agent/SubagentWorkflow tools backed by
+  // an empty stack — observed in the wild as "no active session yet" when a
+  // subagent called SubagentWorkflow. The main-process instance is the host;
+  // child instances stay inert (nested delegation uses X3's injected tool).
+  const HOST_KEY = Symbol.for("pi-subagent:host");
+  const g = globalThis as Record<symbol, unknown>;
+  if (g[HOST_KEY]) return;
+  g[HOST_KEY] = { activatedAt: Date.now() };
+
   const settings = loadSettingsFromFile();
   // Built FRESH per activate(): pi may re-run activate on the same cached
   // module (its /reload does not bust Node's module cache). A module-level
