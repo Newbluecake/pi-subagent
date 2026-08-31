@@ -125,8 +125,14 @@ export function createNotifier(options: NotifierOptions): Notifier {
     },
     reconcile(persisted = options.store.list()) {
       const report: ReconcileReport = { redelivered: [], suppressed: [], abandoned: [] };
+      // Only genuinely-undelivered records are redelivered: "delivered" means
+      // sendMessage already handed the notification to pi with display:true —
+      // redelivering those on every restart duplicates notifications (seen in
+      // the wild: stale completions re-notified after each relaunch). G5b's
+      // at-least-once covers pending/dropped (never handed over); consumed and
+      // abandoned are terminal for delivery.
       const candidates = persisted
-        .filter((p) => p.state !== "consumed" && p.state !== "abandoned")
+        .filter((p) => p.state !== "consumed" && p.state !== "abandoned" && p.state !== "delivered")
         .filter((p) => !state.has(p.key) || state.get(p.key)?.state !== "consumed");
       const now = clock.now();
       const eligible = candidates.filter((p) => {

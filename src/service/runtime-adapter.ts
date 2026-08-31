@@ -184,6 +184,19 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     emit: () => undefined,
     deliver: () => undefined,
     ...(merged.beforeReap ? { beforeReap: merged.beforeReap } : {}), // H3
+    onStateChange: (runId, state) => {
+      const cb = perRun.get(runId)?.onSnapshot;
+      if (!cb) return;
+      cb({
+        runId,
+        generation: state.generation,
+        status: state.status,
+        phase: state.phase,
+        deadlines: state.deadlines,
+        diag: state.diag,
+        updatedAt: deps.clock.now(),
+      });
+    },
     onExtensionError: (hook, runId, error) =>
       console.warn(`[pi-subagent] extension hook ${hook} failed for run ${runId} (ignored): ${error}`),
     ...(deps.onChildAbort ? { onChildAbort: deps.onChildAbort } : {}), // X3 cascade

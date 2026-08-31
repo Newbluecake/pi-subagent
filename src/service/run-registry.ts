@@ -22,3 +22,29 @@ export function createRunRegistry(store: SnapshotStore): RunRegistry {
     },
   };
 }
+
+/**
+ * Registry backed by SpawnService's live records (every snapshot, including
+ * in-flight runs) with the durable store as fallback for terminal runs.
+ *
+ * Backing the registry ONLY with the store made running runs invisible to
+ * get_subagent_result / fleet / status — persist_snapshot is a terminal-only
+ * effect by design (I4), so a store-only registry never sees a live run.
+ */
+export function createLiveRunRegistry(
+  live: { snapshots(): readonly import("../core/types.js").RunSnapshot[] },
+  store: SnapshotStore,
+): RunRegistry {
+  const view: SnapshotStore = {
+    put: () => {}, // writes flow through the effect interpreter / settle path
+    get: (runId) => live.snapshots().find((s) => s.runId === runId) ?? store.get(runId),
+    list: (filter) => {
+      const current = live.snapshots();
+      const liveIds = new Set(current.map((s) => s.runId));
+      const merged = [...current, ...store.list().filter((s) => !liveIds.has(s.runId))];
+      return filter?.status ? merged.filter((s) => filter.status!.includes(s.status)) : merged;
+    },
+    appendOutbox: (entry) => store.appendOutbox(entry),
+  };
+  return createRunRegistry(view);
+}

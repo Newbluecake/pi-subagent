@@ -17,7 +17,7 @@ import { EventWatchdog } from "./runtime/watchdog.js";
 import { createRPCServer, type RPCServer } from "./rpc/server.js";
 import { createScheduler, type Scheduler } from "./schedule/scheduler.js";
 import { createQueryService, type QueryService } from "./service/query-service.js";
-import { createRunRegistry } from "./service/run-registry.js";
+import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 
@@ -119,7 +119,7 @@ export function buildSessionStack(
     },
   });
   spawnRef.current = spawn;
-  const query = createQueryService({ registry: createRunRegistry(store), runner, clock: systemClock });
+  const query = createQueryService({ registry: createLiveRunRegistry(spawn, store), runner, clock: systemClock });
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   return { spawn, query, orphans: reaper.registry, notifier, mention, scheduler, rpc };

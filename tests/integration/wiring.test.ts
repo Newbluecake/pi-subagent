@@ -8,7 +8,7 @@ import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
 import { EventWatchdog } from "../../src/runtime/watchdog.js";
-import { createRunRegistry } from "../../src/service/run-registry.js";
+import { createLiveRunRegistry } from "../../src/service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "../../src/service/runtime-adapter.js";
 import { createQueryService } from "../../src/service/query-service.js";
 import { createSpawnService } from "../../src/service/spawn-service.js";
@@ -85,7 +85,7 @@ function buildStack(clock: FakeClock, driver: SessionDriver) {
     reload: async () => ({ types: [type], errors: [] }),
   };
   const spawnService = createSpawnService({ types, pool, runner, now: () => clock.now(), budget: fastBudget() });
-  const registry = createRunRegistry(store);
+  const registry = createLiveRunRegistry(spawnService, store);
   const queryService = createQueryService({ registry, runner, clock });
   return { pool, store, reaper, notifier, runner, spawnService, registry, queryService, sent };
 }
@@ -196,5 +196,29 @@ describe("wiring: cross-layer smoke", () => {
     if ("error" in second) throw new Error(second.error.message);
     await drain(clock, 60);
     expect(stack.registry.get(second.runId)?.status).toBe("completed");
+  });
+
+  it("a still-running run is visible to the registry (in-flight visibility regression)", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const stack = buildStack(clock, driver);
+
+    const spawned = await stack.spawnService.spawn({ type: "worker", prompt: "hang" });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    // Before any deadline fires, the in-flight run MUST be queryable —
+    // a registry backed only by the durable store (terminal-only snapshots)
+    // returns undefined here, which is how "unknown run_id" shipped.
+    await drain(clock, 1);
+    const live = stack.registry.get(spawned.runId);
+    expect(live).toBeDefined();
+    expect(["starting", "running"]).toContain(live!.status);
+
+    await drain(clock, 600); // let the total deadline settle it
+    expect(stack.registry.get(spawned.runId)?.status).toBe("timed_out");
   });
 });

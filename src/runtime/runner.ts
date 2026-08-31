@@ -176,6 +176,9 @@ export interface RunnerDeps {
   beforeReap?: (outcome: RunOutcome, ctx: { cwd: string; deadlineMs: Millis }) => Promise<void> | void;
   /** Diagnostics-only sink for extension hook failures/timeouts (H3); never affects run outcome or settle timing beyond reapMs bound. */
   onExtensionError?: (hook: "beforeReap", runId: string, error: string) => void;
+  /** Fired after every accepted dispatch with the fresh state — the live
+   *  read-model feed for in-flight runs (persist_snapshot is terminal-only). */
+  onStateChange?: (runId: string, state: RunState) => void;
   /**
    * X3: invoked whenever this run's cancellation is triggered (explicit
    * abortRun() call or the external SpawnRequest.signal firing), from
@@ -266,6 +269,11 @@ export class RuntimeRunner implements Runner {
       const out = reduce(state, { generation: gen, input }, budget);
       state = out.state;
       this.states.set(req.runId, state);
+      try {
+        this.d.onStateChange?.(req.runId, state);
+      } catch {
+        /* observer must never break the dispatch loop */
+      }
       this.d.effects.apply(req.runId, gen, out.effects);
     };
     this.dispatchers.set(req.runId, { gen, fn: dispatch });

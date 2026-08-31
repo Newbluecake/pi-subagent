@@ -110,3 +110,41 @@ describe("Notifier", () => {
     warn.mockRestore();
   });
 });
+
+describe("reconcile redelivery policy (duplicate-notification regression)", () => {
+  it("does not redeliver records already marked delivered; still redelivers pending", async () => {
+    const { createNotifier } = await import("../../src/delivery/notifier.js");
+    const { MemoryOutboxStore } = await import("../../src/core/store.js");
+    const { FakeClock } = await import("../../src/core/clock.js");
+    const store = new MemoryOutboxStore();
+    const sent: string[] = [];
+    const clock = new FakeClock();
+    const notifier = createNotifier({
+      store,
+      clock,
+      sender: (p) => {
+        sent.push(p.key);
+      },
+    });
+    const base = {
+      generation: 1,
+      status: "completed" as const,
+      textPreview: "x",
+      diag: { phase: "settled" as const, status: "completed" as const, pendingTools: 0, staleInputs: 0, degraded: 0 },
+      createdAt: 0,
+      reconcileRound: 0,
+    };
+    notifier.enqueue({ ...base, key: "r1:1:completed", runId: "r1" });
+    clock.advance(10_000); // let attempts fire
+    expect(sent).toContain("r1:1:completed");
+    expect(store.list().find((r) => r.key === "r1:1:completed")?.state).toBe("delivered");
+
+    // Simulate a restart: fresh notifier over the same persisted store.
+    const sent2: string[] = [];
+    const notifier2 = createNotifier({ store, clock, sender: (p) => void sent2.push(p.key) });
+    store.put({ ...base, key: "r2:1:completed", runId: "r2", state: "pending", attempts: 0 });
+    notifier2.reconcile();
+    clock.advance(10_000);
+    expect(sent2).toEqual(["r2:1:completed"]); // delivered r1 is NOT redelivered
+  });
+});
