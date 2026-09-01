@@ -5,3 +5,4 @@ dist/
 coverage/
 .vitest/
 *.tsbuildinfo
+release/
