@@ -267,11 +267,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             message: "deadlineAt already expired",
             retryable: false,
           });
+        // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
+        // the agent type's configured thinkingLevel; neither set => leave the
+        // session to pi's global defaultThinkingLevel.
+        const thinkingLevel = spec.request.thinkingOverride ?? spec.type.thinkingLevel;
         let sessionSpec: SessionSpec = {
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.type.tools === undefined ? {} : { tools: spec.type.tools }),
-          ...(spec.type.thinkingLevel === undefined ? {} : { thinkingLevel: spec.type.thinkingLevel }),
+          ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
         };
         // X3/X10 built-in injected tools, always applied ahead of any H2
         // extension (so an extension's resolveSessionSpec still sees — and can

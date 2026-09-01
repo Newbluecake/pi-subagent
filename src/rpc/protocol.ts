@@ -17,6 +17,9 @@ export const SpawnParamsSchema = Type.Object(
     label: Type.Optional(Type.String({ maxLength: 256 })),
     cwd: Type.Optional(Type.String()),
     modelOverride: Type.Optional(Type.Object({ provider: Type.String(), id: Type.String() })),
+    thinkingOverride: Type.Optional(
+      Type.Union([Type.Literal("off"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")]),
+    ),
     budgetOverride: Type.Optional(
       Type.Object(
         {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { AgentTypeConfig, AgentTypeName } from "../core/types.js";
+import { THINKING_LEVELS, type AgentTypeConfig, type AgentTypeName, type ThinkingLevel } from "../core/types.js";
 
 export interface AgentTypeRegistry {
   reload(): Promise<{ types: AgentTypeConfig[]; errors: Array<{ path: string; error: string }> }>;
@@ -109,13 +109,8 @@ function parseFile(text: string, path: string): AgentTypeConfig {
   if (tools?.length) config.tools = tools;
   if (canSpawn?.length) config.canSpawn = canSpawn;
   if (model) config.model = model;
-  if (
-    fields.thinking === "off" ||
-    fields.thinking === "low" ||
-    fields.thinking === "medium" ||
-    fields.thinking === "high"
-  )
-    config.thinkingLevel = fields.thinking;
+  if (typeof fields.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(fields.thinking))
+    config.thinkingLevel = fields.thinking as ThinkingLevel;
   if (typeof fields.max_turns === "number") config.maxTurns = fields.max_turns;
   if (typeof fields.color === "string") config.color = fields.color;
   return config;

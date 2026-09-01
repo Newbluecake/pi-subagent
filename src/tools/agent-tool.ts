@@ -120,6 +120,12 @@ export const AgentToolParams = Type.Object({
       description: "Optional model override as 'provider/id'. Defaults to the agent type's configured model.",
     }),
   ),
+  thinking: Type.Optional(
+    Type.Union([Type.Literal("off"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
+      description:
+        "Optional thinking-level override for this run ('off' | 'low' | 'medium' | 'high'). Defaults to the agent type's configured level (frontmatter 'thinking'), or the global defaultThinkingLevel when the type defines none.",
+    }),
+  ),
   resume: Type.Optional(
     Type.String({ description: "Agent label or run_id of a completed subagent session to continue." }),
   ),
@@ -192,7 +198,7 @@ export function createAgentTool(deps: {
       "Set schema to require a structured (schema-validated) result instead of free text." +
       nestedNote,
     promptSnippet:
-      "Agent(description, prompt, subagent_type, model?, resume?, schema?, run_in_background?) - spawn or resume a bounded subagent",
+      "Agent(description, prompt, subagent_type, model?, thinking?, resume?, schema?, run_in_background?) - spawn or resume a bounded subagent",
     parameters: AgentToolParams,
     /**
      * Without a renderCall the TUI falls back to the bare tool name while a
@@ -206,6 +212,7 @@ export function createAgentTool(deps: {
       const meta = [
         args?.subagent_type ? `type: ${args.subagent_type}` : undefined,
         args?.model ? `model: ${args.model}` : undefined,
+        args?.thinking ? `thinking: ${args.thinking}` : undefined,
         args?.run_in_background ? "background" : undefined,
         args?.resume ? `resume: ${args.resume}` : undefined,
         args?.isolation ? `isolation: ${args.isolation}` : undefined,
@@ -227,6 +234,7 @@ export function createAgentTool(deps: {
         prompt: params.prompt,
         label: params.description,
         ...(modelOverride ? { modelOverride } : {}),
+        ...(params.thinking ? { thinkingOverride: params.thinking } : {}),
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
         ...(deps.forceSlotless ? { slotless: true } : {}),
         ...(params.resume ? { resumeFrom: params.resume } : {}),

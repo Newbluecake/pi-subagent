@@ -179,3 +179,31 @@ describe("tools/agent-tool: renderCall (TUI call card)", () => {
     expect(comp.render(120).join("\n")).toContain("Agent:");
   });
 });
+
+describe("tools/agent-tool: thinking parameter passthrough", () => {
+  it("forwards the thinking param as thinkingOverride on the spawn request", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await tool.execute(
+      "tc1",
+      { description: "d", prompt: "p", subagent_type: "worker", thinking: "low" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen).toMatchObject({ type: "worker", thinkingOverride: "low" });
+  });
+
+  it("omits thinkingOverride entirely when the thinking param is not given", async () => {
+    const port = fakePort();
+    const tool = createAgentTool({ spawn: port });
+    await tool.execute(
+      "tc1",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(port.seen && "thinkingOverride" in port.seen).toBe(false);
+  });
+});

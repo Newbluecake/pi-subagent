@@ -70,6 +70,15 @@ export interface RunDeadlines {
   readonly queueDeadlineAt: Millis | undefined;
 }
 
+/**
+ * Thinking levels accepted by agent-type frontmatter (`thinking:`) and by the
+ * per-spawn `SpawnRequest.thinkingOverride` / Agent-tool `thinking` parameter.
+ * pi itself knows more levels (minimal/xhigh) but the subagent surface
+ * deliberately exposes only these four (config/agent-types.ts).
+ */
+export const THINKING_LEVELS = ["off", "low", "medium", "high"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
 export interface AgentTypeConfig {
   name: AgentTypeName;
   displayName?: string;
@@ -78,7 +87,7 @@ export interface AgentTypeConfig {
   promptMode: "replace" | "append";
   tools?: string[];
   model?: { provider: string; id: string };
-  thinkingLevel?: "off" | "low" | "medium" | "high";
+  thinkingLevel?: ThinkingLevel;
   maxTurns?: number;
   color?: string;
   budgetOverride?: Partial<DeadlineBudget>;
@@ -102,6 +111,14 @@ export interface SpawnRequest {
   label?: string;
   cwd?: string;
   modelOverride?: { provider: string; id: string };
+  /**
+   * Per-spawn thinking-level override (Agent tool `thinking` param): takes
+   * precedence over the agent type's configured `thinkingLevel` when set;
+   * unset = the type's frontmatter `thinking:` (or pi's global default when
+   * the type defines none). Merged into `sessionSpec.thinkingLevel` by the
+   * runtime adapter, same pattern as `modelOverride`.
+   */
+  thinkingOverride?: ThinkingLevel;
   budgetOverride?: Partial<DeadlineBudget>;
   slotless?: boolean;
   parentRunId?: RunId;

@@ -262,3 +262,60 @@ describe("service/runtime-adapter: X10 structured output injection + double vali
     expect(outcome.structuredResult).toBeUndefined();
   });
 });
+
+describe("service/runtime-adapter: thinking level resolution (SpawnRequest.thinkingOverride)", () => {
+  const typeWithThinking: AgentTypeConfig = {
+    name: "thinker",
+    description: "x",
+    systemPrompt: "",
+    promptMode: "append",
+    thinkingLevel: "high",
+  };
+  const typeWithoutThinking: AgentTypeConfig = {
+    name: "plain",
+    description: "x",
+    systemPrompt: "",
+    promptMode: "append",
+  };
+
+  function capturingDriver(captured: { spec?: SessionSpec }): SessionDriver {
+    return {
+      create: async (s: SessionSpec) => {
+        captured.spec = s;
+        return handle();
+      },
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+  }
+
+  it("thinkingOverride wins over the agent type's configured thinkingLevel", async () => {
+    const clock = new FakeClock();
+    const captured: { spec?: SessionSpec } = {};
+    const runner = buildAdapter(clock, { driver: capturingDriver(captured) });
+    const p = runner.run(spec(typeWithThinking, { thinkingOverride: "low" }));
+    await drain(clock, 10);
+    await p;
+    expect(captured.spec?.thinkingLevel).toBe("low");
+  });
+
+  it("falls back to the agent type's thinkingLevel when no override is given", async () => {
+    const clock = new FakeClock();
+    const captured: { spec?: SessionSpec } = {};
+    const runner = buildAdapter(clock, { driver: capturingDriver(captured) });
+    const p = runner.run(spec(typeWithThinking));
+    await drain(clock, 10);
+    await p;
+    expect(captured.spec?.thinkingLevel).toBe("high");
+  });
+
+  it("omits thinkingLevel from the session spec when neither override nor type config sets one", async () => {
+    const clock = new FakeClock();
+    const captured: { spec?: SessionSpec } = {};
+    const runner = buildAdapter(clock, { driver: capturingDriver(captured) });
+    const p = runner.run(spec(typeWithoutThinking));
+    await drain(clock, 10);
+    await p;
+    expect(captured.spec && "thinkingLevel" in captured.spec).toBe(false);
+  });
+});
