@@ -48,8 +48,9 @@ export const TOOL_HISTORY_CAP = 30;
 /**
  * M-A: fold a tool_start/tool_end driver event into the diag's tool trail.
  * Runs for *every* observed tool event regardless of phase (parallel tool
- * calls can start while the run is already in tool_exec, which the phase
- * transition branches below deliberately treat as a no-op update).
+ * calls can start while the run is already in tool_exec; the phase branches
+ * below count them in pendingTools and stay in tool_exec until the last one
+ * settles, while this patch keeps the per-call trail complete).
  */
 function toolTrailPatch(
   diag: RunDiagnostics,
@@ -521,10 +522,44 @@ export function reduce(
         currentTool: { name: e.toolName, toolCallId: e.toolCallId, startedAt: input.at },
         pendingTools: state.diag.pendingTools + 1,
       });
+    if (e.t === "tool_start" && state.phase === "tool_exec") {
+      // Parallel tool call (models routinely emit several per turn): stay in
+      // tool_exec, count it, and surface the newest in-flight tool. Without
+      // this branch the pendingTools count diverged and the first tool_end
+      // dropped the phase back to model_turn while siblings still ran.
+      return {
+        state: {
+          ...state,
+          diag: {
+            ...state.diag,
+            ...base,
+            pendingTools: state.diag.pendingTools + 1,
+            currentTool: { name: e.toolName, toolCallId: e.toolCallId, startedAt: input.at },
+          },
+        },
+        effects: [],
+      };
+    }
     if (e.t === "tool_end") {
-      if (state.phase !== "tool_exec" || state.diag.currentTool?.toolCallId !== e.toolCallId)
-        return illegal(state, input);
-      const nextDiag = { ...state.diag, ...base, pendingTools: Math.max(0, state.diag.pendingTools - 1) };
+      if (state.phase !== "tool_exec") return illegal(state, input);
+      // Accept the end of ANY known in-flight call (parallel siblings), but
+      // still reject unknown toolCallIds (state divergence / driver bug).
+      const knownInFlight =
+        state.diag.currentTool?.toolCallId === e.toolCallId ||
+        (state.diag.toolHistory ?? []).some((r) => r.toolCallId === e.toolCallId && r.endedAt === undefined);
+      if (!knownInFlight) return illegal(state, input);
+      const remaining = Math.max(0, state.diag.pendingTools - 1);
+      const nextDiag = { ...state.diag, ...base, pendingTools: remaining };
+      if (remaining > 0) {
+        // Sibling tool calls still in flight — stay in tool_exec (the tree
+        // must keep showing 🔧 until the LAST one settles) and point
+        // currentTool at a remaining in-flight call (base.toolHistory already
+        // has this tool_end folded in by toolTrailPatch).
+        const inflight = (nextDiag.toolHistory ?? []).filter((r) => r.endedAt === undefined);
+        const last = inflight[inflight.length - 1];
+        if (last) nextDiag.currentTool = { name: last.name, toolCallId: last.toolCallId, startedAt: last.startedAt };
+        return { state: { ...state, diag: nextDiag }, effects: [] };
+      }
       delete nextDiag.currentTool;
       return enter({ ...state, diag: nextDiag }, "running", "model_turn", input.at, budget);
     }

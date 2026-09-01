@@ -124,6 +124,36 @@ describe("M-A: tool trail (toolHistory / toolCounts)", () => {
     expect(s.diag.toolHistory?.map((r) => r.toolCallId)).toEqual(["a", "b"]);
     expect(s.diag.toolCounts).toEqual({ bash: 1, read: 1 });
   });
+
+  it("stays in tool_exec until the LAST parallel tool settles", () => {
+    let s = runningState();
+    s = sessionEvent(s, { t: "tool_start", toolCallId: "a", toolName: "bash" }, 10);
+    s = sessionEvent(s, { t: "tool_start", toolCallId: "b", toolName: "read" }, 11);
+    expect(s.phase).toBe("tool_exec");
+    expect(s.diag.pendingTools).toBe(2);
+    // First sibling ends: still tool_exec (the tree must keep showing 🔧),
+    // currentTool points at the remaining in-flight call.
+    s = sessionEvent(s, { t: "tool_end", toolCallId: "a", toolName: "bash", isError: false }, 12);
+    expect(s.phase).toBe("tool_exec");
+    expect(s.diag.pendingTools).toBe(1);
+    expect(s.diag.currentTool?.toolCallId).toBe("b");
+    expect(s.diag.lastWarn).toBeUndefined();
+    // Last sibling ends: now the run is genuinely back in a model turn.
+    s = sessionEvent(s, { t: "tool_end", toolCallId: "b", toolName: "read", isError: false }, 13);
+    expect(s.phase).toBe("model_turn");
+    expect(s.diag.pendingTools).toBe(0);
+    expect(s.diag.currentTool).toBeUndefined();
+    expect(s.diag.lastWarn).toBeUndefined();
+  });
+
+  it("rejects a tool_end for an unknown toolCallId even in tool_exec", () => {
+    let s = runningState();
+    s = sessionEvent(s, { t: "tool_start", toolCallId: "a", toolName: "bash" }, 10);
+    s = sessionEvent(s, { t: "tool_end", toolCallId: "zzz", toolName: "bash", isError: false }, 11);
+    expect(s.phase).toBe("tool_exec");
+    expect(s.diag.pendingTools).toBe(1);
+    expect(s.diag.lastWarn).toBe("illegal:session_event");
+  });
 });
 
 describe("M-A: previewToolArgs", () => {
