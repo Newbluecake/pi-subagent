@@ -19,9 +19,12 @@ import {
  *
  * M-C upgrade: the widget is now the primary background presentation — a
  * compact *agent tree*. One header line (worst-highlight bullet, active
- * count, live cost, overflow) followed by one line per run, children
- * indented under their parent (↳) via FleetRow.parentRunId, each row showing
- * label · type · model · phase · elapsed · tool trail.
+ * count, live cost, overflow) followed by 1–2 lines per run: the main row
+ * (label · type · model · phase · elapsed · cost), children indented under
+ * their parent (↳) via FleetRow.parentRunId, plus an indented activity line
+ * (tool trail with in-flight ▸tool + args preview, » thinking stream) when
+ * the run is mid-tool or mid-thought — long tool calls render in full on
+ * their own line instead of being truncated off the row.
  *
  * Same two-layer split as the panel:
  *  1. Pure line builders (`buildFleetWidgetLines`, `formatWidgetCost`) —
@@ -44,7 +47,7 @@ export const FLEET_WIDGET_KEY = "pi-subagent:fleet";
 
 const WIDGET_MARK: Record<FleetHighlight, string> = { none: " ", warn: "!", crit: "✗" };
 
-/** M-C: default / hard cap on run rows (excluding the header line). */
+/** M-C: default / hard cap on run LINES below the header (a run uses 1–2: main row + activity line). */
 export const WIDGET_DEFAULT_ROWS = 5;
 export const WIDGET_MAX_ROWS = 8;
 
@@ -58,7 +61,7 @@ export function formatWidgetCost(costUsd: number): string {
 }
 
 export interface FleetWidgetRenderOptions {
-  /** Run rows shown below the header line. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
   terminalLingerMs?: number;
@@ -76,25 +79,36 @@ export interface WorkflowGroupInput {
   elapsedMs: number;
 }
 
-/** M-C: one run's tree-row detail. M10: segment-colored when a colorizer is
+/** M-C: one run's main tree-row line. M10: segment-colored when a colorizer is
  *  provided — label plain (the eye-catcher), #id/type/model/phase/elapsed/cost
- *  muted, the in-flight `▸tool` segment accent — so rows have visual depth
- *  instead of a uniform white line. warn/crit rows pass the identity colorizer
- *  here and get whole-line tone coloring from the caller instead (nesting SGR
- *  sequences would reset the outer color mid-line). */
-function widgetRowDetail(row: FleetRow, color: FleetColorize = (_t, s) => s): string {
+ *  muted — so rows have visual depth instead of a uniform white line.
+ *  warn/crit rows pass the identity colorizer here and get whole-line tone
+ *  coloring from the caller instead (nesting SGR sequences would reset the
+ *  outer color mid-line). Live activity (tool trail / thinking stream) is NOT
+ *  on this line — see widgetRowActivity. */
+function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): string {
   const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
   const meta: string[] = [row.type ?? "·"];
   if (row.model) meta.push(row.model);
   meta.push(row.phaseLabel, formatDuration(row.elapsedMs));
   const parts = [name, color("muted", meta.join(" "))];
+  if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
+  return parts.join(" ");
+}
+
+/** The run's live-activity line (rendered on its own indented continuation
+ *  line so long tool calls are never truncated off the row): the tool trail
+ *  with the in-flight `▸tool` segment (accent-colored) and/or the one-line
+ *  thinking stream (`» …`, muted). undefined when the run is quiet. */
+function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): string | undefined {
+  const parts: string[] = [];
   const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
   if (trail) {
     const idx = trail.indexOf("▸");
     parts.push(idx >= 0 ? trail.slice(0, idx) + color("header", trail.slice(idx)) : trail);
   }
-  if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
-  return parts.join(" ");
+  if (row.streamLine) parts.push(color("muted", `» ${row.streamLine}`));
+  return parts.length ? parts.join(" ") : undefined;
 }
 
 /** M6: a just-finished run's dimmed row: "✓ 任务名 #id type model completed 39s $0.11". */
@@ -127,11 +141,19 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
   return out;
 }
 
-/** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors. */
-function renderRunLine(row: FleetRow, indent: string, color: FleetColorize): string {
-  if (row.highlight !== "none")
-    return color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowDetail(row)}`);
-  return `${WIDGET_MARK.none} ${indent}${widgetRowDetail(row, color)}`;
+/** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors.
+ *  Returns 1–2 lines: the main row plus, when the run is mid-tool / mid-thought, an indented
+ *  activity continuation aligned under the row content (mark column blank, ↳ replaced by space). */
+function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): string[] {
+  const pad = `  ${indent.replace(/↳/g, " ")}`;
+  if (row.highlight !== "none") {
+    const main = color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row)}`);
+    const activity = widgetRowActivity(row);
+    return activity ? [main, color(row.highlight, `${pad}${activity}`)] : [main];
+  }
+  const main = `${WIDGET_MARK.none} ${indent}${widgetRowMain(row, color)}`;
+  const activity = widgetRowActivity(row, color);
+  return activity ? [main, `${pad}${activity}`] : [main];
 }
 
 /**
@@ -142,8 +164,13 @@ function renderRunLine(row: FleetRow, indent: string, color: FleetColorize): str
  * - Line 1 (header): `<bullet> N active[ · $cost][ · +M more]` — the bullet
  *   is colored by the worst active highlight (rows arrive pre-sorted
  *   crit→warn→none from buildFleetViewModel).
- * - Lines 2..: one per run in tree order — mark (! warn / ✗ crit), depth
- *   indent, `↳` for nested rows, then label/type/model/phase/elapsed/trail.
+ * - Lines 2..: runs in tree order — mark (! warn / ✗ crit), depth indent,
+ *   `↳` for nested rows. Each run takes 1–2 lines: the main row (label /
+ *   type / model / phase / elapsed / cost) plus, when mid-tool or
+ *   mid-thought, an indented activity line (tool trail with in-flight
+ *   ▸tool + args preview, and/or the » thinking stream) so long tool calls
+ *   render in full instead of being truncated off the row. maxRows is a
+ *   LINE budget: a run with activity consumes 2 of it.
  */
 export function buildFleetWidgetLines(
   model: FleetViewModel,
@@ -175,21 +202,28 @@ export function buildFleetWidgetLines(
   }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
   const lines: string[] = [];
-  let runRowsLeft = maxRows;
+  // maxRows is a line budget for run lines (a run uses 1–2: main + activity).
+  let runLinesLeft = maxRows;
   let shownRuns = 0;
+  const pushRun = (row: FleetRow, indent: string): boolean => {
+    if (runLinesLeft <= 0) return false;
+    const runLines = renderRunLines(row, indent, color);
+    // if only one line is left, show the main row and drop the activity line
+    const take = runLines.length <= runLinesLeft ? runLines : runLines.slice(0, 1);
+    lines.push(...take);
+    runLinesLeft -= take.length;
+    shownRuns++;
+    return true;
+  };
   for (const wf of workflows) {
     lines.push(color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`));
-    for (const row of (grouped.get(wf.workflowId) ?? []).slice(0, Math.max(0, runRowsLeft))) {
-      lines.push(renderRunLine(row, "↳ ", color));
-      runRowsLeft--;
-      shownRuns++;
+    for (const row of grouped.get(wf.workflowId) ?? []) {
+      if (!pushRun(row, "↳ ")) break;
     }
   }
-  for (const { row, depth } of treeOrder(general).slice(0, Math.max(0, runRowsLeft))) {
+  for (const { row, depth } of treeOrder(general)) {
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
-    lines.push(renderRunLine(row, indent, color));
-    runRowsLeft--;
-    shownRuns++;
+    if (!pushRun(row, indent)) break;
   }
   const hidden = model.activeCount - shownRuns;
   const header =
@@ -197,7 +231,7 @@ export function buildFleetWidgetLines(
     (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
   lines.unshift(header);
-  for (const row of recentTerminal.slice(0, Math.max(0, runRowsLeft))) {
+  for (const row of recentTerminal.slice(0, Math.max(0, runLinesLeft))) {
     const mark = row.status === "completed" ? "✓" : "✗";
     lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
   }
@@ -227,7 +261,7 @@ export interface FleetWidgetDeps {
   refreshMs?: Millis;
   /** settings.budget.idleMs — same half-idle warn semantics as the panel. */
   idleBudgetMs?: Millis;
-  /** Run rows below the header. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
   workflows?: () => readonly { workflowId: string; name: string; startedAt: number; currentPhaseId?: string }[];

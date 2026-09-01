@@ -33,6 +33,10 @@ export interface FleetRow {
   model: string | undefined;
   /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "bash×3→read ▸edit". */
   toolTrail: string | undefined;
+  /** Live one-line stream of the model's in-progress thinking (last non-empty
+   *  line of diag.text), only while the run is actually in a model turn — the
+   *  "思考过程" line in the agent tree. Truncated; full text stays in diag. */
+  streamLine: string | undefined;
   /** M-C: parent link for tree grouping in the widget (undefined = top-level). */
   parentRunId: RunId | undefined;
   /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻重试2/3 …) for presentation surfaces. */
@@ -162,10 +166,26 @@ export function formatUsage(u: UsageDelta): string {
 }
 
 /**
+ * Last non-empty line of the run's streamed text, whitespace-collapsed and
+ * truncated — the agent tree's one-line "thinking" preview. The accumulated
+ * diag.text can be many lines; only the freshest line is signal.
+ */
+export function lastTextLine(text: string | undefined, max = 60): string | undefined {
+  if (!text) return undefined;
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.replace(/\s+/g, " ").trim();
+    if (line) return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  }
+  return undefined;
+}
+
+/**
  * M-C: compact trail of a run's recent tool calls for the agent-tree widget
  * and the Agent tool card. Adjacent completed calls of the same tool collapse
  * into `name×k` (failed ones render `name✗`), only the last `maxTokens`
- * tokens are kept, and an in-flight call is appended as `▸name`.
+ * tokens are kept, and an in-flight call is appended as `▸name` (with a
+ * truncated args preview when known — the tool phase's one-line "中间过程").
  */
 export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens = 4): string | undefined {
   const history = diag.toolHistory;
@@ -174,7 +194,13 @@ export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens
   let running: string | undefined;
   for (const r of history) {
     if (r.endedAt === undefined) {
-      running = r.name; // keep the latest in-flight call
+      // keep the latest in-flight call, with a short args preview when present
+      const preview = r.argsPreview
+        ? r.argsPreview.length > 30
+          ? `${r.argsPreview.slice(0, 29)}…`
+          : r.argsPreview
+        : undefined;
+      running = preview ? `${r.name} ${preview}` : r.name;
       continue;
     }
     const failed = r.isError === true;
@@ -216,6 +242,10 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     label: snapshot.diag.label,
     model: formatModelRef(snapshot.diag.model),
     toolTrail: toolTrailOf(snapshot.diag),
+    streamLine:
+      !isTerminalStatus(snapshot.status) && snapshot.phase === "model_turn"
+        ? lastTextLine(snapshot.diag.text)
+        : undefined,
     parentRunId: snapshot.parentRunId,
     phaseLabel: phaseLabel(snapshot.phase, snapshot.diag),
     status: snapshot.status,

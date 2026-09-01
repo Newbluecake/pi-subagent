@@ -90,7 +90,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🧠思考 1s");
   });
 
-  it("tool trail: prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
+  it("tool trail: own continuation line; prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
     const withHistory = snapshot({
       diag: diag({
         createdAt: 9_000,
@@ -102,9 +102,10 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         ],
       }),
     });
-    expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))![1]).toBe(
-      "  aaaaaaaa · 🧠思考 1s bash×2 ▸edit",
-    );
+    expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
+      "  aaaaaaaa · 🧠思考 1s",
+      "  bash×2 ▸edit",
+    ]);
     const withTool = snapshot({
       diag: diag({
         createdAt: 9_000,
@@ -112,7 +113,100 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         currentTool: { name: "bash", toolCallId: "t", startedAt: 9_900 },
       }),
     });
-    expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))![1]).toBe("  aaaaaaaa · 🧠思考 1s ▸bash");
+    expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
+      "  aaaaaaaa · 🧠思考 1s",
+      "  ▸bash",
+    ]);
+  });
+
+  it("thinking stream: last text line is shown (one line, truncated) only in model_turn", () => {
+    const thinking = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        text: "先分析需求\n然后看一下代码结构，重点关注调度模块",
+      }),
+    });
+    expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
+      "  aaaaaaaa · 🧠思考 1s",
+      "  » 然后看一下代码结构，重点关注调度模块",
+    ]);
+    // a long line is truncated with an ellipsis
+    const long = snapshot({
+      diag: diag({ createdAt: 9_000, lastEventAt: 9_900, text: "x".repeat(100) }),
+    });
+    const line = buildFleetWidgetLines(buildFleetViewModel([long], OPTS))![2]!;
+    expect(line).toContain("» " + "x".repeat(59) + "…");
+    // tool_exec phase: stale pre-tool text is NOT shown (the ▸tool trail carries the live info)
+    const tooling = snapshot({
+      phase: "tool_exec",
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        text: "调用工具前的思考",
+        currentTool: { name: "bash", toolCallId: "t", startedAt: 9_900 },
+      }),
+    });
+    expect(buildFleetWidgetLines(buildFleetViewModel([tooling], OPTS))!.slice(1)).toEqual([
+      "  aaaaaaaa · 🔧工具 1s",
+      "  ▸bash",
+    ]);
+    // terminal rows never stream
+    const done = snapshot({
+      status: "completed",
+      phase: "settled",
+      updatedAt: NOW,
+      diag: diag({ text: "最后的输出" }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([thinking, done], OPTS))!;
+    expect(lines.find((l) => l.includes("completed"))).not.toContain("»");
+  });
+
+  it("tool trail: in-flight call carries a truncated args preview", () => {
+    const withPreview = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        toolHistory: [{ name: "bash", toolCallId: "a", startedAt: 9_900, argsPreview: "npm test -- --runInBand" }],
+      }),
+    });
+    expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
+      "  aaaaaaaa · 🧠思考 1s",
+      "  ▸bash npm test -- --runInBand",
+    ]);
+    const longPreview = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        toolHistory: [{ name: "bash", toolCallId: "a", startedAt: 9_900, argsPreview: "y".repeat(80) }],
+      }),
+    });
+    expect(buildFleetWidgetLines(buildFleetViewModel([longPreview], OPTS))![2]).toContain(
+      "▸bash " + "y".repeat(29) + "…",
+    );
+  });
+
+  it("line budget: a run with activity consumes 2 lines; a lone leftover line keeps the main row only", () => {
+    const busy = (runId: string, at: number) =>
+      snapshot({
+        runId,
+        diag: diag({
+          createdAt: at,
+          lastEventAt: 9_900,
+          toolHistory: [{ name: "bash", toolCallId: "t", startedAt: 9_900 }],
+        }),
+      });
+    // 3 busy runs with maxRows 5 → 2 full pairs (4 lines) + main-only third run
+    const three = [busy("r1-000000", 1_000), busy("r2-000000", 2_000), busy("r3-000000", 3_000)];
+    const lines = buildFleetWidgetLines(buildFleetViewModel(three, OPTS), { maxRows: 5 })!;
+    expect(lines).toHaveLength(1 + 5);
+    expect(lines.filter((l) => l.includes("▸bash"))).toHaveLength(2); // 3rd run's activity dropped
+    expect(lines.some((l) => l.includes("r3-00000") && !l.includes("▸"))).toBe(true);
+    expect(lines[0]).not.toContain("more"); // all 3 runs shown (as rows)
+    // maxRows 2 → one full pair, others hidden behind +2 more
+    const tight = buildFleetWidgetLines(buildFleetViewModel(three, OPTS), { maxRows: 2 })!;
+    expect(tight).toHaveLength(1 + 2);
+    expect(tight[0]).toContain("+2 more");
   });
 
   it("tree: a child whose parent is shown is indented under it (↳), not severity-sorted away", () => {
