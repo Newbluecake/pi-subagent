@@ -10,6 +10,7 @@ import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import type { AgentSettings } from "./config/settings.js";
+import type { Runner } from "./service/ports.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
@@ -108,15 +109,19 @@ export function buildSessionStack(
   const store = readBack ? wrapWithRunLog(new MemoryRunStore(), runLogHost) : new MemoryRunStore();
   const pool = new SingleSlotPool(systemClock, settings.concurrencyLimit);
   const reaper = new EscalatingReaper(systemClock);
+  // M4: watchdog 不再是空壳——通过 runnerRef 晚绑定到真实 runner（watchdog 先于
+  // runner 构造，与 spawnRef 同一模式）。此前 getState/dispatch 都是 no-op，
+  // 所有子阶段超时（idle/firstEvent/tool/…）从不触发，唯一生效的只有 runner
+  // 内部 guard 的 totalMs——上游慢速涓流时 run 会一路挂到总预算（事故复盘见
+  // CHANGELOG）。tick 只派发 deadline_fired，其他 input 类型不会出现。
+  const runnerRef: { current?: Runner } = {};
   const watchdog = new EventWatchdog({
     clock: systemClock,
     budget: settings.budget,
-    // The runner enforces its one hard deadline (total) itself via a real
-    // setTimeout race (runtime/runner.ts guard()); sub-phase watchdog
-    // ticks are not wired to a cross-run dispatch loop in M1 - documented
-    // limitation, not a fake pass.
-    getState: () => undefined,
-    dispatch: () => undefined,
+    getState: (runId, gen) => runnerRef.current?.getRunState?.(runId, gen),
+    dispatch: (runId, gen, input) => {
+      if (input.kind === "deadline_fired") runnerRef.current?.fireDeadline?.(runId, gen, input);
+    },
   });
   const outbox = readBack
     ? createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager })
@@ -191,6 +196,7 @@ export function buildSessionStack(
     nestedSpawn: () => spawnRef.current,
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
   });
+  runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const mention = createMentionRegistry();
   const mentionRef = { current: mention };
   const spawn = createSpawnService({

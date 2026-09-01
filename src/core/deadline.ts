@@ -7,6 +7,7 @@ export const DEFAULT_BUDGET: DeadlineBudget = {
   bindMs: 60_000,
   firstEventMs: 120_000,
   idleMs: 240_000,
+  modelTurnMs: 900_000,
   toolMs: 600_000,
   compactionMs: 300_000,
   totalMs: 1_800_000,
@@ -31,6 +32,23 @@ export function remainingFor(
 }
 export function dueAtFor(phase: RunPhase, diag: RunDiagnostics, budget: DeadlineBudget): Millis | undefined {
   const start = diag.phaseEnteredAt;
+  // model_turn 的双重约束（M4）：接线后若仍按 phaseEnteredAt+idleMs 一刀切，会误杀
+  // 正常的长 thinking 轮次（大上下文 + thinking=high 单轮可达数分钟）；但涓流式
+  // “活着但几乎不产出”的响应也不能无限续命。因此：
+  //   静默超时 = lastEventAt + idleMs（持续产出 delta 的活跃流不会被误杀）
+  //   硬上限   = phaseEnteredAt + modelTurnMs（单轮无论如何不得超过该值）
+  // 两者取较早者；任一为 0 表示禁用该约束。
+  if (phase === "model_turn") {
+    const silence = budget.idleMs === 0 ? undefined : (diag.lastEventAt ?? start) + budget.idleMs;
+    const cap = budget.modelTurnMs === 0 ? undefined : start + budget.modelTurnMs;
+    if (silence === undefined) return cap;
+    if (cap === undefined) return silence;
+    return Math.min(silence, cap);
+  }
+  // retry_backoff（M4 修复盲区）：重试本身是有计划的等待，截止点必须覆盖当前
+  // backoff 时长 + 宽限，再以 lastEventAt 为基准计静默——只有重试真正卡住
+  // （backoff 结束后迟迟没有 retry_end/新事件）才应触发。
+  if (phase === "retry_backoff") return idleDueAt(diag, budget);
   const ms =
     phase === "queue_wait"
       ? budget.queueWaitMs
@@ -40,17 +58,15 @@ export function dueAtFor(phase: RunPhase, diag: RunDiagnostics, budget: Deadline
           ? budget.bindMs
           : phase === "prompt_dispatch"
             ? budget.firstEventMs
-            : phase === "model_turn"
-              ? budget.idleMs
-              : phase === "tool_exec"
-                ? budget.toolMs
-                : phase === "compaction"
-                  ? budget.compactionMs
-                  : phase === "abort_grace"
-                    ? budget.abortGraceMs
-                    : phase === "reap"
-                      ? budget.reapMs
-                      : undefined;
+            : phase === "tool_exec"
+              ? budget.toolMs
+              : phase === "compaction"
+                ? budget.compactionMs
+                : phase === "abort_grace"
+                  ? budget.abortGraceMs
+                  : phase === "reap"
+                    ? budget.reapMs
+                    : undefined;
   return ms === undefined || ms === 0 ? undefined : start + ms;
 }
 export function idleDueAt(diag: RunDiagnostics, budget: DeadlineBudget): Millis {

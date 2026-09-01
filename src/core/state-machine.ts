@@ -1,4 +1,4 @@
-import { DEFAULT_BUDGET, dueAtFor, idleDueAt } from "./deadline.js";
+import { DEFAULT_BUDGET, dueAtFor } from "./deadline.js";
 import type {
   DeadlineBudget,
   EffectEnvelope,
@@ -215,12 +215,9 @@ function clearAndArm(
   const effects: RunEffect[] = state.armedTimers.map((timer) => ({ kind: "clear_timer" as const, timer }));
   const phaseTimerId = phaseTimer(phase);
   const phaseDiag = { ...state.diag, phase, phaseEnteredAt: at };
-  const phaseDue =
-    phase === "retry_backoff"
-      ? idleDueAt({ ...phaseDiag, lastEventAt: at }, budget)
-      : phaseTimerId === undefined
-        ? undefined
-        : dueAtFor(phase, phaseDiag, budget);
+  // M4：retry_backoff 不再特判——dueAtFor 已统一处理（内部走 idleDueAt），
+  // 进入该相位时调用处已通过 base 把 lastEventAt 刷为当前时刻，两者等价。
+  const phaseDue = phaseTimerId === undefined ? undefined : dueAtFor(phase, phaseDiag, budget);
   const timers: TimerId[] = [];
   if (phaseTimerId !== undefined && phaseDue !== undefined && budget.totalMs !== 0) {
     timers.push(phaseTimerId);
@@ -639,7 +636,10 @@ export function reduce(
     return finish(state, status, input.at, budget, {
       ...textPatch,
       ...(input.error === undefined ? {} : { error: input.error }),
-      ...(input.error?.kind === "timeout" ? { timeoutReason: "total" as const } : {}),
+      // M4：deadline_fired 先行进入 abort_grace 时已记录具体 timeoutReason（idle/
+      // no_first_event/…），cancel 解除 guard 阻塞后带回来的 prompt_settled 不得把它
+      // 抹成笼统的 "total"。
+      ...(input.error?.kind === "timeout" ? { timeoutReason: state.diag.timeoutReason ?? ("total" as const) } : {}),
     });
   }
   if (input.kind === "deadline_fired") {
@@ -659,7 +659,9 @@ export function reduce(
         { kind: "dispose" },
       ]);
     }
-    if (state.phase === "retry_backoff" && input.timer === "idle") return { state, effects: [] };
+    // M4 前这里忽略 retry_backoff+idle（配合 dueAtFor 无 retry_backoff 分支的盲区）：
+    // pi 自动重试一旦卡住（backoff 结束后迟迟不来 retry_end），run 会无界地挂到总预算。
+    // 现在 dueAtFor 已为 retry_backoff 提供 idleDueAt 截止点，直接落通用路径。
     const entered = enter(removed, "stopping", "abort_grace", input.at, budget, {
       timeoutReason: input.reason,
       stopCause: "timeout",

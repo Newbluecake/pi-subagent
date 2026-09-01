@@ -256,13 +256,33 @@ export class RuntimeRunner implements Runner {
     if (!entry) throw new Error(`no active session for run ${runId}`);
     await entry.handle.steer(text);
   }
+  /**
+   * M4: EventWatchdog 的超时入口。两步缺一不可：
+   * 1. 先把 deadline_fired 折进状态机 —— 进入 abort_grace 并记录具体 timeoutReason；
+   * 2. 再取消本 run 的 CancelHandle —— run() 正阻塞在 guard(handle.prompt(...)) 上，
+   *    而 guard 只在 prompt 完成 / cancel / 总预算三点之一解除；没有这一步，状态机
+   *    虽然已判 timed_out，run() 仍会挂到 totalMs 才返回，reaper 清理同样被拖延。
+   *    取消后走与用户中止完全相同的 teardown/finally/reap 路径。
+   * 顺序必须如此（先 deadline 后 cancel）：cancel 派发的 stop_requested 在
+   * abort_grace 里只补记 stopCause，不会覆盖 timeoutReason，结果保持 timed_out。
+   */
+  fireDeadline(runId: string, generation: number, input: Extract<RunInput, { kind: "deadline_fired" }>): void {
+    const state = this.states.get(runId);
+    if (!state || state.generation !== generation || isTerminalStatus(state.status)) return;
+    this.dispatchExternal(runId, generation, input);
+    const entry = this.activeCancels.get(runId);
+    if (entry && entry.gen === generation) entry.cancel.cancel("timeout");
+  }
   async run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome> {
     const gen = (this.generation.get(req.runId) ?? 0) + 1;
     this.generation.set(req.runId, gen);
     let state = createInitialState(req.runId, gen, this.d.clock.now(), req.parentRunId);
     this.states.set(req.runId, state);
     const cancel = createCancelHandle(req.runId, gen, req.signal, (reason) => {
-      const selfCause: StopCause = reason === "external" ? "parent_abort" : "user_stop";
+      // M4: "timeout" 来自 fireDeadline（watchdog 超时），必须原样保留，
+      // 否则超时取消会被误记为 user_stop。
+      const selfCause: StopCause =
+        reason === "external" ? "parent_abort" : reason === "timeout" ? "timeout" : "user_stop";
       this.dispatchExternal(req.runId, gen, {
         kind: "stop_requested",
         at: this.d.clock.now(),
@@ -385,6 +405,10 @@ export class RuntimeRunner implements Runner {
       // (architecture §7.5 onBind). Guarded the same way as onTurnBoundary.
       if (req.toolScope && !isTerminalStatus(state.status)) req.toolScope.enforcer.onBind(handle, req.toolScope.policy);
       this.d.watchdog.arm(req.runId, gen);
+      // M4: 迁入 prompt_dispatch——此前该相位无进入点，prompt() 挂起时 run 停在
+      // extension_bind，watchdog 接线后会以 bindMs 误报 "extension_bind" 超时。
+      // 迁入后由 firstEventMs 约束，语义为 no_first_event。
+      dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "prompt_dispatch" });
       const promptBudget = remainingFor(budget.totalMs, this.d.clock.now(), state.deadlines);
       const prompted = await this.guard(handle.prompt(req.prompt), promptBudget.ms, cancel, "prompt");
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
@@ -399,7 +423,12 @@ export class RuntimeRunner implements Runner {
           ? turnError === undefined
             ? {}
             : { error: error(turnError, "model") }
-          : { error: error(prompted.reason, prompted.reason === "cancelled" ? "aborted" : "timeout") }),
+          : // M4: guard 因 cancel 解除时，若状态机已因 watchdog 超时进入 abort_grace
+            // （timeoutReason/stopCause 已记录），结果必须是 timed_out 而非 aborted。
+            prompted.reason === "cancelled" &&
+              (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout")
+            ? { error: error("deadline exceeded; prompt cancelled", "timeout") }
+            : { error: error(prompted.reason, prompted.reason === "cancelled" ? "aborted" : "timeout") }),
         ...(finalText === undefined ? {} : { text: finalText }),
       });
       return state.outcome!;

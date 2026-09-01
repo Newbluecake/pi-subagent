@@ -376,7 +376,9 @@ describe("stopping ladder", () => {
     expect(result.effects).toEqual([]);
   });
 
-  it("ignores retry idle deadline silently but accepts total deadline", () => {
+  it("M4: retry_backoff 卡死时 idle deadline 走通用超时路径（不再静默忽略）", () => {
+    // 修复前：retry_backoff + idle 被显式忽略，且 dueAtFor 无该相位分支——pi 自动
+    // 重试一旦卡住，run 无界挂到总预算。现在应进入 abort_grace 并记录 timeoutReason。
     let state = apply(enqueued(), { kind: "slot_acquired" }).state;
     state = apply(state, { kind: "phase_entered", phase: "retry_backoff" }).state;
     const idle = reduce(
@@ -384,16 +386,18 @@ describe("stopping ladder", () => {
       { generation: state.generation, input: { kind: "deadline_fired", timer: "idle", reason: "idle", at: 1 } },
       budget,
     );
-    expect(idle.state.phase).toBe("retry_backoff");
-    expect(idle.state.armedTimers).toEqual(["idle", "total"]);
-    expect(idle.state.diag.lastWarn).toBeUndefined();
-    expect(idle.effects).toEqual([]);
+    expect(idle.state.phase).toBe("abort_grace");
+    expect(idle.state.status).toBe("stopping");
+    expect(idle.state.diag.timeoutReason).toBe("idle");
+    expect(idle.state.diag.stopCause).toBe("timeout");
+    expect(kinds(idle)).toContain("cancel_signal");
     const total = reduce(
       idle.state,
       { generation: state.generation, input: { kind: "deadline_fired", timer: "total", reason: "total", at: 1 } },
       budget,
     );
-    expect(total.state.phase).toBe("abort_grace");
+    expect(total.state.phase).toBe("settled");
+    expect(total.state.status).toBe("timed_out");
   });
 
   it("maps user stop grace expiry to aborted", () => {

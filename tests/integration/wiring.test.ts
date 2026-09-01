@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryOutboxStore, MemoryRunStore } from "../../src/core/store.js";
-import type { AgentTypeConfig } from "../../src/core/types.js";
+import type { AgentTypeConfig, DriverEvent } from "../../src/core/types.js";
 import { createNotifier, type PersistedDelivery } from "../../src/delivery/notifier.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
@@ -27,7 +27,7 @@ import { createSpawnService } from "../../src/service/spawn-service.js";
  */
 const never = <T>() => new Promise<T>(() => undefined);
 
-function fastBudget() {
+function fastBudget(overrides: Partial<typeof DEFAULT_BUDGET> = {}) {
   return {
     ...DEFAULT_BUDGET,
     queueWaitMs: 200,
@@ -35,11 +35,14 @@ function fastBudget() {
     bindMs: 200,
     firstEventMs: 200,
     idleMs: 200,
+    modelTurnMs: 400,
     toolMs: 200,
     totalMs: 500,
     abortGraceMs: 20,
     steerMs: 10,
     reapMs: 20,
+    retrySlackMs: 20,
+    ...overrides,
   };
 }
 
@@ -60,15 +63,22 @@ function handle(overrides: Partial<SessionHandle> = {}): SessionHandle {
   };
 }
 
-function buildStack(clock: FakeClock, driver: SessionDriver) {
+function buildStack(clock: FakeClock, driver: SessionDriver, budgetOverrides: Partial<typeof DEFAULT_BUDGET> = {}) {
+  const budget = fastBudget(budgetOverrides);
   const pool = new SingleSlotPool(clock, 1);
   const store = new MemoryRunStore();
   const reaper = new EscalatingReaper(clock);
+  // M4: 与 stack.ts 同款的真实接线——watchdog 经 runnerRef 晚绑定到 runner，
+  // 不再是 getState/dispatch 皆 no-op 的空壳。
+  const runnerRef: { current?: ReturnType<typeof createRuntimeRunnerAdapter> } = {};
   const watchdog = new EventWatchdog({
     clock,
-    budget: fastBudget(),
-    getState: () => undefined,
-    dispatch: () => undefined,
+    budget,
+    tickMs: 10,
+    getState: (runId, gen) => runnerRef.current?.getRunState?.(runId, gen),
+    dispatch: (runId, gen, input) => {
+      if (input.kind === "deadline_fired") runnerRef.current?.fireDeadline?.(runId, gen, input);
+    },
   });
   const outbox = new MemoryOutboxStore<PersistedDelivery>();
   const sent: PersistedDelivery[] = [];
@@ -78,13 +88,14 @@ function buildStack(clock: FakeClock, driver: SessionDriver) {
     sender: (payload) => sent.push(payload as PersistedDelivery),
   });
   const runner = createRuntimeRunnerAdapter({ clock, driver, pool, store, watchdog, reaper, notifier });
+  runnerRef.current = runner;
   const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
   const types = {
     get: (name: string) => (name === "worker" ? type : undefined),
     list: () => [type],
     reload: async () => ({ types: [type], errors: [] }),
   };
-  const spawnService = createSpawnService({ types, pool, runner, now: () => clock.now(), budget: fastBudget() });
+  const spawnService = createSpawnService({ types, pool, runner, now: () => clock.now(), budget });
   const registry = createLiveRunRegistry(spawnService, store);
   const queryService = createQueryService({ registry, runner, clock });
   return { pool, store, reaper, notifier, runner, spawnService, registry, queryService, sent };
@@ -149,7 +160,9 @@ describe("wiring: cross-layer smoke", () => {
 
     const snapshot = stack.registry.get(spawned.runId);
     expect(snapshot?.status).toBe("timed_out");
-    expect(snapshot?.diag.timeoutReason).toBe("total");
+    // M4: 子阶段超时接线后，prompt() 无事件挂起由 firstEventMs 精确捕获
+    // （no_first_event），不再一路拖到 total。
+    expect(snapshot?.diag.timeoutReason).toBe("no_first_event");
 
     // Slot released even though the driver's prompt() never resolves.
     expect(stack.pool.stats.inUse).toBe(0);
@@ -220,5 +233,93 @@ describe("wiring: cross-layer smoke", () => {
 
     await drain(clock, 600); // let the total deadline settle it
     expect(stack.registry.get(spawned.runId)?.status).toBe("timed_out");
+  });
+
+  // ---------- M4: watchdog 真实接线后的子阶段超时 ----------
+
+  /** 可注入 DriverEvent 的 driver：bind 时截获 onEvent 回调，prompt 默认永远挂起。 */
+  function eventDrivenDriver(promptImpl: () => Promise<void> = () => never()) {
+    let emitEvent: ((e: DriverEvent) => void) | undefined;
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: promptImpl }),
+      bind: async (_h, onEvent) => {
+        emitEvent = onEvent;
+      },
+      onLateArrival: () => undefined,
+    };
+    return { driver, emit: (e: DriverEvent) => emitEvent?.(e) };
+  }
+
+  it("M4: model_turn 静默卡死 → idle 超时击杀（远早于 total），保留具体 timeoutReason", async () => {
+    const clock = new FakeClock();
+    const { driver, emit } = eventDrivenDriver();
+    const stack = buildStack(clock, driver);
+
+    const spawned = await stack.spawnService.spawn({ type: "worker", prompt: "hang in model turn" });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    await drain(clock, 30); // bind 完成、watchdog armed、prompt 已 dispatch
+    emit({ t: "turn_start" }); // → model_turn
+    await drain(clock, 5);
+    expect(stack.registry.get(spawned.runId)?.diag.phase).toBe("model_turn");
+
+    // idleMs=200：t≈35 进 model_turn，due≈235，totalMs=500——若 settle 发生在 500 之前，
+    // 证明 fireDeadline 的 cancel 确实解除了 guard 阻塞（否则会一路挂到 total）。
+    await drain(clock, 300);
+    const snap = stack.registry.get(spawned.runId);
+    expect(snap?.status).toBe("timed_out");
+    expect(snap?.diag.timeoutReason).toBe("idle"); // 不是 "total"、不是 aborted
+    expect(stack.sent.some((p) => p.runId === spawned.runId && p.status === "timed_out")).toBe(true);
+    expect(stack.pool.stats.inUse).toBe(0);
+  });
+
+  it("M4: 持续产出 delta 的活跃轮次不被 idle 误杀，但不得越过 modelTurnMs 硬上限", async () => {
+    const clock = new FakeClock();
+    const { driver, emit } = eventDrivenDriver();
+    const stack = buildStack(clock, driver); // idleMs=200, modelTurnMs=400, totalMs=500
+
+    const spawned = await stack.spawnService.spawn({ type: "worker", prompt: "slow but alive" });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    await drain(clock, 30);
+    emit({ t: "turn_start" }); // t≈30 进 model_turn；cap due ≈ 430，total due = 500
+
+    // 每 50ms 一个 delta，持续 300ms——远超 idleMs=200，活跃流不得被杀。
+    for (let i = 0; i < 6; i++) {
+      emit({ t: "thinking_delta", delta: "x" });
+      await drain(clock, 50);
+    }
+    expect(stack.registry.get(spawned.runId)?.status).toBe("running");
+
+    // 继续产出让总轮长越过 modelTurnMs=400 的硬上限 → 必须被杀。
+    for (let i = 0; i < 3; i++) {
+      emit({ t: "thinking_delta", delta: "y" });
+      await drain(clock, 50);
+    }
+    const snap = stack.registry.get(spawned.runId);
+    expect(snap?.status).toBe("timed_out");
+    expect(snap?.diag.timeoutReason).toBe("idle"); // 硬上限与静默共用 idle 定时器
+  });
+
+  it("M4: pi 自动重试卡死（retry_backoff 无 retry_end）→ 超时击杀，不再无界挂起", async () => {
+    const clock = new FakeClock();
+    const { driver, emit } = eventDrivenDriver();
+    const stack = buildStack(clock, driver); // idleMs=200, retrySlackMs=20, totalMs=500
+
+    const spawned = await stack.spawnService.spawn({ type: "worker", prompt: "retry wedge" });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+
+    await drain(clock, 30);
+    emit({ t: "turn_start" });
+    await drain(clock, 5);
+    emit({ t: "retry_start", attempt: 1, maxAttempts: 3, delayMs: 50 }); // → retry_backoff
+    await drain(clock, 5);
+    expect(stack.registry.get(spawned.runId)?.diag.phase).toBe("retry_backoff");
+
+    // idleDueAt ≈ lastEventAt(≈40) + idleMs(200) + delayMs(50) + slack(20) ≈ 310 < total 500
+    await drain(clock, 300);
+    const snap = stack.registry.get(spawned.runId);
+    expect(snap?.status).toBe("timed_out");
+    expect(snap?.diag.timeoutReason).toBe("idle");
   });
 });

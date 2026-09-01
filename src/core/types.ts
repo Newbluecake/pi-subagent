@@ -55,6 +55,8 @@ export interface DeadlineBudget {
   bindMs: Millis;
   firstEventMs: Millis;
   idleMs: Millis;
+  /** 单轮模型调用的硬上限（不论是否仍在产出 delta）；0 = 不限制，仅受 totalMs 约束。 */
+  modelTurnMs: Millis;
   toolMs: Millis;
   compactionMs: Millis;
   totalMs: Millis;

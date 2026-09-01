@@ -74,7 +74,8 @@ queue_wait → resolve_config → session_create → extension_bind
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {
-    "idleMs": 240000, // 模型 turn 静默多久算超时
+    "idleMs": 240000, // 模型 turn 静默（无任何 delta/事件）多久算超时
+    "modelTurnMs": 900000, // 单轮模型调用硬上限（即使仍在产出）
     "toolMs": 600000, // 单次工具调用上限
     "totalMs": 1800000, // 整个 run 的上限
     // … queueWaitMs, startupMs, bindMs, firstEventMs, compactionMs,

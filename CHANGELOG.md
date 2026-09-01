@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sub-phase deadline enforcement is real now** — the `EventWatchdog` was constructed with
+  `getState`/`dispatch` no-op stubs ("M1 documented limitation"), so `idleMs`, `firstEventMs`,
+  `toolMs`, etc. were computed and armed but never fired; only the runner's total-budget
+  `setTimeout` race actually terminated a wedged run. A slow-but-trickling provider stream
+  therefore hung the run until `totalMs`. The watchdog is now late-bound to the live runner
+  (`getRunState` + new `fireDeadline`, which folds `deadline_fired` into the state machine
+  and cancels the run's CancelHandle so the prompt guard unblocks immediately).
+- **`retry_backoff` blind spot** — `dueAtFor` had no branch for it and `deadline_fired` was
+  explicitly ignored there, so a wedged pi auto-retry could keep a run alive forever.
+  Now backed by `idleDueAt` (covers the current backoff delay + slack).
+- **`model_turn` idle semantics** — the old `phaseEnteredAt + idleMs` rule would have
+  false-killed legitimately long thinking turns once enforcement was on. Now the idle
+  deadline is silence-based (`lastEventAt + idleMs`), plus a new per-turn hard cap
+  `modelTurnMs` (default 15 min) so a trickling turn still dies bounded.
+- **Timeout outcomes no longer misreported as `aborted`** — cancelling the prompt guard
+  after a watchdog deadline now yields `timed_out` with the original `timeoutReason`
+  (e.g. `idle`), not `aborted`/`"total"`.
+- **`prompt_dispatch` phase actually entered** — the runner never dispatched it, so a hung
+  `prompt()` sat in `extension_bind` and would have reported a misleading bind timeout.
+- New budget field: `modelTurnMs` (default `900_000`, `0` disables).
+
 ## [0.1.0] - 2026-09-01
 
 First public release: anti-hang subagent extension for pi — drop-in replacement for
