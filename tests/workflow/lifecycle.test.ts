@@ -80,7 +80,12 @@ describe("WorkerHost lifecycle (§2.3.1 S1-S8)", () => {
       const received: unknown[] = [];
       host.events.onScriptReturned((r) => received.push(r));
       workerData().commPort.postMessage({ kind: "script_returned", result: "before-close" });
-      await new Promise((r) => setTimeout(r, 0));
+      // MessagePort delivery is event-loop-scheduled, not tick-countable — a
+      // single setTimeout(0) flush is racy on a loaded runner (observed flake
+      // in CI). Poll (bounded) until the message actually lands.
+      for (let i = 0; i < 100 && received.length === 0; i += 1) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
 
       expect(received).toEqual(["before-close"]);
     });
@@ -107,6 +112,8 @@ describe("WorkerHost lifecycle (§2.3.1 S1-S8)", () => {
       } catch {
         threw = true; // Node's MessageChannel commonly throws on a closed port; either outcome is acceptable here.
       }
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
 
       expect(received).toEqual([]); // WK1: zero observable effect from the late message, whether it threw or was silently dropped.
