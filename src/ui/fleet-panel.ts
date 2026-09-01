@@ -31,7 +31,7 @@ export interface FleetRow {
   label: string | undefined;
   /** M-C: model id from diag.model (display only; undefined = session default). */
   model: string | undefined;
-  /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "bash×3→read ▸edit". */
+  /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "bash×3→read ▸edit · 3s" — the in-flight ▸ segment carries its live duration when the view is built with `now`. */
   toolTrail: string | undefined;
   /** Live one-line stream of the model's in-progress thinking (last non-empty
    *  line of diag.text), only while the run is actually in a model turn — the
@@ -52,6 +52,8 @@ export interface FleetRow {
   /** now - (diag.lastEventAt ?? diag.phaseEnteredAt), clamped ≥ 0 — the hang signal. */
   idleMs: Millis;
   currentTool: string | undefined;
+  /** In-flight tool call's age (now - diag.currentTool.startedAt); undefined for terminal runs / no tool in flight. */
+  currentToolMs: Millis | undefined;
   /** e.g. "L2✓→L3✗"; undefined when no escalation has happened. */
   escalation: string | undefined;
   maxEscalation: EscalationLevel | undefined;
@@ -190,8 +192,16 @@ export function lastTextLine(text: string | undefined, max = 60): string | undef
  * into `name×k` (failed ones render `name✗`), only the last `maxTokens`
  * tokens are kept, and an in-flight call is appended as `▸name` (with a
  * truncated args preview when known — the tool phase's one-line "中间过程").
+ * When `now` is given, the in-flight segment also carries its live duration
+ * (`▸bash npm test · 3s`) so the tool call's timing is visible next to the
+ * model-turn timing on the main row; pass undefined for terminal runs so a
+ * killed mid-tool call doesn't keep aging.
  */
-export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens = 4): string | undefined {
+export function toolTrailOf(
+  diag: Pick<RunDiagnostics, "toolHistory">,
+  maxTokens = 4,
+  now?: Millis,
+): string | undefined {
   const history = diag.toolHistory;
   if (!history?.length) return undefined;
   const tokens: Array<{ key: string; name: string; failed: boolean; count: number }> = [];
@@ -206,7 +216,8 @@ export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens
           ? `${r.argsPreview.slice(0, 59)}…`
           : r.argsPreview
         : undefined;
-      running = preview ? `${r.name} ${preview}` : r.name;
+      const base = preview ? `${r.name} ${preview}` : r.name;
+      running = now === undefined ? base : `${base} · ${formatDuration(Math.max(0, now - r.startedAt))}`;
       continue;
     }
     const failed = r.isError === true;
@@ -247,7 +258,9 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     type: opts.typeOf?.(snapshot.runId) ?? snapshot.diag.agentType,
     label: snapshot.diag.label,
     model: formatModelRef(snapshot.diag.model),
-    toolTrail: toolTrailOf(snapshot.diag),
+    // Terminal rows freeze the trail (no live duration): a run killed mid-tool
+    // would otherwise show an ever-growing ▸ duration.
+    toolTrail: toolTrailOf(snapshot.diag, 4, terminal ? undefined : opts.now),
     // The `»` preview prefers the live thinking stream; state-machine clears
     // thinkingText the moment the turn's answer text starts streaming, so
     // the fallback to diag.text covers the answer phase of the same turn.
@@ -263,6 +276,10 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     phaseMs: Math.max(0, opts.now - snapshot.diag.phaseEnteredAt),
     idleMs: idleOf(snapshot, opts.now),
     currentTool: terminal ? undefined : snapshot.diag.currentTool?.name,
+    currentToolMs:
+      terminal || snapshot.diag.currentTool === undefined
+        ? undefined
+        : Math.max(0, opts.now - snapshot.diag.currentTool.startedAt),
     escalation: esc.text,
     maxEscalation: esc.max,
     usage: snapshot.diag.usage,

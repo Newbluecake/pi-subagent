@@ -79,7 +79,10 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: NOW - 8 * 60_000 - 32_000, lastEventAt: 9_900, usage: usage(1.05) }),
     });
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
-    expect(buildFleetWidgetLines(model)).toEqual(["● 1 active · $1.05", "  aaaaaaaa architect 🧠思考 8m32s $1.05"]);
+    expect(buildFleetWidgetLines(model)).toEqual([
+      "● 1 active · $1.05",
+      "  aaaaaaaa architect 🧠思考 8m32s Σ8m32s $1.05",
+    ]);
   });
 
   it("M-A meta: label, agentType and model from diag are rendered on the row", () => {
@@ -93,7 +96,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🧠思考 1s");
+    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🧠思考 1s Σ1s");
   });
 
   it("tool trail: own continuation line; prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
@@ -109,8 +112,8 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s",
-      "  bash×2 ▸edit",
+      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  bash×2 ▸edit · 9s",
     ]);
     const withTool = snapshot({
       diag: diag({
@@ -120,9 +123,30 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s",
-      "  ▸bash",
+      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  ▸bash · 100ms",
     ]);
+  });
+
+  it("tool trail: terminal run freezes the in-flight segment (no ever-growing duration)", () => {
+    // A run killed mid-tool keeps its in-flight record in toolHistory — the
+    // trail must NOT carry a live duration that keeps aging after the run ended.
+    const killedMidTool = snapshot({
+      status: "aborted",
+      phase: "settled",
+      updatedAt: NOW,
+      diag: diag({
+        createdAt: 1_000,
+        toolHistory: [{ name: "bash", toolCallId: "a", startedAt: 5_000, argsPreview: "npm test" }],
+        currentTool: { name: "bash", toolCallId: "a", startedAt: 5_000 },
+      }),
+    });
+    const model = buildFleetViewModel([killedMidTool], { ...OPTS, recentTerminal: 3 });
+    const row = model.rows[0]!;
+    expect(row.terminal).toBe(true);
+    expect(row.toolTrail).toBe("▸bash npm test"); // no " · Ns" suffix
+    expect(row.currentTool).toBeUndefined();
+    expect(row.currentToolMs).toBeUndefined();
   });
 
   it("thinking stream: last text line is shown (one line, truncated) only in model_turn", () => {
@@ -134,7 +158,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s",
+      "  aaaaaaaa · 🧠思考 1s Σ1s",
       "  » 然后看一下代码结构，重点关注调度模块",
     ]);
     // a long line is truncated with an ellipsis
@@ -154,8 +178,8 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([tooling], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🔧工具 1s",
-      "  ▸bash",
+      "  aaaaaaaa · 🔧工具 1s Σ1s",
+      "  ▸bash · 100ms",
     ]);
     // terminal rows never stream
     const done = snapshot({
@@ -173,7 +197,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: 0, phaseEnteredAt: 9_000, lastEventAt: 9_900 }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  aaaaaaaa · 🧠思考 1s"); // 10s cumulative, 1s in this model turn
+    expect(lines[1]).toBe("  aaaaaaaa · 🧠思考 1s Σ10s"); // 1s in this model turn, Σ10s total run age
   });
 
   it("tool trail: in-flight edit shows which file is being edited (path preview)", () => {
@@ -184,7 +208,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
         toolHistory: [{ name: "edit", toolCallId: "a", startedAt: 9_900, argsPreview: "src/ui/fleet-panel.ts" }],
       }),
     });
-    expect(buildFleetWidgetLines(buildFleetViewModel([editing], OPTS))![2]).toBe("  ▸edit src/ui/fleet-panel.ts");
+    expect(buildFleetWidgetLines(buildFleetViewModel([editing], OPTS))![2]).toBe(
+      "  ▸edit src/ui/fleet-panel.ts · 100ms",
+    );
   });
 
   it("tool trail: in-flight call carries a truncated args preview", () => {
@@ -196,8 +222,8 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s",
-      "  ▸bash npm test -- --runInBand",
+      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  ▸bash npm test -- --runInBand · 100ms",
     ]);
     const longPreview = snapshot({
       diag: diag({
@@ -246,16 +272,16 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
       "● 3 active",
-      "  parent-0 · 🧠思考 9s",
-      "  ↳ child-00 · 🧠思考 5s",
-      "  other-00 · 🧠思考 8s",
+      "  parent-0 · 🧠思考 9s Σ9s",
+      "  ↳ child-00 · 🧠思考 5s Σ5s",
+      "  other-00 · 🧠思考 8s Σ8s",
     ]);
   });
 
   it("nested run whose parent is NOT shown still gets the ↳ marker at top level", () => {
     const nested = snapshot({ parentRunId: "p", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     const lines = buildFleetWidgetLines(buildFleetViewModel([nested], OPTS))!;
-    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🧠思考 1s");
+    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🧠思考 1s Σ1s");
   });
 
   it("highlight-priority: crit run's row is first among roots and the bullet takes the worst tone", () => {
@@ -425,7 +451,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s"]);
+    expect(ui.calls[0]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -457,7 +483,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s"]);
+    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s Σ1s"]);
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });

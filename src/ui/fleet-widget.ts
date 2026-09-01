@@ -20,11 +20,12 @@ import {
  * M-C upgrade: the widget is now the primary background presentation — a
  * compact *agent tree*. One header line (worst-highlight bullet, active
  * count, live cost, overflow) followed by 1–2 lines per run: the main row
- * (label · type · model · phase · elapsed · cost), children indented under
- * their parent (↳) via FleetRow.parentRunId, plus an indented activity line
- * (tool trail with in-flight ▸tool + args preview, » thinking stream) when
- * the run is mid-tool or mid-thought — long tool calls render in full on
- * their own line instead of being truncated off the row.
+ * (label · type · model · phase · phase age · Σ total elapsed · cost),
+ * children indented under their parent (↳) via FleetRow.parentRunId, plus an
+ * indented activity line (tool trail with in-flight ▸tool + args preview +
+ * live tool duration, » thinking stream) when the run is mid-tool or
+ * mid-thought — long tool calls render in full on their own line instead of
+ * being truncated off the row.
  *
  * Same two-layer split as the panel:
  *  1. Pure line builders (`buildFleetWidgetLines`, `formatWidgetCost`) —
@@ -80,7 +81,7 @@ export interface WorkflowGroupInput {
 }
 
 /** M-C: one run's main tree-row line. M10: segment-colored when a colorizer is
- *  provided — label plain (the eye-catcher), #id/type/model/phase/elapsed/cost
+ *  provided — label plain (the eye-catcher), #id/type/model/phase/phase-age/Σ-total/cost
  *  muted — so rows have visual depth instead of a uniform white line.
  *  warn/crit rows pass the identity colorizer here and get whole-line tone
  *  coloring from the caller instead (nesting SGR sequences would reset the
@@ -90,9 +91,11 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
   const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
   const meta: string[] = [row.type ?? "·"];
   if (row.model) meta.push(row.model);
-  // Active rows show the current phase's age (phaseMs), not the run's cumulative
-  // age: 🧠思考 12s reads as "this model turn has been generating for 12s".
-  meta.push(row.phaseLabel, formatDuration(row.phaseMs));
+  // Active rows show the current phase's age (phaseMs) AND the run's total
+  // elapsed (Σ): 🧠思考 12s Σ1m05s reads as "this model turn has been
+  // generating for 12s; the whole run is 1m05s old". Tool-call timing lives
+  // on the activity line's ▸ segment (see toolTrailOf / widgetRowActivity).
+  meta.push(row.phaseLabel, formatDuration(row.phaseMs), `Σ${formatDuration(row.elapsedMs)}`);
   const parts = [name, color("muted", meta.join(" "))];
   if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
   return parts.join(" ");
@@ -104,7 +107,11 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
  *  thinking stream (`» …`, muted). undefined when the run is quiet. */
 function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): string | undefined {
   const parts: string[] = [];
-  const trail = row.toolTrail ?? (row.currentTool ? `▸${row.currentTool}` : undefined);
+  const fallbackTool =
+    row.currentTool === undefined
+      ? undefined
+      : `▸${row.currentTool}${row.currentToolMs === undefined ? "" : ` · ${formatDuration(row.currentToolMs)}`}`;
+  const trail = row.toolTrail ?? fallbackTool;
   if (trail) {
     const idx = trail.indexOf("▸");
     parts.push(idx >= 0 ? trail.slice(0, idx) + color("header", trail.slice(idx)) : trail);
@@ -168,7 +175,7 @@ function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): st
  *   crit→warn→none from buildFleetViewModel).
  * - Lines 2..: runs in tree order — mark (! warn / ✗ crit), depth indent,
  *   `↳` for nested rows. Each run takes 1–2 lines: the main row (label /
- *   type / model / phase / elapsed / cost) plus, when mid-tool or
+ *   type / model / phase / phase age / Σ total elapsed / cost) plus, when mid-tool or
  *   mid-thought, an indented activity line (tool trail with in-flight
  *   ▸tool + args preview, and/or the » thinking stream) so long tool calls
  *   render in full instead of being truncated off the row. maxRows is a
