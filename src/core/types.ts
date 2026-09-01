@@ -174,7 +174,8 @@ export type DriverEvent =
   | { t: "compaction_start"; reason: string }
   | { t: "compaction_end"; aborted: boolean }
   | { t: "settled" }
-  | { t: "text_delta"; delta: string };
+  | { t: "text_delta"; delta: string }
+  | { t: "thinking_delta"; delta: string };
 export interface RunOutcome {
   runId: RunId;
   status: Extract<RunStatus, "completed" | "failed" | "timed_out" | "aborted">;
@@ -242,6 +243,14 @@ export interface RunDiagnostics {
   deliveryKey?: string;
   lastWarn?: string;
   text?: string;
+  /**
+   * Display-only tail of the model's in-progress thinking (reasoning) stream
+   * for the current turn — the agent tree's `»` preview line. Accumulated
+   * from thinking_delta events, hard-capped (state-machine THINKING_TEXT_CAP),
+   * and cleared when the turn's answer text starts streaming (text_delta) so
+   * the preview falls back to the answer. Never fed back to a model.
+   */
+  thinkingText?: string;
   /** Persisted pi session used by X2 resume. */
   sessionFile?: string;
 }

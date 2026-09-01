@@ -186,3 +186,41 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.usageTotal?.costUsd).toBeCloseTo(0.003, 10);
   });
 });
+
+describe("view-model: streamLine (» thinking/answer preview)", () => {
+  const opts = { now: 10_000, idleBudgetMs: 1000 };
+
+  it("prefers the live thinking stream during model_turn", () => {
+    const s = snapshot({ diag: diag({ thinkingText: "planning\nlet me check the code", text: "stale answer" }) });
+    const row = buildFleetViewModel([s], opts).rows[0]!;
+    expect(row.streamLine).toBe("let me check the code");
+  });
+
+  it("falls back to the answer text when no thinking is buffered", () => {
+    const s = snapshot({ diag: diag({ text: "the answer is 42" }) });
+    const row = buildFleetViewModel([s], opts).rows[0]!;
+    expect(row.streamLine).toBe("the answer is 42");
+  });
+
+  it("is suppressed outside model_turn and for terminal runs", () => {
+    const toolExec = snapshot({
+      runId: "tool-0000",
+      phase: "tool_exec",
+      diag: diag({ thinkingText: "hmm" }),
+    });
+    const done = snapshot({
+      runId: "done-0000",
+      status: "completed",
+      phase: "settled",
+      diag: diag({ thinkingText: "hmm" }),
+    });
+    const model = buildFleetViewModel([toolExec, done], { ...opts, recentTerminal: 1 });
+    expect(model.rows.every((r) => r.streamLine === undefined)).toBe(true);
+  });
+
+  it("collapses whitespace and truncates long lines", () => {
+    const s = snapshot({ diag: diag({ thinkingText: `  a   b\n${"z".repeat(100)}  ` }) });
+    const row = buildFleetViewModel([s], opts).rows[0]!;
+    expect(row.streamLine).toBe(`${"z".repeat(59)}…`);
+  });
+});

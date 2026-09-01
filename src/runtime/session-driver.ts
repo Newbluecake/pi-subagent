@@ -127,8 +127,21 @@ function mapEvent(e: any): DriverEvent | undefined {
   if (t === "compaction_start") return { t: "compaction_start", reason: String(e.reason) };
   if (t === "compaction_end") return { t: "compaction_end", aborted: Boolean(e.aborted) };
   if (t === "agent_settled") return { t: "settled" };
-  if (t === "message_update" && typeof e.message?.content === "string")
-    return { t: "text_delta", delta: e.message.content };
+  if (t === "message_update") {
+    // pi streams token-by-token via assistantMessageEvent (pi-ai
+    // AssistantMessageEvent): text_delta carries answer text, thinking_delta
+    // carries the reasoning stream — the agent tree's `»` preview line feeds
+    // on both. The assistant message's own `content` is a block array
+    // (TextContent | ThinkingContent | ToolCall), never a string, so reading
+    // deltas off `message` directly sees nothing.
+    const ae = e.assistantMessageEvent;
+    if (ae?.type === "thinking_delta" && typeof ae.delta === "string") return { t: "thinking_delta", delta: ae.delta };
+    if (ae?.type === "text_delta" && typeof ae.delta === "string") return { t: "text_delta", delta: ae.delta };
+    // Legacy fallback: non-assistant messages (e.g. user) can carry a plain
+    // string content.
+    if (typeof e.message?.content === "string") return { t: "text_delta", delta: e.message.content };
+    return undefined;
+  }
   return undefined;
 }
 

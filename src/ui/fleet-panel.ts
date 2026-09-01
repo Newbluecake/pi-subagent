@@ -248,9 +248,12 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     label: snapshot.diag.label,
     model: formatModelRef(snapshot.diag.model),
     toolTrail: toolTrailOf(snapshot.diag),
+    // The `»` preview prefers the live thinking stream; state-machine clears
+    // thinkingText the moment the turn's answer text starts streaming, so
+    // the fallback to diag.text covers the answer phase of the same turn.
     streamLine:
       !isTerminalStatus(snapshot.status) && snapshot.phase === "model_turn"
-        ? lastTextLine(snapshot.diag.text)
+        ? (lastTextLine(snapshot.diag.thinkingText) ?? lastTextLine(snapshot.diag.text))
         : undefined,
     parentRunId: snapshot.parentRunId,
     phaseLabel: phaseLabel(snapshot.phase, snapshot.diag),

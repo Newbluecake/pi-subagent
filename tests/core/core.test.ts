@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, remainingFor, withDeadline } from "../../src/core/deadline.js";
 import { FakeClock } from "../../src/core/clock.js";
-import { createInitialState, INPUT_KINDS, RUN_PHASES, reduce } from "../../src/core/state-machine.js";
+import {
+  createInitialState,
+  INPUT_KINDS,
+  RUN_PHASES,
+  reduce,
+  THINKING_TEXT_CAP,
+} from "../../src/core/state-machine.js";
 import type { RunEffect, RunInput, RunPhase, RunState, RunStatus, TimerId } from "../../src/core/types.js";
 
 const budget = { ...DEFAULT_BUDGET, totalMs: 100, queueWaitMs: 20 };
@@ -1740,5 +1746,48 @@ describe("turn counter (regression: turns was always 0)", () => {
     expect(s.diag.turns).toBe(3);
     const out = reduce(s, { generation: 1, input: { kind: "prompt_settled", at: 10 } }, budget);
     expect(out.state.outcome?.turns).toBe(3);
+  });
+});
+
+describe("thinking stream (thinking_delta → diag.thinkingText)", () => {
+  function inModelTurn(): RunState {
+    const s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    return apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+  }
+  it("accumulates thinking deltas into diag.thinkingText (not diag.text)", () => {
+    let s = inModelTurn();
+    s = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "let me " } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "think" } }).state;
+    expect(s.diag.thinkingText).toBe("let me think");
+    expect(s.diag.text).toBeUndefined();
+    expect(s.diag.lastEventType).toBe("thinking_delta");
+  });
+  it("text_delta clears the thinking preview and accumulates answer text", () => {
+    let s = inModelTurn();
+    s = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "hmm" } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "answer" } }).state;
+    expect(s.diag.text).toBe("answer");
+    expect(s.diag.thinkingText).toBeUndefined();
+  });
+  it("caps the thinking tail at THINKING_TEXT_CAP", () => {
+    let s = inModelTurn();
+    s = apply(s, {
+      kind: "session_event",
+      event: { t: "thinking_delta", delta: `head${"x".repeat(THINKING_TEXT_CAP)}` },
+    }).state;
+    expect(s.diag.thinkingText).toHaveLength(THINKING_TEXT_CAP);
+    expect(s.diag.thinkingText!.startsWith("head")).toBe(false);
+  });
+  it("rejects thinking deltas in queue_wait as illegal", () => {
+    const r = apply(enqueued(), { kind: "session_event", event: { t: "thinking_delta", delta: "x" } });
+    expect(r.state.diag.lastWarn).toBe("illegal:session_event");
+    expect(r.state.diag.thinkingText).toBeUndefined();
+  });
+  it("keeps collecting late thinking deltas while stopping (abort_grace)", () => {
+    let s = inModelTurn();
+    s = apply(s, { kind: "stop_requested", cause: "parent_abort" }).state;
+    expect(s.phase).toBe("abort_grace");
+    const r = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "late" } });
+    expect(r.state.diag.thinkingText).toBe("late");
   });
 });

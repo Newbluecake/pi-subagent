@@ -46,6 +46,37 @@ function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undef
 export const TOOL_HISTORY_CAP = 30;
 
 /**
+ * Display-only cap for RunDiagnostics.thinkingText (the agent tree's `»`
+ * thinking preview). Thinking streams can run to thousands of tokens; only
+ * the freshest tail is signal, so keep the last THINKING_TEXT_CAP chars —
+ * enough for lastTextLine to find a full line, small enough that
+ * persist_snapshot stays cheap.
+ */
+export const THINKING_TEXT_CAP = 4000;
+
+/** Append a thinking_delta to the capped tail (see THINKING_TEXT_CAP). */
+function appendThinkingText(prev: string | undefined, delta: string): string {
+  const next = (prev ?? "") + delta;
+  return next.length > THINKING_TEXT_CAP ? next.slice(next.length - THINKING_TEXT_CAP) : next;
+}
+
+/**
+ * Fold a text_delta/thinking_delta into a diag copy: answer text accumulates
+ * into `text` (and clears the turn's thinking preview — the answer is the
+ * fresher stream), thinking accumulates into the capped `thinkingText` tail.
+ */
+function streamPatch(diag: RunDiagnostics, e: { t: "text_delta" | "thinking_delta"; delta: string }): RunDiagnostics {
+  const d = { ...diag };
+  if (e.t === "text_delta") {
+    d.text = (diag.text ?? "") + e.delta;
+    delete d.thinkingText;
+  } else {
+    d.thinkingText = appendThinkingText(diag.thinkingText, e.delta);
+  }
+  return d;
+}
+
+/**
  * M-A: fold a tool_start/tool_end driver event into the diag's tool trail.
  * Runs for *every* observed tool event regardless of phase (parallel tool
  * calls can start while the run is already in tool_exec; the phase branches
@@ -298,13 +329,17 @@ function terminalUpdate(state: RunState, input: RunInput): { state: RunState; ef
   if (input.kind === "session_event") {
     d.lastEventAt = input.at;
     d.lastEventType = input.event.t;
-    if (input.event.t === "text_delta") {
-      d.text = (d.text ?? "") + input.event.delta;
-      if (state.outcome)
+    if (input.event.t === "text_delta" || input.event.t === "thinking_delta") {
+      const patched = streamPatch(d, input.event);
+      if (input.event.t === "text_delta" && state.outcome) {
+        // streamPatch just accumulated the delta — text is definitely set.
+        const text = patched.text!;
         return {
-          state: { ...state, diag: d, outcome: { ...state.outcome, text: d.text, diag: d } },
+          state: { ...state, diag: patched, outcome: { ...state.outcome, text, diag: patched } },
           effects: [],
         };
+      }
+      return { state: { ...state, diag: patched }, effects: [] };
     }
     // X9: usage must keep accumulating even after the run has settled (a
     // trailing message_end can still arrive while abort/reap teardown is in
@@ -498,9 +533,8 @@ export function reduce(
     };
     if (state.phase === "abort_grace" || state.phase === "reap") {
       const diag = {
-        ...state.diag,
+        ...(e.t === "text_delta" || e.t === "thinking_delta" ? streamPatch(state.diag, e) : state.diag),
         ...base,
-        ...(e.t === "text_delta" ? { text: (state.diag.text ?? "") + e.delta } : {}),
       };
       return {
         state:
@@ -510,10 +544,10 @@ export function reduce(
         effects: [],
       };
     }
-    if (e.t === "text_delta") {
+    if (e.t === "text_delta" || e.t === "thinking_delta") {
       if (state.phase === "queue_wait") return illegal(state, input);
       return {
-        state: { ...state, diag: { ...state.diag, ...base, text: (state.diag.text ?? "") + e.delta } },
+        state: { ...state, diag: { ...streamPatch(state.diag, e), ...base } },
         effects: [],
       };
     }

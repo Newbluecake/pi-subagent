@@ -63,3 +63,44 @@ describe("session-driver mapEvent: usage mapping (pi Usage → UsageDelta)", () 
     }
   });
 });
+
+describe("session-driver mapEvent: message_update streaming (assistantMessageEvent)", () => {
+  it("maps thinking_delta to a thinking_delta driver event", () => {
+    const ev = mapEvent({
+      type: "message_update",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: "let me" }] },
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "let me" },
+    });
+    expect(ev).toEqual({ t: "thinking_delta", delta: "let me" });
+  });
+
+  it("maps text_delta to a text_delta driver event (block-array content never matches the legacy string check)", () => {
+    const ev = mapEvent({
+      type: "message_update",
+      message: { role: "assistant", content: [{ type: "text", text: "hello" }] },
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hello" },
+    });
+    expect(ev).toEqual({ t: "text_delta", delta: "hello" });
+  });
+
+  it("ignores non-delta assistant events (thinking_start/text_end/toolcall_delta…)", () => {
+    for (const ae of [
+      { type: "thinking_start", contentIndex: 0 },
+      { type: "thinking_end", contentIndex: 0, content: "done" },
+      { type: "text_start", contentIndex: 0 },
+      { type: "toolcall_delta", contentIndex: 0, delta: "{}" },
+    ]) {
+      const ev = mapEvent({
+        type: "message_update",
+        message: { role: "assistant", content: [] },
+        assistantMessageEvent: ae,
+      });
+      expect(ev).toBeUndefined();
+    }
+  });
+
+  it("keeps the legacy plain-string content fallback (non-assistant messages)", () => {
+    const ev = mapEvent({ type: "message_update", message: { content: "plain" } });
+    expect(ev).toEqual({ t: "text_delta", delta: "plain" });
+  });
+});
