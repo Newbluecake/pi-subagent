@@ -213,7 +213,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       if (req.deadlineAt !== undefined && req.deadlineAt <= now())
         return { error: { kind: "config", message: "deadlineAt already expired", retryable: false } };
       const config = deps.types.get(req.type);
-      if (!config) return { error: { kind: "config", message: `unknown agent type: ${req.type}`, retryable: false } };
+      if (!config) {
+        // Self-correcting error: list the valid names so a model that missed
+        // (or predates) the system-prompt type section recovers in one turn
+        // instead of burning turns on trial-and-error guesses.
+        const known = deps.types.list().map((t) => t.name);
+        const hint = known.length ? `Valid types: ${known.join(", ")}` : "No agent types are registered.";
+        return { error: { kind: "config", message: `unknown agent type: ${req.type}. ${hint}`, retryable: false } };
+      }
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
       // nested chains produced by the injected nested Agent tool, whose
       // parentRunId always names a currently-tracked, still-running entry

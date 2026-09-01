@@ -45,7 +45,13 @@ describe("SpawnService", () => {
       }),
       types: { get: () => undefined, list: () => [], reload: async () => ({ types: [], errors: [] }) },
     }).spawn({ type: "missing", prompt: "x" });
-    expect(result).toEqual({ error: { kind: "config", message: "unknown agent type: missing", retryable: false } });
+    expect(result).toEqual({
+      error: {
+        kind: "config",
+        message: "unknown agent type: missing. No agent types are registered.",
+        retryable: false,
+      },
+    });
     expect(called).toBe(false);
   });
   it("passes slotless nested requests and returns the runner outcome", async () => {

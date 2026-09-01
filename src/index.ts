@@ -84,6 +84,13 @@ export default function activate(pi: ExtensionAPI): void {
   // H2 fan-out hit a dead worktree extension and crashed the run).
   const extensionPoints: SubagentExtensionPoints[] = [wireWorktree(pi, settings)];
   const types = createAgentTypeRegistry();
+  // Eager warm-up: session_start's awaited reload() is authoritative, but a
+  // prompt injected before it completes (or a session flow that skips it)
+  // would otherwise see an empty registry — no prompt section AND every
+  // spawn rejected as "unknown agent type". Fire-and-forget is safe:
+  // reload() never throws (per-file errors are collected) and a concurrent
+  // session_start reload just re-assigns the same result.
+  void types.reload();
   const caps = detectPiCapabilities(pi);
   const compat = assertCompatible(caps);
   const holder: { current?: Stack } = {};
