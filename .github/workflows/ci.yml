@@ -12,7 +12,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22]
+        # fs.globSync (session-driver) is Node 22+; package.json engines pins this too
+        node-version: [22]
     steps:
       - uses: actions/checkout@v4
 

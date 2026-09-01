@@ -12,6 +12,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.en.md",
     "LICENSE",
     "CHANGELOG.md"
   ],
@@ -57,5 +58,8 @@
     "test:watch": "vitest",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
