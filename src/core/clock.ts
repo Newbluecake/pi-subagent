@@ -9,7 +9,16 @@ export interface Clock {
 /** The real wall-clock Clock implementation, backed by setTimeout (index.ts wiring; FakeClock is test-only). */
 export const systemClock: Clock = {
   now: () => Date.now(),
-  setTimer: (delayMs, fn) => ({ id: setTimeout(fn, Math.max(0, delayMs)) as unknown as number }),
+  setTimer: (delayMs, fn) => {
+    // unref: extension timers must never keep the host process alive — in
+    // `pi -p` (print mode) nothing else holds the event loop after the turn
+    // completes, and a ref'd 1s tick (FleetWidgetController) wedges exit
+    // indefinitely. Interactive sessions are held open by pi's own UI/stdin,
+    // so unref is a no-op there.
+    const t = setTimeout(fn, Math.max(0, delayMs));
+    (t as { unref?: () => void }).unref?.();
+    return { id: t as unknown as number };
+  },
   clearTimer: (h) => clearTimeout(h.id as unknown as ReturnType<typeof setTimeout>),
 };
 
