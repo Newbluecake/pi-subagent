@@ -43,8 +43,12 @@ export interface FleetRow {
   phaseLabel: string;
   status: RunStatus;
   phase: RunPhase;
-  /** now - diag.createdAt, clamped ≥ 0. */
+  /** Total run age: now - diag.createdAt, clamped ≥ 0. Used for sorting and terminal rows. */
   elapsedMs: Millis;
+  /** Current-phase age: now - diag.phaseEnteredAt, clamped ≥ 0. Active rows display this
+   *  next to the phase label, so 🧠思考 shows how long THIS model turn has been running
+   *  (resets on every phase transition) instead of the run's cumulative age. */
+  phaseMs: Millis;
   /** now - (diag.lastEventAt ?? diag.phaseEnteredAt), clamped ≥ 0 — the hang signal. */
   idleMs: Millis;
   currentTool: string | undefined;
@@ -194,10 +198,12 @@ export function toolTrailOf(diag: Pick<RunDiagnostics, "toolHistory">, maxTokens
   let running: string | undefined;
   for (const r of history) {
     if (r.endedAt === undefined) {
-      // keep the latest in-flight call, with a short args preview when present
+      // keep the latest in-flight call, with an args preview when present.
+      // 60 chars: long enough to identify the file in `edit/write <path>` or the
+      // command in `bash <cmd>` — the preview's whole point — without wrapping.
       const preview = r.argsPreview
-        ? r.argsPreview.length > 30
-          ? `${r.argsPreview.slice(0, 29)}…`
+        ? r.argsPreview.length > 60
+          ? `${r.argsPreview.slice(0, 59)}…`
           : r.argsPreview
         : undefined;
       running = preview ? `${r.name} ${preview}` : r.name;
@@ -251,6 +257,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     status: snapshot.status,
     phase: snapshot.phase,
     elapsedMs: Math.max(0, opts.now - snapshot.diag.createdAt),
+    phaseMs: Math.max(0, opts.now - snapshot.diag.phaseEnteredAt),
     idleMs: idleOf(snapshot, opts.now),
     currentTool: terminal ? undefined : snapshot.diag.currentTool?.name,
     escalation: esc.text,

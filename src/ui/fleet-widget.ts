@@ -90,7 +90,9 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
   const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
   const meta: string[] = [row.type ?? "·"];
   if (row.model) meta.push(row.model);
-  meta.push(row.phaseLabel, formatDuration(row.elapsedMs));
+  // Active rows show the current phase's age (phaseMs), not the run's cumulative
+  // age: 🧠思考 12s reads as "this model turn has been generating for 12s".
+  meta.push(row.phaseLabel, formatDuration(row.phaseMs));
   const parts = [name, color("muted", meta.join(" "))];
   if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
   return parts.join(" ");

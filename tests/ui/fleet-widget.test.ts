@@ -13,7 +13,7 @@ import {
 } from "../../src/ui/fleet-widget.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
-  return {
+  const base: RunDiagnostics = {
     createdAt: 0,
     phase: "model_turn",
     phaseEnteredAt: 0,
@@ -27,6 +27,12 @@ function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
     unkillable: [],
     ...overrides,
   };
+  // Fixtures that only override createdAt mean "the run has been in this phase since
+  // creation" — keep phaseEnteredAt aligned so rows display the expected duration.
+  if (overrides.createdAt !== undefined && overrides.phaseEnteredAt === undefined) {
+    base.phaseEnteredAt = overrides.createdAt;
+  }
+  return base;
 }
 
 function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
@@ -162,6 +168,25 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines.find((l) => l.includes("completed"))).not.toContain("»");
   });
 
+  it("active row shows the current phase's age (phaseMs), not the run's cumulative age", () => {
+    const run = snapshot({
+      diag: diag({ createdAt: 0, phaseEnteredAt: 9_000, lastEventAt: 9_900 }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
+    expect(lines[1]).toBe("  aaaaaaaa · 🧠思考 1s"); // 10s cumulative, 1s in this model turn
+  });
+
+  it("tool trail: in-flight edit shows which file is being edited (path preview)", () => {
+    const editing = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        toolHistory: [{ name: "edit", toolCallId: "a", startedAt: 9_900, argsPreview: "src/ui/fleet-panel.ts" }],
+      }),
+    });
+    expect(buildFleetWidgetLines(buildFleetViewModel([editing], OPTS))![2]).toBe("  ▸edit src/ui/fleet-panel.ts");
+  });
+
   it("tool trail: in-flight call carries a truncated args preview", () => {
     const withPreview = snapshot({
       diag: diag({
@@ -182,7 +207,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([longPreview], OPTS))![2]).toContain(
-      "▸bash " + "y".repeat(29) + "…",
+      "▸bash " + "y".repeat(59) + "…",
     );
   });
 
