@@ -9,6 +9,7 @@ import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
+import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
@@ -205,6 +206,15 @@ export function buildSessionStack(
     runner,
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
+    // Fuzzy model hints (frontmatter `model: sonnet`, Agent tool
+    // `model: "kimi-k3"`) resolve against pi's available models —
+    // getAvailable() already filters to authenticated/usable entries, so a
+    // hint can never land on a model the session couldn't actually run.
+    resolveModelHint: (hint) =>
+      resolveModelHint(
+        hint,
+        ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
+      ),
     onLabel: (label, target) => mentionRef.current?.register(label, target),
     onSnapshot: (snapshot) => {
       // M-D: announce a run exactly once, as soon as it has actually started

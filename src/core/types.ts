@@ -89,6 +89,14 @@ export interface AgentTypeConfig {
   promptMode: "replace" | "append";
   tools?: string[];
   model?: { provider: string; id: string };
+  /**
+   * Raw frontmatter `model:` value when it is NOT a strict `provider/id`
+   * pair — a fuzzy hint (bare id or substring alias, e.g. "sonnet"),
+   * resolved against pi's available models at spawn admission
+   * (src/config/model-hint.ts). `model` (strict pair) and `modelHint` are
+   * mutually exclusive per type; a strict pair never needs resolving.
+   */
+  modelHint?: string;
   thinkingLevel?: ThinkingLevel;
   maxTurns?: number;
   color?: string;
@@ -113,6 +121,13 @@ export interface SpawnRequest {
   label?: string;
   cwd?: string;
   modelOverride?: { provider: string; id: string };
+  /**
+   * Free-form Agent tool `model` param value that is not a strict
+   * `provider/id` pair — resolved as a fuzzy hint at spawn admission.
+   * Takes precedence over the agent type's `modelHint`, loses to a strict
+   * `modelOverride`/`config.model` pair.
+   */
+  modelHintOverride?: string;
   /**
    * Per-spawn thinking-level override (Agent tool `thinking` param): takes
    * precedence over the agent type's configured `thinkingLevel` when set;

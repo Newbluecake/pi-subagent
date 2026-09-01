@@ -59,6 +59,13 @@ export interface SpawnServiceDeps {
   tombstones?: TombstoneStore;
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Default 3. */
   maxNestedDepth?: number;
+  /**
+   * Fuzzy model-hint resolution (frontmatter `model:` non-pair value or the
+   * Agent tool's free-form `model` param), wired in stack.ts over pi's
+   * model registry. Undefined = hints cannot resolve and are rejected with
+   * a config error (fail-closed, never silently inherited).
+   */
+  resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
 }
 export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { snapshots(): readonly RunSnapshot[] } {
   const now = deps.now ?? (() => Date.now());
@@ -135,6 +142,10 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     budget: DeadlineBudget,
     resumeLockKeys: readonly string[] = [],
     depth = 0,
+    // Resolved at spawn admission (strict pair or fuzzy hint, request
+    // override winning over the type's config) — start() itself never
+    // re-derives it from req/config.
+    model?: { provider: string; id: string },
   ) => {
     running.add(runId);
     try {
@@ -145,7 +156,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         // a deterministic one instead of a label fallback.
         request: { ...req, runId },
         ...(req.cwd ? { cwd: req.cwd } : {}),
-        ...((req.modelOverride ?? config.model) ? { model: req.modelOverride ?? config.model } : {}),
+        ...(model ? { model } : {}),
         budget,
         depth,
       };
@@ -220,6 +231,29 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         const known = deps.types.list().map((t) => t.name);
         const hint = known.length ? `Valid types: ${known.join(", ")}` : "No agent types are registered.";
         return { error: { kind: "config", message: `unknown agent type: ${req.type}. ${hint}`, retryable: false } };
+      }
+      // Model-hint admission check (fuzzy frontmatter `model:` / Agent tool
+      // `model` param). Strict provider/id pairs pass through untouched and
+      // are validated later by the session driver's registry lookup; only
+      // hints need resolving here, and an unresolvable hint is rejected
+      // BEFORE any mutable state write (same admission discipline as the
+      // resume/CC4 checks) instead of settling as a failed run — and never
+      // silently downgraded to the parent/default model.
+      let admittedModel = req.modelOverride ?? config.model;
+      if (!admittedModel) {
+        const modelHint = req.modelHintOverride ?? config.modelHint;
+        if (modelHint) {
+          const resolved = deps.resolveModelHint?.(modelHint);
+          if (!resolved)
+            return {
+              error: {
+                kind: "config",
+                message: `unknown model hint: "${modelHint}" — pass a strict provider/id, or a bare id/substring of an available model (pi /model lists what's available)`,
+                retryable: false,
+              },
+            };
+          admittedModel = resolved;
+        }
       }
       // X3: nesting depth + canSpawn whitelist. Authoritative for real
       // nested chains produced by the injected nested Agent tool, whose
@@ -307,7 +341,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         siblings.add(runId);
         childrenOf.set(req.parentRunId, siblings);
       }
-      void start(resolvedReq, runId, config, budget, lockKeys, depth);
+      void start(resolvedReq, runId, config, budget, lockKeys, depth, admittedModel);
       return { runId };
     },
     async spawnAndWait(req) {

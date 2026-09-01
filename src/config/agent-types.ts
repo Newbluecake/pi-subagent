@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { THINKING_LEVELS, type AgentTypeConfig, type AgentTypeName, type ThinkingLevel } from "../core/types.js";
+import { parseStrictModelRef } from "./model-hint.js";
 
 export interface AgentTypeRegistry {
   reload(): Promise<{ types: AgentTypeConfig[]; errors: Array<{ path: string; error: string }> }>;
@@ -42,6 +43,7 @@ function configHashInput(config: AgentTypeConfig): Record<string, unknown> {
     promptMode: config.promptMode,
     tools: config.tools,
     model: config.model,
+    modelHint: config.modelHint,
     thinkingLevel: config.thinkingLevel,
     maxTurns: config.maxTurns,
     canSpawn: config.canSpawn,
@@ -96,19 +98,19 @@ function parseFile(text: string, path: string): AgentTypeConfig {
           .map((x) => x.trim())
           .filter(Boolean)
       : undefined;
-  const model =
-    typeof fields.model === "string" && fields.model.includes("/")
-      ? (() => {
-          const [provider, id] = fields.model.split("/", 2);
-          return provider && id ? { provider, id } : undefined;
-        })()
-      : undefined;
+  // `model:` accepts a strict `provider/id` pair (used verbatim at spawn)
+  // or a fuzzy hint ("sonnet", "kimi-k3") kept raw and resolved against
+  // pi's available models at spawn admission (model-hint.ts) — same
+  // contract as upstream @tintinweb/pi-subagents' frontmatter.
+  const modelRaw = typeof fields.model === "string" ? fields.model.trim() : undefined;
+  const modelPair = modelRaw ? parseStrictModelRef(modelRaw) : undefined;
   const promptMode = fields.prompt_mode === "replace" ? "replace" : "append";
   const config: AgentTypeConfig = { name, description, systemPrompt: body, promptMode, sourcePath: path };
   if (typeof fields.display_name === "string") config.displayName = fields.display_name;
   if (tools?.length) config.tools = tools;
   if (canSpawn?.length) config.canSpawn = canSpawn;
-  if (model) config.model = model;
+  if (modelPair) config.model = modelPair;
+  else if (modelRaw) config.modelHint = modelRaw;
   if (typeof fields.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(fields.thinking))
     config.thinkingLevel = fields.thinking as ThinkingLevel;
   if (typeof fields.max_turns === "number") config.maxTurns = fields.max_turns;
@@ -189,7 +191,10 @@ export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): st
   const lines = types.map((t) => {
     const desc = t.description.replace(/\s+/g, " ").trim();
     const clipped = desc.length > 200 ? `${desc.slice(0, 197)}...` : desc;
-    return `- ${t.name}: ${clipped}`;
+    // Surface a pinned model (strict pair or fuzzy hint) so the calling
+    // model knows the type's default and only passes `model` to override.
+    const pinned = t.model ? `${t.model.provider}/${t.model.id}` : t.modelHint;
+    return `- ${t.name}: ${clipped}${pinned ? ` (model: ${pinned})` : ""}`;
   });
   return [
     "## Available subagent types (pi-subagent)",

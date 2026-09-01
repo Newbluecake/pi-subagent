@@ -25,6 +25,23 @@ describe("agent config", () => {
     expect(mergeBudget({ totalMs: 10 }, { idleMs: 20 })).toMatchObject({ totalMs: 10, idleMs: 20, startupMs: 30_000 });
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);
   });
+  it("parses frontmatter model: strict pairs into model, fuzzy values into modelHint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-hint-"));
+    await mkdir(join(root, ".pi/agents"), { recursive: true });
+    await writeFile(
+      join(root, ".pi/agents/strict.md"),
+      "---\nname: strict\ndescription: d\nmodel: moonshot/kimi-k3\n---\nbody\n",
+    );
+    await writeFile(join(root, ".pi/agents/fuzzy.md"), "---\nname: fuzzy\ndescription: d\nmodel: sonnet\n---\nbody\n");
+    const registry = createAgentTypeRegistry(root, join(root, "home"));
+    await registry.reload();
+    expect(registry.get("strict")?.model).toEqual({ provider: "moonshot", id: "kimi-k3" });
+    expect(registry.get("strict")?.modelHint).toBeUndefined();
+    expect(registry.get("fuzzy")?.modelHint).toBe("sonnet");
+    expect(registry.get("fuzzy")?.model).toBeUndefined();
+    // modelHint is part of the behavior hash — editing the hint must change it.
+    expect(registry.configHashOf("fuzzy")).not.toBe(registry.configHashOf("strict"));
+  });
 });
 
 describe("built-in agent types", () => {

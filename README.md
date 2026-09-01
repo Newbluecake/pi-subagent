@@ -10,14 +10,14 @@
 
 ## 功能
 
-- **`Agent` 工具** —— 发起有边界的 subagent run:`description`、`prompt`、`subagent_type`,可选 `model` 覆盖(`provider/id`)、`run_in_background`、`resume`(续跑已结束的会话)、`isolation: "worktree"`(每个 run 一个 git worktree)、`timeout_ms`、`schema`(结构化输出,经 schema 校验)。
+- **`Agent` 工具** —— 发起有边界的 subagent run:`description`、`prompt`、`subagent_type`,可选 `model` 覆盖(严格 `provider/id` 或模糊 hint,如 `sonnet`、`kimi-k3`,按 pi 可用模型解析)、`run_in_background`、`resume`(续跑已结束的会话)、`isolation: "worktree"`(每个 run 一个 git worktree)、`timeout_ms`、`schema`(结构化输出,经 schema 校验)。
 - **`get_subagent_result`** —— 默认非阻塞轮询;`wait: true` + `wait_ms` 为有界阻塞。
 - **`steer_subagent`** —— 向运行中的子 agent 发送追加指令。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
 - **Agent tree 组件** —— run 活跃期间常驻编辑器上方(见下文)。
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
 - **成本核算** —— 每个 run 的用量汇入 pi 的会话总计;`/agent costs` 查看明细。
-- **Agent 类型** —— 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义;注入系统提示词,让模型知道合法的 `subagent_type` 取值。
+- **Agent 类型** —— 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义;注入系统提示词,让模型知道合法的 `subagent_type` 取值。frontmatter `model:` 支持严格 `provider/id` 或模糊 hint(如 `sonnet`)。
 
 ## Agent tree
 

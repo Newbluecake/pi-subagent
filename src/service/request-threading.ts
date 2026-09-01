@@ -36,6 +36,7 @@ const NOT_THREADED = [
   "label", // display/handle only, never reaches the execution layer
   "cwd", // folded into sessionSpec.cwd (and may be rewritten by H2/X1 worktree)
   "modelOverride", // already merged into RunnerSpec.model -> sessionSpec.model
+  "modelHintOverride", // resolved to a {provider,id} pair at spawn admission, then merged like modelOverride
   "thinkingOverride", // merged with type.thinkingLevel into sessionSpec.thinkingLevel by the runtime adapter
   "budgetOverride", // already merged into RunnerSpec.budget
   "isolation", // consumed by the X1 worktree extension via H2, not threaded

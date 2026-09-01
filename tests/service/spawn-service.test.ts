@@ -69,6 +69,97 @@ describe("SpawnService", () => {
   });
 });
 
+describe("SpawnService: model hints", () => {
+  const hintedType: AgentTypeConfig = { ...type, name: "hinted", modelHint: "sonnet" };
+  const hintedDeps = (
+    runner: Runner,
+    resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined,
+  ) => ({
+    ...deps(runner),
+    types: {
+      get: (n: string) => (n === "hinted" ? hintedType : type),
+      list: () => [hintedType],
+      reload: async () => ({ types: [hintedType], errors: [] }),
+    },
+    ...(resolveModelHint ? { resolveModelHint } : {}),
+  });
+  it("resolves a request-level fuzzy hint via the injected resolver", async () => {
+    let seenModel: unknown;
+    const result = await createSpawnService(
+      hintedDeps(
+        {
+          run: async (spec) => {
+            seenModel = (spec as { model?: unknown }).model;
+            return { ...outcome, runId: spec.runId };
+          },
+        },
+        (hint) => (hint === "kimi" ? { provider: "moonshot", id: "kimi-k3" } : undefined),
+      ),
+    ).spawnAndWait({ type: "worker", prompt: "x", modelHintOverride: "kimi" });
+    expect(result.status).toBe("completed");
+    expect(seenModel).toEqual({ provider: "moonshot", id: "kimi-k3" });
+  });
+  it("resolves the agent type's frontmatter modelHint when the request carries none", async () => {
+    let seenModel: unknown;
+    await createSpawnService(
+      hintedDeps(
+        {
+          run: async (spec) => {
+            seenModel = (spec as { model?: unknown }).model;
+            return { ...outcome, runId: spec.runId };
+          },
+        },
+        () => ({ provider: "cloudrouter-anthropic", id: "claude-sonnet-5" }),
+      ),
+    ).spawnAndWait({ type: "hinted", prompt: "x" });
+    expect(seenModel).toEqual({ provider: "cloudrouter-anthropic", id: "claude-sonnet-5" });
+  });
+  it("rejects an unresolvable hint at admission without invoking the runner", async () => {
+    let called = false;
+    const result = await createSpawnService(
+      hintedDeps(
+        {
+          run: async () => {
+            called = true;
+            return outcome;
+          },
+        },
+        () => undefined,
+      ),
+    ).spawn({ type: "hinted", prompt: "x" });
+    expect(called).toBe(false);
+    expect("error" in result && result.error.kind).toBe("config");
+    expect("error" in result && result.error.message).toContain('unknown model hint: "sonnet"');
+  });
+  it("fails closed when no resolver is wired", async () => {
+    const result = await createSpawnService(hintedDeps({ run: async () => outcome })).spawn({
+      type: "hinted",
+      prompt: "x",
+    });
+    expect("error" in result && result.error.message).toContain('unknown model hint: "sonnet"');
+  });
+  it("a strict modelOverride pair wins over hints and skips resolution", async () => {
+    let seenModel: unknown;
+    let resolverCalled = false;
+    await createSpawnService(
+      hintedDeps(
+        {
+          run: async (spec) => {
+            seenModel = (spec as { model?: unknown }).model;
+            return { ...outcome, runId: spec.runId };
+          },
+        },
+        () => {
+          resolverCalled = true;
+          return undefined;
+        },
+      ),
+    ).spawnAndWait({ type: "hinted", prompt: "x", modelOverride: { provider: "deepseek", id: "deepseek-v4-pro" } });
+    expect(seenModel).toEqual({ provider: "deepseek", id: "deepseek-v4-pro" });
+    expect(resolverCalled).toBe(false);
+  });
+});
+
 /**
  * CC4/CP1 (workflow design §4.4.1 F2 / CP1-a/b/c): the deadlineAt admission
  * check must be the very first statement of spawn() — strictly before any

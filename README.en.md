@@ -10,14 +10,14 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 
 ## Features
 
-- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (`provider/id`), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_ms`, and `schema` (structured, schema-validated output).
+- **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`, resolved against pi's available models), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_ms`, and `schema` (structured, schema-validated output).
 - **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
 - **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown.
-- **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values.
+- **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
 
 ## The agent tree
 

@@ -3,6 +3,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
+import { parseStrictModelRef } from "../config/model-hint.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 
@@ -117,7 +118,10 @@ export const AgentToolParams = Type.Object({
   }),
   model: Type.Optional(
     Type.String({
-      description: "Optional model override as 'provider/id'. Defaults to the agent type's configured model.",
+      description:
+        "Optional model override: a strict 'provider/id', or a fuzzy hint — bare model id ('kimi-k3') or " +
+        "case-insensitive substring alias ('sonnet', 'haiku') — resolved against pi's available models. " +
+        "Defaults to the agent type's configured model (frontmatter 'model').",
     }),
   ),
   thinking: Type.Optional(
@@ -160,10 +164,7 @@ export const AgentToolParams = Type.Object({
 export type AgentToolParams = Static<typeof AgentToolParams>;
 
 function parseModel(model?: string): { provider: string; id: string } | undefined {
-  if (!model) return undefined;
-  const idx = model.indexOf("/");
-  if (idx <= 0 || idx === model.length - 1) return undefined;
-  return { provider: model.slice(0, idx), id: model.slice(idx + 1) };
+  return model ? parseStrictModelRef(model) : undefined;
 }
 
 export function createAgentTool(deps: {
@@ -234,6 +235,10 @@ export function createAgentTool(deps: {
         prompt: params.prompt,
         label: params.description,
         ...(modelOverride ? { modelOverride } : {}),
+        // Non-pair values are fuzzy hints ("sonnet", "kimi-k3") — resolved
+        // against pi's available models at spawn admission; unresolvable
+        // hints come back as a self-correcting config error.
+        ...(!modelOverride && params.model ? { modelHintOverride: params.model } : {}),
         ...(params.thinking ? { thinkingOverride: params.thinking } : {}),
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
         ...(deps.forceSlotless ? { slotless: true } : {}),
