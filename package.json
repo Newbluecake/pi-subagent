@@ -10,6 +10,7 @@
   "homepage": "https://github.com/Newbluecake/pi-subagent#readme",
   "bugs": "https://github.com/Newbluecake/pi-subagent/issues",
   "files": [
+    "index.js",
     "dist",
     "README.md",
     "README.en.md",
@@ -23,7 +24,7 @@
   "main": "dist/index.js",
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./index.js"
     ]
   },
   "exports": {

@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fuzzy model hints** (parity with upstream @tintinweb/pi-subagents) — agent
+  frontmatter `model:` and the Agent tool's `model` param now accept a bare model
+  id (`kimi-k3`) or a case-insensitive substring alias (`sonnet`, `haiku`) in
+  addition to a strict `provider/id`, resolved against pi's available models at
+  spawn admission (`src/config/model-hint.ts`; matching tiers: strict pair →
+  exact id → id prefix → id substring → display-name substring, candidate order
+  breaks ties). Unresolvable hints are rejected with a self-correcting config
+  error before any state write — never silently downgraded to the parent/default
+  model. Pinned models are shown in the injected "Available subagent types"
+  prompt section, and `modelHint` participates in the agent-type config hash so
+  editing a hint correctly misses workflow journal replays.
+
 ### Fixed
+
+- **Extension shows as "pi-subagent/index.js" in pi's resource list** — pi names
+  package extension items after the entry file's location
+  (`<parentDir>/<fileName>`), so the old `./dist/index.js` entry displayed as
+  "dist/index.js". The `pi.extensions` entry now points at a thin package-root
+  `index.js` re-export; the compiled implementation still lives in `dist/`.
 
 - **Sub-phase deadline enforcement is real now** — the `EventWatchdog` was constructed with
   `getState`/`dispatch` no-op stubs ("M1 documented limitation"), so `idleMs`, `firstEventMs`,
