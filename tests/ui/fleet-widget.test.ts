@@ -113,7 +113,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🧠思考 1s Σ1s",
-      "  bash×2 ▸edit · 9s",
+      " ╰ bash×2 ▸edit · 9s",
     ]);
     const withTool = snapshot({
       diag: diag({
@@ -124,7 +124,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🧠思考 1s Σ1s",
-      "  ▸bash · 100ms",
+      " ╰ ▸bash · 100ms",
     ]);
   });
 
@@ -159,7 +159,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🧠思考 1s Σ1s",
-      "  » 然后看一下代码结构，重点关注调度模块",
+      " ╰ » 然后看一下代码结构，重点关注调度模块",
     ]);
     // a long line is truncated with an ellipsis
     const long = snapshot({
@@ -179,7 +179,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([tooling], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🔧工具 1s Σ1s",
-      "  ▸bash · 100ms",
+      " ╰ ▸bash · 100ms",
     ]);
     // terminal rows never stream
     const done = snapshot({
@@ -209,7 +209,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([editing], OPTS))![2]).toBe(
-      "  ▸edit src/ui/fleet-panel.ts · 100ms",
+      " ╰ ▸edit src/ui/fleet-panel.ts · 100ms",
     );
   });
 
@@ -223,7 +223,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🧠思考 1s Σ1s",
-      "  ▸bash npm test -- --runInBand · 100ms",
+      " ╰ ▸bash npm test -- --runInBand · 100ms",
     ]);
     const longPreview = snapshot({
       diag: diag({
@@ -304,6 +304,25 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[2]).toContain("calm-000");
     expect(lines[2]).toContain("[muted]· 🧠思考");
     expect(lines[2]).not.toContain("[crit]");
+  });
+
+  it("boundary: a calm run's activity line is muted except the in-flight ▸ segment (main rows stay the anchors)", () => {
+    const busy = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        toolHistory: [
+          { name: "read", toolCallId: "a", startedAt: 9_000, endedAt: 9_100 },
+          { name: "bash", toolCallId: "b", startedAt: 9_900, argsPreview: "npm test" },
+        ],
+      }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([busy], OPTS), {
+      color: (tone, text) => `[${tone}]${text}`,
+    })!;
+    // ╰ hook under the mark column + muted trail, ▸ in-flight stays accent
+    expect(lines[2]).toBe(" ╰ [muted]read [header]▸bash npm test · 100ms");
+    expect(lines[1]).not.toContain("[muted]aaaa"); // main row label stays un-muted (bright anchor)
   });
 
   it("marks: ✗ crit, ! warn, space otherwise", () => {

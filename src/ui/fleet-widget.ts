@@ -22,10 +22,12 @@ import {
  * count, live cost, overflow) followed by 1–2 lines per run: the main row
  * (label · type · model · phase · phase age · Σ total elapsed · cost),
  * children indented under their parent (↳) via FleetRow.parentRunId, plus an
- * indented activity line (tool trail with in-flight ▸tool + args preview +
- * live tool duration, » thinking stream) when the run is mid-tool or
- * mid-thought — long tool calls render in full on their own line instead of
- * being truncated off the row.
+ * activity line hung on a ╰ hook (muted tool trail with an accent in-flight
+ * ▸tool + args preview + live tool duration, » thinking stream) when the run
+ * is mid-tool or mid-thought — long tool calls render in full on their own
+ * line instead of being truncated off the row. The ╰ + muting keep per-agent
+ * boundaries legible: bright main rows are the anchors, dim hooked lines
+ * read as belonging to the row above.
  *
  * Same two-layer split as the panel:
  *  1. Pure line builders (`buildFleetWidgetLines`, `formatWidgetCost`) —
@@ -104,7 +106,10 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
 /** The run's live-activity line (rendered on its own indented continuation
  *  line so long tool calls are never truncated off the row): the tool trail
  *  with the in-flight `▸tool` segment (accent-colored) and/or the one-line
- *  thinking stream (`» …`, muted). undefined when the run is quiet. */
+ *  thinking stream (`» …`, muted). undefined when the run is quiet.
+ *  Boundary cue: the whole line is muted except the in-flight ▸ segment, so
+ *  bright main rows stay the visual anchors and dim activity reads as
+ *  belonging to the row above it (see also the ╰ hook in renderRunLines). */
 function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): string | undefined {
   const parts: string[] = [];
   const fallbackTool =
@@ -114,7 +119,9 @@ function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): 
   const trail = row.toolTrail ?? fallbackTool;
   if (trail) {
     const idx = trail.indexOf("▸");
-    parts.push(idx >= 0 ? trail.slice(0, idx) + color("header", trail.slice(idx)) : trail);
+    parts.push(
+      idx >= 0 ? color("muted", trail.slice(0, idx)) + color("header", trail.slice(idx)) : color("muted", trail),
+    );
   }
   if (row.streamLine) parts.push(color("muted", `» ${row.streamLine}`));
   return parts.length ? parts.join(" ") : undefined;
@@ -152,9 +159,11 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
 
 /** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors.
  *  Returns 1–2 lines: the main row plus, when the run is mid-tool / mid-thought, an indented
- *  activity continuation aligned under the row content (mark column blank, ↳ replaced by space). */
+ *  activity continuation hung on a ╰ hook under the mark column (↳ replaced by space). */
 function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): string[] {
-  const pad = `  ${indent.replace(/↳/g, " ")}`;
+  // ╰ hook under the (blank) mark column ties the activity line to the row
+  // above it — without it a bright trail line reads as the next agent's row.
+  const pad = ` ╰ ${indent.replace(/↳/g, " ")}`;
   if (row.highlight !== "none") {
     const main = color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row)}`);
     const activity = widgetRowActivity(row);
