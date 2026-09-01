@@ -6,17 +6,19 @@ import type { Runner, SlotPool } from "../../src/service/ports.js";
 
 const type: AgentTypeConfig = { name: "worker", description: "worker", systemPrompt: "", promptMode: "append" };
 const budget = { totalMs: 100 };
-function deps(runner: Runner, tombstones: TombstoneStore) {
+const sessionFile = new URL("../../package.json", import.meta.url).pathname;
+function deps(runner: Runner, tombstones: TombstoneStore, now: () => number = () => Date.now()) {
   const pool: SlotPool = { acquire: async (runId) => ({ ok: true, ticket: { runId, release() {} } }) };
   return {
     types: { get: () => type, list: () => [], reload: async () => ({ types: [type], errors: [] }) },
     pool,
     runner,
     tombstones,
+    now,
     budget,
   };
 }
-function outcome(runId: string): RunOutcome {
+function outcome(runId: string, file = sessionFile): RunOutcome {
   return {
     runId,
     status: "completed",
@@ -34,7 +36,7 @@ function outcome(runId: string): RunOutcome {
       degraded: [],
       staleInputs: 0,
       unkillable: [],
-      sessionFile: "/tmp/session.jsonl",
+      sessionFile: file,
     },
   };
 }
@@ -54,7 +56,7 @@ describe("X2 resume", () => {
     const resumed = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: "build" });
     expect("runId" in resumed).toBe(true);
     await service.waitAll({ waitMs: 10 });
-    expect(seen).toBe("/tmp/session.jsonl");
+    expect(seen).toBe(sessionFile);
   });
   it("rejects an unknown target and an in-flight target", async () => {
     let release!: () => void;
@@ -98,6 +100,67 @@ describe("X2 resume", () => {
     await service.waitAll({ waitMs: 10 });
     expect(calls).toBe(2);
   });
+  it("resumes through a unique run_id prefix", async () => {
+    const resumedFiles: string[] = [];
+    const runner: Runner = {
+      run: async (spec) => {
+        if (spec.request.resumeFrom) resumedFiles.push(spec.request.resumeFrom);
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    const first = await service.spawnAndWait({ type: "worker", prompt: "first" });
+    const prefix = first.runId.slice(0, -1);
+    const resumed = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: prefix });
+    expect(resumed).toHaveProperty("runId");
+    await service.waitAll({ waitMs: 10 });
+    expect(resumedFiles).toEqual([sessionFile]);
+  });
+
+  it("rejects an ambiguous prefix and includes resumable candidates", async () => {
+    const runner: Runner = { run: async (spec) => outcome(spec.runId) };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    const one = await service.spawnAndWait({ type: "worker", prompt: "one", label: "one" });
+    const two = await service.spawnAndWait({ type: "worker", prompt: "two", label: "two" });
+    expect(one.runId.startsWith("r_")).toBe(true);
+    expect(two.runId.startsWith("r_")).toBe(true);
+    const rejected = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: "r_" });
+    expect(rejected).toMatchObject({ error: { message: expect.stringContaining("one") } });
+    expect(rejected).toMatchObject({ error: { message: expect.stringContaining(one.runId) } });
+    expect(rejected).toMatchObject({ error: { message: expect.stringContaining(two.runId) } });
+  });
+
+  it("resumes from records after the tombstone TTL expires", async () => {
+    let now = 0;
+    const tombstones = new TombstoneStore(10, () => now);
+    const runner: Runner = { run: async (spec) => outcome(spec.runId) };
+    const service = createSpawnService(deps(runner, tombstones, () => now));
+    const first = await service.spawnAndWait({ type: "worker", prompt: "first" });
+    now = 11;
+    expect(tombstones.get(first.runId)).toBeUndefined();
+    const resumed = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: first.runId });
+    expect(resumed).toHaveProperty("runId");
+  });
+
+  it("rejects a terminal target whose session file is no longer a file", async () => {
+    const runner: Runner = { run: async (spec) => outcome(spec.runId, "/tmp/pi-subagent-missing-session.jsonl") };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    const first = await service.spawnAndWait({ type: "worker", prompt: "first", label: "missing-file" });
+    const rejected = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: first.runId });
+    expect(rejected).toMatchObject({
+      error: { message: expect.stringContaining(`resume target not found: ${first.runId}`) },
+    });
+    expect(rejected).toMatchObject({ error: { message: expect.stringContaining("Resumable targets:") } });
+  });
+
+  it("does not treat an arbitrary session path as a resumable handle", async () => {
+    const runner: Runner = { run: async (spec) => outcome(spec.runId) };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first" });
+    const rejected = await service.spawn({ type: "worker", prompt: "continue", resumeFrom: sessionFile });
+    expect(rejected).toMatchObject({ error: { message: expect.stringContaining("resume target not found") } });
+  });
+
   it("expires tombstones", () => {
     let now = 0;
     const store = new TombstoneStore(10, () => now);
@@ -131,7 +194,70 @@ describe("X2 resume lock lifecycle (P1 regression)", () => {
     const r2 = await service.spawn({ type: "worker", prompt: "third", resumeFrom: "seq" });
     expect(r2).toHaveProperty("runId");
     await service.waitAll({ waitMs: 10 });
-    expect(resumes).toEqual(["/tmp/session.jsonl", "/tmp/session.jsonl"]);
+    expect(resumes).toEqual([sessionFile, sessionFile]);
+  });
+
+  it("does not register a label that has run_id syntax", async () => {
+    const runner: Runner = { run: async (spec) => outcome(spec.runId) };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "x", label: "r_ABCDEFGH" });
+    expect(service.getLabel?.("r_ABCDEFGH")).toBeUndefined();
+  });
+
+  it("mutually excludes concurrent resumes and releases the lock after settling", async () => {
+    let resumeCalls = 0;
+    let release!: () => void;
+    const runner: Runner = {
+      run: async (spec) => {
+        if (spec.request.resumeFrom) {
+          resumeCalls++;
+          if (resumeCalls === 1)
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+        }
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first", label: "concurrent" });
+
+    const [one, two] = await Promise.all([
+      service.spawn({ type: "worker", prompt: "again", resumeFrom: "concurrent" }),
+      service.spawn({ type: "worker", prompt: "again", resumeFrom: "concurrent" }),
+    ]);
+    expect(one).toHaveProperty("runId");
+    expect(two).toMatchObject({ error: { message: expect.stringContaining("already has a resume in progress") } });
+
+    release();
+    await service.waitAll({ waitMs: 10 });
+    const third = await service.spawn({ type: "worker", prompt: "retry", resumeFrom: "concurrent" });
+    expect(third).toHaveProperty("runId");
+    await service.waitAll({ waitMs: 10 });
+    expect(resumeCalls).toBe(2);
+  });
+
+  it("releases resume locks when startup fails so the target can be retried", async () => {
+    let resumeCalls = 0;
+    const runner: Runner = {
+      run: async (spec) => {
+        if (spec.request.resumeFrom) {
+          resumeCalls++;
+          if (resumeCalls === 1) throw new Error("session open failed");
+        }
+        return outcome(spec.runId);
+      },
+    };
+    const service = createSpawnService(deps(runner, new TombstoneStore()));
+    await service.spawnAndWait({ type: "worker", prompt: "first", label: "startup-retry" });
+
+    const failed = await service.spawnAndWait({ type: "worker", prompt: "resume once", resumeFrom: "startup-retry" });
+    expect(failed.status).toBe("failed");
+    expect(failed.error?.message).toContain("session open failed");
+
+    const retried = await service.spawnAndWait({ type: "worker", prompt: "resume twice", resumeFrom: "startup-retry" });
+    expect(retried.status).toBe("completed");
+    expect(resumeCalls).toBe(2);
   });
 
   it("rejects resume of a still-running run with a steer hint", async () => {

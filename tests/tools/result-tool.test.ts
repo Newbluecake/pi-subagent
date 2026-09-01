@@ -113,6 +113,36 @@ describe("pi usage accounting: tool-result usage attach + first-terminal dedupe"
     expect(other.usage).toBeDefined();
   });
 
+  it("resolves prefix/label aliases to one canonical usage key", async () => {
+    const requested: string[] = [];
+    const q: QueryService = {
+      ...query(),
+      get: (runId) => (requested.push(runId), completedSnapshot()),
+      wait: async (runId) => (requested.push(runId), { ok: true, outcome: completedSnapshot().outcome! }),
+    };
+    const tool = createResultTool({
+      query: q,
+      resolveRun: (handle) => ({ ok: true, runId: handle === "build" ? "r1" : "r1" }),
+    });
+    const first = (await tool.execute(
+      "tc1",
+      { run_id: "build" },
+      undefined,
+      () => undefined,
+      {} as never,
+    )) as WithUsage;
+    const second = (await tool.execute(
+      "tc2",
+      { run_id: "r1", wait: true },
+      undefined,
+      () => undefined,
+      {} as never,
+    )) as WithUsage;
+    expect(first.usage).toBeDefined();
+    expect(second.usage).toBeUndefined();
+    expect(requested).toEqual(["r1", "r1"]);
+  });
+
   it("does not attach usage while the run is still active", async () => {
     const running = completedSnapshot();
     running.status = "running";

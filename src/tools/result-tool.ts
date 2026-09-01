@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
+import type { ResolveRunResult } from "../service/resolve-target.js";
 import { toPiToolUsage } from "./usage.js";
 
 /**
@@ -22,7 +23,10 @@ export const ResultToolParams = Type.Object({
 });
 export type ResultToolParams = Static<typeof ResultToolParams>;
 
-export function createResultTool(deps: { query: QueryService }): ToolDefinition<typeof ResultToolParams> {
+export function createResultTool(deps: {
+  query: QueryService;
+  resolveRun?: (handle: string) => ResolveRunResult;
+}): ToolDefinition<typeof ResultToolParams> {
   // pi usage accounting dedupe: a background run's spend is attached to the
   // FIRST tool result that reports its terminal outcome — get_subagent_result
   // can be called repeatedly for the same run, and re-attaching usage each
@@ -44,17 +48,20 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
     // §2.7: the pi harness may invoke execute() with signal === undefined; the
     // wait path below tolerates that (QueryService.wait's opts.signal is optional).
     async execute(_toolCallId, params, signal) {
+      const resolved = deps.resolveRun?.(params.run_id);
+      if (resolved && !resolved.ok) throw new Error(resolved.error);
+      const runId = resolved?.ok ? resolved.runId : params.run_id;
       if (!params.wait) {
-        const snapshot = deps.query.get(params.run_id);
+        const snapshot = deps.query.get(runId);
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
         const text = snapshot.outcome
           ? formatOutcome(snapshot.outcome)
-          : `Run ${params.run_id} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
+          : `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
         return {
           content: [{ type: "text" as const, text }],
-          ...(snapshot.outcome ? usageOnce(params.run_id, snapshot.outcome.usage) : {}),
+          ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
           details: {
-            runId: params.run_id,
+            runId,
             status: snapshot.status,
             usage: snapshot.diag.usage,
             ...(snapshot.outcome?.structuredResult !== undefined
@@ -63,7 +70,7 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
           },
         };
       }
-      const waited = await deps.query.wait(params.run_id, {
+      const waited = await deps.query.wait(runId, {
         ...(params.wait_ms === undefined ? {} : { waitMs: params.wait_ms }),
         ...(signal ? { signal } : {}),
       });
@@ -78,9 +85,9 @@ export function createResultTool(deps: { query: QueryService }): ToolDefinition<
       }
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
-        ...usageOnce(params.run_id, waited.outcome.usage),
+        ...usageOnce(runId, waited.outcome.usage),
         details: {
-          runId: params.run_id,
+          runId,
           status: waited.outcome.status,
           usage: waited.outcome.usage,
           ...(waited.outcome.structuredResult !== undefined

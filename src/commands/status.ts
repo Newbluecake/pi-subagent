@@ -3,6 +3,7 @@ import type { RunSnapshot, UsageDelta } from "../core/types.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
+import type { ResolveRunResult } from "../service/resolve-target.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
 
@@ -10,6 +11,8 @@ export interface StatusCommandDeps {
   query: QueryService;
   orphans: OrphanRegistry;
   notifier: Notifier;
+  /** Model-facing exact/prefix/label matcher shared with the tools. */
+  resolveRun?: (handle: string) => ResolveRunResult;
   /** M3.6: in-flight workflow rows for `/agent status`'s own WORKFLOWS section. */
   workflow?: { activity: { list(): readonly WorkflowActivitySnapshot[] }; now?: () => number };
 }
@@ -48,7 +51,7 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
       // M-C4: `/agent status <runId-or-prefix>` (or `/agent <runId>`) — one run's tool timeline.
       const idArg = sub === "status" ? tokens[1] : sub;
       if (idArg) {
-        ctx.ui.notify(renderRunDetail(deps.query, idArg), "info");
+        ctx.ui.notify(renderRunDetail(deps.query, idArg, deps.resolveRun), "info");
         return;
       }
       ctx.ui.notify(renderStatus(deps), "info");
@@ -86,9 +89,17 @@ function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | unde
  * per-call durations, ✓/✗/▸ marks, args previews) and the error, if any.
  * Accepts a full runId, a unique prefix, or an exact label.
  */
-export function renderRunDetail(query: QueryService, idArg: string): string {
+export function renderRunDetail(
+  query: QueryService,
+  idArg: string,
+  resolveRun?: (handle: string) => ResolveRunResult,
+): string {
   const runs = query.list();
-  const matches = runs.filter((s) => s.runId === idArg || s.runId.startsWith(idArg) || s.diag.label === idArg);
+  const resolved = resolveRun?.(idArg);
+  if (resolved && !resolved.ok) return resolved.error;
+  const matches = resolved?.ok
+    ? runs.filter((s) => s.runId === resolved.runId)
+    : runs.filter((s) => s.runId === idArg || s.runId.startsWith(idArg) || s.diag.label === idArg);
   if (matches.length === 0) return `No run matches "${idArg}".`;
   if (matches.length > 1)
     return `Ambiguous "${idArg}" — matches: ${matches.map((s) => s.runId.slice(0, 8)).join(", ")}`;

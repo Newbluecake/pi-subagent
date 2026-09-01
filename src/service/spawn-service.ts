@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { mergeBudget } from "../config/settings.js";
+import { newRunId, isRunId } from "../core/ids.js";
 import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import type {
@@ -13,6 +13,12 @@ import type {
 } from "../core/types.js";
 import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
 import { TombstoneStore } from "./tombstone.js";
+import {
+  resolveResumeTarget,
+  resolveRunId,
+  type ResolveResumeResult,
+  type ResolveRunResult,
+} from "./resolve-target.js";
 
 export interface SpawnLabelTarget {
   readonly runId: RunId;
@@ -25,6 +31,10 @@ export interface SpawnService {
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
   /** Resolve a label without exposing the mutable internal index. */
   getLabel?(label: string): SpawnLabelTarget | undefined;
+  /** Resolve model-facing run handles to their canonical process-local id. */
+  resolveRun(handle: string): ResolveRunResult;
+  /** Resolve a model-facing resume handle to an owned, existing session file. */
+  resolveResume(handle: string): ResolveResumeResult;
   /**
    * CC1 (workflow design §8.2 / §3.7 OS1–OS4): the only owner-stop entry
    * point for a caller whose own id is never a tracked run (e.g. a future
@@ -71,6 +81,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const nesting = new Map<RunId, { depth: number; canSpawn?: string[] }>();
   const childrenOf = new Map<RunId, Set<RunId>>();
   const parentOf = new Map<RunId, RunId>();
+  const targetDeps = () => ({
+    labels,
+    liveSnapshots: () => [...records.values()],
+    records: () => [...records.values()],
+    tombstones,
+    now,
+  });
+  const resolveRun = (handle: string) => resolveRunId(handle, targetDeps());
+  const resolveResume = (handle: string) => resolveResumeTarget(handle, targetDeps());
   const terminal = (s: string) => ["completed", "failed", "timed_out", "aborted"].includes(s);
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
@@ -232,8 +251,20 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       let resolvedReq = req;
       let lockKeys: string[] = [];
+      const runId = newRunId((id) => records.has(id) || running.has(id) || tombstones.has(id));
       if (req.resumeFrom) {
-        const targetId = labels.get(req.resumeFrom)?.runId ?? req.resumeFrom;
+        // Resolve once for the running hint, then resolve the owned session
+        // file. Both calls are synchronous and this whole admission section
+        // runs before the first await, so lock checks and writes are atomic
+        // with respect to every other spawn() call in this process.
+        const target = resolveRun(req.resumeFrom);
+        if (!target.ok) {
+          const resume = resolveResume(req.resumeFrom);
+          return {
+            error: { kind: "config", message: resume.ok ? target.error : resume.error, retryable: false },
+          };
+        }
+        const targetId = target.runId;
         if (running.has(targetId))
           return {
             error: {
@@ -242,27 +273,21 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
               retryable: false,
             },
           };
-        if (resumeLocks.has(targetId))
+        const resume = resolveResume(req.resumeFrom);
+        if (!resume.ok) return { error: { kind: "config", message: resume.error, retryable: false } };
+        if (resumeLocks.has(targetId) || resumeLocks.has(resume.sessionFile))
           return {
             error: { kind: "config", message: `run ${targetId} already has a resume in progress`, retryable: false },
           };
-        const tombstone = tombstones.resolve(targetId);
-        if (!tombstone)
-          return {
-            error: {
-              kind: "config",
-              message: `resume target not found or expired: ${req.resumeFrom}`,
-              retryable: false,
-            },
-          };
         resumeLocks.add(targetId);
-        resumeLocks.add(tombstone.sessionFile);
-        resolvedReq = { ...req, resumeFrom: tombstone.sessionFile };
-        lockKeys = [targetId, tombstone.sessionFile];
+        resumeLocks.add(resume.sessionFile);
+        resolvedReq = { ...req, resumeFrom: resume.sessionFile };
+        lockKeys = [targetId, resume.sessionFile];
       }
-      const runId = randomUUID();
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
-      if (req.label && !labels.has(req.label)) {
+      if (req.label && isRunId(req.label)) {
+        console.warn(`[pi-subagent] label "${req.label}" looks like a run id; not registering it as a label`);
+      } else if (req.label && !labels.has(req.label)) {
         labels.set(req.label, { runId, type: req.type });
         deps.onLabel?.(req.label, { runId, type: req.type });
       } else if (req.label) {
@@ -341,6 +366,8 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       return { settled, pending };
     },
     getLabel: (label) => labels.get(label),
+    resolveRun,
+    resolveResume,
     snapshots: () => [...records.values()],
   };
   return service;

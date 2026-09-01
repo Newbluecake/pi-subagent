@@ -153,13 +153,24 @@ export function buildSessionStack(
       // runId stays available in `details` and in the original spawn tool
       // result, so the model can still steer/query/resume by id.
       const who = label ? `"${label}" (#${payload.runId.slice(0, 8)})` : `#${payload.runId.slice(0, 8)}`;
-      pi.sendMessage({
-        customType: "subagent:notification",
-        content:
-          `Subagent ${who} ${payload.status}` + (stats ? ` — ${stats}` : "") + (tail ? `: ${tail.slice(0, 200)}` : ""),
-        display: true,
-        details: payload,
-      });
+      // triggerTurn: a terminal notification must always surface to the parent
+      // as a turn — steering into the in-flight turn while the parent is
+      // streaming (pi's default for triggerTurn!==false), and starting a fresh
+      // turn via _runAgentPrompt when the parent is idle. Without this option,
+      // idle-time notifications were only appended to history (display-only)
+      // and the parent never reacted until the next user input.
+      pi.sendMessage(
+        {
+          customType: "subagent:notification",
+          content:
+            `Subagent ${who} ${payload.status}` +
+            (stats ? ` — ${stats}` : "") +
+            (tail ? `: ${tail.slice(0, 200)}` : ""),
+          display: true,
+          details: payload,
+        },
+        { triggerTurn: true },
+      );
     },
   });
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.

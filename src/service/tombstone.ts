@@ -28,6 +28,10 @@ export class TombstoneStore {
       expiresAt: createdAt + this.ttlMs,
     });
   }
+  has(runId: RunId): boolean {
+    this.cleanup();
+    return this.entries.has(runId);
+  }
   get(runId: RunId): Tombstone | undefined {
     this.cleanup();
     return this.entries.get(runId);

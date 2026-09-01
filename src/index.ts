@@ -113,8 +113,8 @@ export default function activate(pi: ExtensionAPI): void {
       },
     }),
   );
-  pi.registerTool(createResultTool({ query: forwardQuery(holder) }));
-  pi.registerTool(createSteerTool({ query: forwardQuery(holder) }));
+  pi.registerTool(createResultTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   // Inject the registered agent types into the system prompt: the model has
   // no other way to learn valid `subagent_type` values and otherwise burns
   // turns on trial-and-error "unknown agent type" failures. `types` reloads
@@ -135,6 +135,7 @@ export default function activate(pi: ExtensionAPI): void {
     "agent",
     createStatusCommand({
       query: forwardQuery(holder),
+      resolveRun: forwardResolveRun(holder),
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
       workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
@@ -204,6 +205,15 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     // CC1: forwarded for parity with the rest of SpawnService; no caller yet
     // (the workflow orchestrator that will use this lands in M3.1+).
     stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),
+    resolveRun: (handle) => requireStack(holder).spawn.resolveRun(handle),
+    resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
+  };
+}
+function forwardResolveRun(holder: { current?: Stack }) {
+  return (handle: string) => {
+    const result = requireStack(holder).spawn.resolveRun?.(handle);
+    if (!result) throw new Error("pi-subagent: run resolver unavailable");
+    return result;
   };
 }
 function forwardQuery(holder: { current?: Stack }): QueryService {

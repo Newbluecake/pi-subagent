@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
+import type { ResolveRunResult } from "../service/resolve-target.js";
 
 /**
  * "steer_subagent" — drop-in replacement for @tintinweb/pi-subagents' steer
@@ -15,7 +16,10 @@ export const SteerToolParams = Type.Object({
 });
 export type SteerToolParams = Static<typeof SteerToolParams>;
 
-export function createSteerTool(deps: { query: QueryService }): ToolDefinition<typeof SteerToolParams> {
+export function createSteerTool(deps: {
+  query: QueryService;
+  resolveRun?: (handle: string) => ResolveRunResult;
+}): ToolDefinition<typeof SteerToolParams> {
   return {
     name: "steer_subagent",
     label: "Steer Subagent",
@@ -23,7 +27,10 @@ export function createSteerTool(deps: { query: QueryService }): ToolDefinition<t
     promptSnippet: "steer_subagent(run_id, text) - send a follow-up instruction to a running subagent",
     parameters: SteerToolParams,
     async execute(_toolCallId, params) {
-      const result = await deps.query.steer(params.run_id, params.text);
+      const resolved = deps.resolveRun?.(params.run_id);
+      if (resolved && !resolved.ok) throw new Error(resolved.error);
+      const runId = resolved?.ok ? resolved.runId : params.run_id;
+      const result = await deps.query.steer(runId, params.text);
       if (!result.ok) {
         const reason =
           result.reason === "not_running"
@@ -34,8 +41,8 @@ export function createSteerTool(deps: { query: QueryService }): ToolDefinition<t
         throw new Error(reason);
       }
       return {
-        content: [{ type: "text" as const, text: `Sent follow-up instruction to run ${params.run_id}.` }],
-        details: { ok: true },
+        content: [{ type: "text" as const, text: `Sent follow-up instruction to run ${runId}.` }],
+        details: { ok: true, runId },
       };
     },
   } satisfies ToolDefinition<typeof SteerToolParams>;
