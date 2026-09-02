@@ -52,6 +52,79 @@ function completedSnapshot(): RunSnapshot {
   };
 }
 
+describe("result consumption", () => {
+  it("consumes completed outcomes on get and wait with their generation", async () => {
+    const calls: string[] = [];
+    const notifier = { consume: (key: string) => (calls.push(key), true) };
+    const snap = completedSnapshot();
+    const getTool = createResultTool({ query: queryForSnapshot(snap), notifier });
+    await getTool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const waitTool = createResultTool({ query: queryForSnapshot(snap), notifier });
+    await waitTool.execute("tc2", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    expect(calls).toEqual(["r1:1:completed", "r1:1:completed"]);
+  });
+
+  it("only uses completed fallback for schema-flipped failures", async () => {
+    const snap = completedSnapshot();
+    snap.status = "failed";
+    snap.outcome = { ...snap.outcome!, status: "failed", error: { kind: "schema", message: "invalid" } };
+    const calls: string[] = [];
+    const notifier = { consume: (key: string) => (calls.push(key), key.endsWith(":completed")) };
+    const tool = createResultTool({ query: queryForSnapshot(snap), notifier });
+    await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    expect(calls).toEqual(["r1:1:failed", "r1:1:completed"]);
+  });
+
+  it.each([
+    ["timed_out", undefined],
+    ["aborted", undefined],
+    ["failed", { kind: "runtime", message: "broken" }],
+  ] as const)("does not use completed fallback for %s outcomes", async (status, error) => {
+    const snap = completedSnapshot();
+    snap.status = status;
+    snap.outcome = { ...snap.outcome!, status, ...(error ? { error } : {}) };
+    const calls: string[] = [];
+    const tool = createResultTool({
+      query: queryForSnapshot(snap),
+      notifier: { consume: (key: string) => (calls.push(key), false) },
+    });
+    await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    expect(calls).toEqual([`r1:1:${status}`]);
+  });
+
+  it("does not consume while a snapshot has no outcome", async () => {
+    const snap = completedSnapshot();
+    snap.status = "running";
+    snap.outcome = undefined;
+    const consume = vi.fn(() => false);
+    const tool = createResultTool({ query: queryForSnapshot(snap), notifier: { consume } });
+    await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("returns normally when no notifier is provided", async () => {
+    const result = await createResultTool({ query: queryForSnapshot(completedSnapshot()) }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    expect((result.content[0] as { text: string }).text).toContain("done");
+  });
+});
+
+function queryForSnapshot(snapshot: RunSnapshot): QueryService {
+  return {
+    get: () => snapshot,
+    list: () => [],
+    wait: async () => ({ ok: true, outcome: snapshot.outcome! }),
+    waitAll: async () => ({ settled: [], pending: [] }),
+    steer: async () => undefined,
+    stop: async () => false,
+  };
+}
+
 describe("X9 get_subagent_result usage output", () => {
   it("includes usage in both the details payload and the rendered text for a non-waiting lookup", async () => {
     const query: QueryService = {

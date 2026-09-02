@@ -125,7 +125,13 @@ export default function activate(pi: ExtensionAPI): void {
       },
     }),
   );
-  pi.registerTool(createResultTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  pi.registerTool(
+    createResultTool({
+      query: forwardQuery(holder),
+      resolveRun: forwardResolveRun(holder),
+      notifier: forwardNotifier(holder),
+    }),
+  );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   // Inject the registered agent types into the system prompt: the model has
   // no other way to learn valid `subagent_type` values and otherwise burns

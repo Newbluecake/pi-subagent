@@ -54,6 +54,8 @@ export interface SpawnServiceDeps {
   budget?: Partial<DeadlineBudget>;
   onSnapshot?: (snapshot: RunSnapshot) => void;
   onLifecycle?: LifecycleSink;
+  onOutcomeConsumed?: (outcome: RunOutcome) => void;
+  notifyTerminalFailure?: (outcome: RunOutcome) => void;
   /** X6 bridge: fired when a label is first registered (mention registry feed). */
   onLabel?: (label: string, target: SpawnLabelTarget) => void;
   tombstones?: TombstoneStore;
@@ -169,7 +171,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       });
       finish(outcome);
     } catch (error) {
-      finish({
+      const failed: RunOutcome = {
         runId,
         status: "failed",
         turns: 0,
@@ -188,7 +190,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           unkillable: [],
         },
         error: toErrorInfo(error),
-      });
+      };
+      finish(failed);
+      deps.notifyTerminalFailure?.(failed);
     } finally {
       // Release every key acquired at spawn time (targetId AND sessionFile) —
       // deleting only req.resumeFrom leaks the targetId lock forever once
@@ -356,6 +360,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           waits.set(started.runId, set);
         }
       });
+      try {
+        deps.onOutcomeConsumed?.(result);
+      } catch {
+        // Best effort only; consumption must not alter the returned outcome.
+      }
       return result;
     },
     async abort(runId, cause = "user_stop") {

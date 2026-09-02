@@ -78,7 +78,13 @@ export function createNotifier(options: NotifierOptions): Notifier {
   };
   const persist = (record: PersistedDelivery) => {
     state.set(record.key, record);
-    options.store.put(record);
+    try {
+      options.store.put(record);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      degraded.push({ key: record.key, reason: `outbox put failed: ${message}`, at: clock.now() });
+      audit(record.key, "pending", message);
+    }
   };
   const attempt = (record: PersistedDelivery, round: number) => {
     if (state.get(record.key)?.state === "consumed") return;
@@ -91,7 +97,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
         reconcileRound: round,
       };
       state.set(record.key, next);
-      options.store.update(record.key, { state: next.state, attempts: next.attempts, reconcileRound: round });
+      try {
+        options.store.update(record.key, { state: next.state, attempts: next.attempts, reconcileRound: round });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        degraded.push({ key: record.key, reason: `outbox update failed: ${message}`, at: clock.now() });
+      }
       audit(record.key, "delivered");
       notifyExt(next, "delivered");
     } catch (error) {
@@ -99,7 +110,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
       const nextState: DeliveryState = attempts >= maxAttempts ? "dropped" : "pending";
       const next = { ...record, state: nextState, attempts, reconcileRound: round };
       state.set(record.key, next);
-      options.store.update(record.key, { state: nextState, attempts, reconcileRound: round });
+      try {
+        options.store.update(record.key, { state: nextState, attempts, reconcileRound: round });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        degraded.push({ key: record.key, reason: `outbox update failed: ${message}`, at: clock.now() });
+      }
       const message = error instanceof Error ? error.message : String(error);
       audit(record.key, nextState, message);
       notifyExt(next, nextState);
@@ -109,16 +125,30 @@ export function createNotifier(options: NotifierOptions): Notifier {
   };
   return {
     enqueue(payload) {
-      if (state.has(payload.key)) return;
+      const existing = state.get(payload.key);
+      if (existing && existing.state !== "dropped" && existing.state !== "abandoned") return;
       const record: PersistedDelivery = { ...payload, state: "pending", attempts: 0 };
       persist(record);
       attempt(record, payload.reconcileRound);
     },
+    /**
+     * Marks a delivered outcome consumed after durable persistence succeeds.
+     * This intentionally closes the only proactive redelivery path; a later
+     * loss of the caller's result relies on explicit snapshot lookup, whose
+     * append-entry persistence is best effort. The deliberate tradeoff is
+     avoiding duplicate notifications after a consumer has retrieved it.
+     */
     consume(key) {
       const record = state.get(key) ?? options.store.list().find((x) => x.key === key);
       if (!record || record.state === "consumed" || record.state === "abandoned") return false;
+      try {
+        options.store.update(key, { state: "consumed" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        degraded.push({ key, reason: `consume persist failed: ${message}`, at: clock.now() });
+        return false;
+      }
       state.set(key, { ...record, state: "consumed" });
-      options.store.update(key, { state: "consumed" });
       audit(key, "consumed");
       notifyExt(record, "consumed");
       return true;

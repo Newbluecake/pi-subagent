@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { systemClock } from "./core/clock.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { SubagentExtensionPoints } from "./core/types.js";
+import type { DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
@@ -12,7 +12,7 @@ import type { AgentTypeRegistry } from "./config/agent-types.js";
 import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
-import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { createNotifier, deliveryKey, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
@@ -165,13 +165,16 @@ export function buildSessionStack(
       // turn via _runAgentPrompt when the parent is idle. Without this option,
       // idle-time notifications were only appended to history (display-only)
       // and the parent never reacted until the next user input.
+      const truncated = tail !== undefined && tail.length > 200;
+      const hint = truncated ? ` — get_subagent_result "${payload.runId.slice(0, 8)}" for full output` : "";
       pi.sendMessage(
         {
           customType: "subagent:notification",
           content:
             `Subagent ${who} ${payload.status}` +
             (stats ? ` — ${stats}` : "") +
-            (tail ? `: ${tail.slice(0, 200)}` : ""),
+            (tail ? `: ${tail.slice(0, 200)}` : "") +
+            hint,
           display: true,
           details: payload,
         },
@@ -216,6 +219,47 @@ export function buildSessionStack(
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
     onLabel: (label, target) => mentionRef.current?.register(label, target),
+    onOutcomeConsumed: (outcome) => {
+      try {
+        const by = { extensionOwner: "spawnAndWait" };
+        if (
+          !notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation, outcome.status), by) &&
+          outcome.status === "failed" &&
+          outcome.error?.kind === "schema"
+        )
+          notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation, "completed"), by);
+      } catch {
+        // Consumption is best effort only.
+      }
+    },
+    notifyTerminalFailure: (outcome) => {
+      const payload = {
+        key: deliveryKey(outcome.runId, outcome.diag.generation, outcome.status),
+        runId: outcome.runId,
+        generation: outcome.diag.generation,
+        status: outcome.status,
+        textPreview: outcome.text ?? "",
+        diag: {
+          phase: outcome.diag.phase,
+          status: outcome.status,
+          pendingTools: outcome.diag.pendingTools,
+          staleInputs: outcome.diag.staleInputs,
+          degraded: outcome.diag.degraded.length,
+        },
+        createdAt: outcome.diag.createdAt,
+        reconcileRound: 0,
+      } satisfies DeliveryPayload;
+      const prefix = `${outcome.runId}:${outcome.diag.generation}:`;
+      let existing: PersistedDelivery | undefined;
+      try {
+        existing = outbox.list().find((record) => record.key.startsWith(prefix));
+      } catch {
+        // Fail open: uncertainty must not suppress a terminal failure.
+      }
+      const state = existing?.state ?? "pending";
+      if (existing && state !== "dropped" && state !== "abandoned") return;
+      notifier.enqueue(payload);
+    },
     onSnapshot: (snapshot) => {
       // M-D: announce a run exactly once, as soon as it has actually started
       // (diag.startedAt set on slot_acquired). The previous heuristic

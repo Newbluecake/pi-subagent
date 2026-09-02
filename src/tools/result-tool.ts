@@ -3,6 +3,8 @@ import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
+import { deliveryKey, type Notifier } from "../delivery/notifier.js";
+import type { RunOutcome } from "../core/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { toPiToolUsage } from "./usage.js";
@@ -34,6 +36,7 @@ export type ResultToolParams = Static<typeof ResultToolParams>;
 export function createResultTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
+  notifier?: Pick<Notifier, "consume">;
 }): ToolDefinition<typeof ResultToolParams> {
   // pi usage accounting dedupe: a background run's spend is attached to the
   // FIRST tool result that reports its terminal outcome — get_subagent_result
@@ -44,6 +47,20 @@ export function createResultTool(deps: {
     if (!usage || usageReported.has(runId)) return {};
     usageReported.add(runId);
     return { usage: toPiToolUsage(usage) };
+  };
+  const tryConsume = (runId: string, generation: number, outcome: RunOutcome) => {
+    if (!deps.notifier) return;
+    try {
+      const hit = deps.notifier.consume(deliveryKey(runId, generation, outcome.status), {
+        extensionOwner: "get_subagent_result",
+      });
+      if (!hit && outcome.status === "failed" && outcome.error?.kind === "schema")
+        deps.notifier.consume(deliveryKey(runId, generation, "completed"), {
+          extensionOwner: "get_subagent_result",
+        });
+    } catch {
+      // Defensive boundary for future notifier implementations.
+    }
   };
   return {
     name: "get_subagent_result",
@@ -82,6 +99,7 @@ export function createResultTool(deps: {
               `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
               ...buildProgressLines(snapshot, Date.now()),
             ].join("\n");
+        if (snapshot.outcome) tryConsume(runId, snapshot.generation, snapshot.outcome);
         return {
           content: [{ type: "text" as const, text }],
           ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
@@ -140,6 +158,7 @@ export function createResultTool(deps: {
                 : "wait timed out after the default budget (the run's remaining deadline + grace)";
         throw new Error(reason);
       }
+      tryConsume(runId, waited.outcome.diag.generation, waited.outcome);
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
         ...usageOnce(runId, waited.outcome.usage),

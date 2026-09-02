@@ -54,6 +54,37 @@ describe("SpawnService", () => {
     });
     expect(called).toBe(false);
   });
+  it("calls onOutcomeConsumed after spawnAndWait resolves", async () => {
+    const seen: RunOutcome[] = [];
+    const runner: Runner = {
+      run: async (spec) => ({ ...outcome, runId: spec.runId }),
+    };
+    const result = await createSpawnService({ ...deps(runner), onOutcomeConsumed: (o) => seen.push(o) }).spawnAndWait({
+      type: "worker",
+      prompt: "x",
+    });
+    expect(seen).toEqual([result]);
+  });
+
+  it("notifies after finish when the runner rejects", async () => {
+    let notified: RunOutcome | undefined;
+    const service = createSpawnService({
+      ...deps({
+        run: async () => {
+          throw new Error("boom");
+        },
+      }),
+      notifyTerminalFailure: (o) => {
+        notified = o;
+      },
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    expect("runId" in started).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(notified?.error?.message).toBe("boom");
+    expect(service.snapshots().find((s) => s.runId === notified?.runId)?.outcome?.error?.message).toBe("boom");
+  });
+
   it("passes slotless nested requests and returns the runner outcome", async () => {
     let seen: { slotless?: boolean; parentRunId?: string } | undefined;
     const result = await createSpawnService(

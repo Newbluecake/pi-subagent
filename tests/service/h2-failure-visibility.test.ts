@@ -38,7 +38,11 @@ function fastBudget() {
   };
 }
 
-function buildAdapter(clock: FakeClock, extensions: SubagentExtensionPoints[]) {
+function buildAdapter(
+  clock: FakeClock,
+  extensions: SubagentExtensionPoints[],
+  enqueue = (_payload: unknown) => undefined,
+) {
   const pool = new SingleSlotPool(clock, 1);
   const store = new MemoryRunStore();
   const reaper = new EscalatingReaper(clock);
@@ -49,7 +53,7 @@ function buildAdapter(clock: FakeClock, extensions: SubagentExtensionPoints[]) {
     dispatch: () => undefined,
   });
   const notifier = {
-    enqueue: () => undefined,
+    enqueue,
     consume: () => false,
     reconcile: () => ({ redelivered: [], suppressed: [], abandoned: [] }),
     verifyPersisted: () => ({ missing: [] }),
@@ -78,8 +82,13 @@ function buildAdapter(clock: FakeClock, extensions: SubagentExtensionPoints[]) {
   return { runner, store, lifecycle };
 }
 
-function spec(): RunnerSpec {
-  return { runId: "r1", type, request: { type: "worker", prompt: "hi" }, budget: fastBudget() };
+function spec(agentType = type, request: Partial<RunnerSpec["request"]> = {}): RunnerSpec {
+  return {
+    runId: "r1",
+    type: agentType,
+    request: { type: agentType.name, prompt: "hi", ...request },
+    budget: fastBudget(),
+  };
 }
 
 async function drain(clock: FakeClock, ticks: number, stepMs = 1) {
@@ -142,6 +151,51 @@ describe("H2 failure visibility (store snapshot + lifecycle)", () => {
     expect(callbacks.onLifecycle).toHaveBeenCalledWith(expect.objectContaining(expected));
     expect(callbacks.onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ runId: "r1", status: "failed" }));
     expect(store.get("r1")?.status).toBe("failed");
+  });
+
+  it("enqueues a notification for a background config failure", async () => {
+    const clock = new FakeClock();
+    const notifications: unknown[] = [];
+    const ext: SubagentExtensionPoints = {
+      resolveSessionSpec: () => {
+        throw new Error("bad config");
+      },
+    };
+    const { runner } = buildAdapter(clock, [ext], (payload) => notifications.push(payload));
+    const outcome = await runner.run(spec());
+    expect(outcome.status).toBe("failed");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({ runId: "r1", status: "failed", generation: 1, textPreview: "" });
+  });
+
+  it("does not enqueue a notification for a nested config failure", async () => {
+    const clock = new FakeClock();
+    const notifications: unknown[] = [];
+    const ext: SubagentExtensionPoints = {
+      resolveSessionSpec: () => {
+        throw new Error("bad child config");
+      },
+    };
+    const { runner } = buildAdapter(clock, [ext], (payload) => notifications.push(payload));
+    const outcome = await runner.run(spec(type, { parentRunId: "parent" }));
+    expect(outcome.status).toBe("failed");
+    expect(notifications).toEqual([]);
+  });
+
+  it("enqueues a foreground config failure even when a waiter is attached", async () => {
+    const clock = new FakeClock();
+    const notifications: unknown[] = [];
+    const ext: SubagentExtensionPoints = {
+      resolveSessionSpec: () => {
+        throw new Error("bad foreground config");
+      },
+    };
+    const { runner } = buildAdapter(clock, [ext], (payload) => notifications.push(payload));
+    const callback = vi.fn();
+    const outcome = await runner.run(spec(), { onSnapshot: callback });
+    expect(outcome.status).toBe("failed");
+    expect(callback).toHaveBeenCalled();
+    expect(notifications).toHaveLength(1);
   });
 
   it("also persists + emits when the hook times out (startupMs bound)", async () => {

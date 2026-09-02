@@ -28,15 +28,27 @@ export function createPiOutboxStore(pi: PiOutboxHost): OutboxStore {
   }
   return {
     put(record: PersistedDelivery) {
+      const previous = cache.get(record.key);
       cache.set(record.key, record);
-      pi.appendEntry(OUTBOX_CUSTOM_TYPE, record);
+      try {
+        pi.appendEntry(OUTBOX_CUSTOM_TYPE, record);
+      } catch (error) {
+        if (previous) cache.set(record.key, previous);
+        else cache.delete(record.key);
+        throw error;
+      }
     },
     update(key: string, patch: Partial<PersistedDelivery>) {
       const current = cache.get(key);
       if (!current) return;
       const next = { ...current, ...patch };
       cache.set(key, next);
-      pi.appendEntry(OUTBOX_CUSTOM_TYPE, next);
+      try {
+        pi.appendEntry(OUTBOX_CUSTOM_TYPE, next);
+      } catch (error) {
+        cache.set(key, current);
+        throw error;
+      }
     },
     list() {
       return [...cache.values()];

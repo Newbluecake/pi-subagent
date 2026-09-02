@@ -13,7 +13,7 @@ import type {
   StopCause,
   SubagentExtensionPoints,
 } from "../core/types.js";
-import type { Notifier } from "../delivery/notifier.js";
+import { deliveryKey, type Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
 import {
   BasicEffectInterpreter,
@@ -243,6 +243,30 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     perRun.get(runId)?.onLifecycle?.(event);
     deps.onLifecycle?.(event);
     merged.onLifecycle?.(event); // H1: run lifecycle bypass observer
+    if (!childRunIds.has(runId)) {
+      try {
+        deps.notifier.enqueue({
+          key: deliveryKey(runId, outcome.diag.generation, outcome.status),
+          runId,
+          generation: outcome.diag.generation,
+          status: outcome.status,
+          textPreview: "",
+          diag: {
+            phase: outcome.diag.phase,
+            status: outcome.status,
+            pendingTools: outcome.diag.pendingTools,
+            staleInputs: outcome.diag.staleInputs,
+            degraded: outcome.diag.degraded.length,
+          },
+          createdAt: outcome.diag.createdAt,
+          reconcileRound: 0,
+        });
+      } catch (err) {
+        console.warn(
+          `[pi-subagent] config-failure notification failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     return outcome;
   };
   return {
