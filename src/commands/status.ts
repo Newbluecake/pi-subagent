@@ -345,10 +345,10 @@ export function renderBashJobDetail(
     lines.push(`  Pid: ${record.pid}${record.pgid !== undefined ? ` (pgid ${record.pgid})` : ""}`);
   lines.push(
     `  Flags: ${record.backgroundedAt !== undefined ? "backgrounded" : "foreground"}, ` +
-      `${record.notifiedAt !== undefined ? "notified" : "not notified"}, read cursor ${record.readCursor}`,
+      `${record.notifiedAt !== undefined ? "notified" : "not notified"}`,
   );
   if (record.finalText) lines.push(`  Final: ${record.finalText.slice(-300)}`);
-  lines.push(`  Collect output with bash_job(action: "output", job_id: "${record.jobId}").`);
+  lines.push("  Read that log file directly (read tool, or tail/grep/awk) for the full output.");
   return lines.join("\n");
 }
 

@@ -100,10 +100,26 @@ describe("model-facing tool strings", () => {
       const params = collectDescriptions(bashJob().parameters).join(" ");
       expect(params).toContain("unique prefix is accepted");
       expect(params).toContain("Required for every action except list");
-      for (const action of ["status", "output", "wait", "kill", "list"]) {
+      // Four actions since change C: `output` was merged into `status`.
+      for (const action of ["status", "wait", "kill", "list"]) {
         expect(bashJob().description).toContain(action);
         expect(params).toContain(action);
       }
+      expect(params).not.toContain("offset");
+      expect(bashJob().description).not.toContain('"output"');
+    });
+
+    /**
+     * Change A: the job log is an ordinary file. Both tools must say so, or the
+     * wording alone would confine the model to this tool's parameters when
+     * read/tail/grep/awk are strictly more capable.
+     */
+    it("tells the model the log is a plain file it may read directly", () => {
+      for (const tool of [bash(), bashJob()]) {
+        expect(tool.description).toMatch(/plain file/);
+        expect(tool.description).toMatch(/read tool|tail\/grep\/awk/);
+      }
+      expect(bashJob().description).toMatch(/grep a large log/);
     });
   });
 });

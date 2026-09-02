@@ -15,7 +15,7 @@
 - **`steer_subagent`** —— 向运行中的子 agent 发送追加指令。
 - **`abort_subagent`** —— 停止运行中的子 agent（包括自动转后台的 run）；对终态 run 幂等返回。
 - **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundS`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
-- **bash 自动转后台** —— 覆盖 pi 内置 `bash` 工具:命令跑过 `bashJobs.autoBackgroundS`(默认 120 秒)后调用提前返回 `job_id`,**进程不杀**、输出继续落日志,结束时推送完成通知;用 `bash_job`(status / output / wait / kill / list)管理。仅 POSIX,详见下文。
+- **bash 自动转后台** —— 覆盖 pi 内置 `bash` 工具:命令跑过 `bashJobs.autoBackgroundS`(默认 120 秒)后调用提前返回 `job_id`,**进程不杀**、输出继续落日志,结束时推送完成通知;用 `bash_job`(status / wait / kill / list)管理,日志本身是普通文件,可以直接 read/tail/grep。仅 POSIX,详见下文。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
 - **Agent tree 组件** —— run 活跃期间常驻编辑器上方(见下文)。
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
@@ -57,13 +57,16 @@
 
 `bash_job` 工具管理这些 job(`job_id` 支持唯一前缀):
 
-| 动作     | 内容                                                          |
-| -------- | ------------------------------------------------------------- |
-| `status` | 状态摘要:运行中/终态、耗时、pid、日志大小                     |
-| `output` | 从上次读取处继续取增量输出(可用 `offset` 重读);读取不消费 job |
-| `wait`   | 有界阻塞(默认 30s,硬上限 120s);超时正常返回当前状态,不报错    |
-| `kill`   | 终止整个进程组(SIGTERM → 宽限 → SIGKILL);对已结束的 job 幂等  |
-| `list`   | 列出已知 job(id · 状态 · 命令预览 · 年龄)；只含转过后台的 job |
+| 动作     | 内容                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------- |
+| `status` | 状态摘要(运行中/终态、耗时、pid、日志大小)**+ 日志尾部**(最后 20 行 / 2KB)+ 日志文件路径 |
+| `wait`   | 有界阻塞(默认 30s,硬上限 120s);超时正常返回当前状态,不报错                               |
+| `kill`   | 终止整个进程组(SIGTERM → 宽限 → SIGKILL);对已结束的 job 幂等,并做 pid 复用防护           |
+| `list`   | 列出已知 job(id · 状态 · 命令预览 · 年龄)；只含转过后台的 job                            |
+
+**没有 `output` 动作**:日志就是 `~/.pi/agent/bash-jobs/<job>.log` 这样一个普通文件,模型用 `read` 工具或
+`tail`/`grep`/`awk` 直接分析比任何工具参数都灵活(大日志优先 `grep`,不要整读)。`status` 给的尾部只是
+"现在在干什么 / 怎么结束的"的快照,完整或定向分析请直接读文件。
 
 设置项(时间字段同样是**整数秒**):
 
@@ -82,6 +85,10 @@
 - **win32 不覆盖**:该平台没有进程组语义,内置 `bash` 原样保留,`bash` 与 `bash_job` 都不注册。
 - **同名覆盖冲突**:pi 里同名工具"首个注册者胜出"。若另一个扩展也覆盖 `bash` 且先注册,本功能整体失效(不会破坏对方);想禁用本覆盖把 `bashJobs.autoBackgroundS` 设为 `0` 即可。
 - **日志与敏感输出**:job 状态与日志默认写在 `~/.pi/agent/bash-jobs/`(权限 0600,与 session 文件同威胁模型)。命令输出里的密钥/令牌会**落盘**,直到 `retentionS` 过期被清理——需要更严的隔离时用 `bashJobs.dir` 指到别处,或把敏感命令的输出重定向掉。
+- **日志自洽**:进程进入终态时,日志尾部会追加一行结论,形如
+  `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`(被杀/超时/丢失退出码的 job 不会硬编出 `exit`)。
+  `tail -3 <log>` 即可知道结局,不必再调工具。这一行只写一次,计入日志字节数;即使日志已经写满 `maxLogBytes`
+  也照样追加(结论不能被容量策略吞掉,因此文件可能略微超出上限)。
 - **重启/reload 后收养**:仍在跑的 job 在下一个 session 里被重新接管并继续通知;pid 归属无法确认(可能被复用)的 job 只标记不杀,`kill` 会明确拒绝。
 - 设置改动与其他非 `budget.*` 键一样,`/reload` 后生效。
 

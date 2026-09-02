@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -247,11 +247,17 @@ describe("I1 auto-background full chain", () => {
       // The notice's tail read must not have consumed the model's cursor.
       expect(record.readCursor).toBe(0);
 
-      const output = await run(jobs, { action: "output", job_id: jobId });
-      const outputText = textOf(output);
-      expect(outputText).toContain("done");
-      expect(outputText).toContain("job completed");
-      expect(outputText).toContain("Command exited with code 0");
+      // Change C: `status` carries the tail; the log file itself is the full
+      // record, and its own last line states the outcome (change B).
+      const status = await run(jobs, { action: "status", job_id: jobId });
+      const statusText = textOf(status);
+      expect(statusText).toContain("done");
+      expect(statusText).toContain("completed (exit 0)");
+      expect(statusText).toContain(`Full log: ${record.logPath}`);
+      const rawLog = readFileSync(record.logPath, "utf8");
+      expect(rawLog).toContain("done");
+      expect(rawLog.trimEnd().endsWith(`[pi-subagent] job ${jobId} completed (exit 0) after 0ms`)).toBe(false);
+      expect(rawLog.trimEnd()).toMatch(new RegExp(`\\[pi-subagent\\] job ${jobId} completed \\(exit 0\\) after .+$`));
 
       // Still exactly one notice after another full poll window (no re-sends).
       await sleep(QUIET_WINDOW_MS);
@@ -410,10 +416,12 @@ describe("I4 exited_unknown recovery", () => {
       expect(content).toContain("last line before the crash");
       expect(notices(host)[0]!.message.details).toMatchObject({ status: "exited_unknown", exitCode: null });
 
-      // The log survives the loss of the exit code — output is still collectable.
-      const output = await run(jobs, { action: "output", job_id: "b_TEST04" });
-      expect(textOf(output)).toContain("partial output");
-      expect(textOf(output)).toContain("exit code could not be recovered");
+      // The log survives the loss of the exit code — status still shows it,
+      // and points at the plain file for the rest.
+      const status = await run(jobs, { action: "status", job_id: "b_TEST04" });
+      expect(textOf(status)).toContain("partial output");
+      expect(textOf(status)).toContain("exit code lost");
+      expect(textOf(status)).toMatch(/Full log: .*b_TEST0400\.log/);
 
       await sleep(QUIET_WINDOW_MS);
       expect(notices(host).length).toBe(1);

@@ -3,24 +3,33 @@ import { Text } from "@earendil-works/pi-tui";
 import { formatSize, truncateTail, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Millis } from "../core/types.js";
 import type { BashJobManager, JobOutputRead } from "../bash/manager.js";
-import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
+import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
  * "bash_job" — the management surface for bash commands that were moved to
  * the background (docs/dev/bash-auto-background/plan-fable.md section 4).
  *
- * One tool with an `action` discriminator rather than five tools (decision
- * D5): all five actions are small CRUD operations on the same entity and
+ * One tool with an `action` discriminator rather than four tools (decision
+ * D5): all four actions are small CRUD operations on the same entity and
  * share the `job_id` parameter, and this plugin already contributes five
  * tools to the table.
+ *
+ * **The log is a plain file.** There is deliberately no `output` action: the
+ * model reads `record.logPath` with the `read` tool or with tail/grep/awk,
+ * which is strictly more capable than any parameter set this tool could
+ * offer. `status` therefore returns a state summary *plus* a bounded log tail
+ * (enough to answer "what is it doing / how did it end?"), and points at the
+ * file for anything larger or more targeted.
  *
  * Zero-hang rules inherited from the rest of the plugin:
  * - `wait` is bounded (default 30s, hard cap 120s) and **returns** the current
  *   status on timeout instead of throwing;
- * - `kill` is idempotent — an already finished job is reported, not an error;
- * - `output` is re-readable: reads advance a persisted cursor but never
- *   consume or delete the job.
+ * - `kill` is idempotent — an already finished job is reported, not an error —
+ *   and carries the pid-reuse / process-group safety checks (I-c), which is
+ *   why it stays a tool rather than becoming "just run kill in bash";
+ * - reads never consume a job: `status` never advances a cursor, so it can be
+ *   polled freely.
  *
  * Only genuine caller errors throw: an unresolvable `job_id`, a missing
  * `job_id`, a kill that had to be refused for safety, or no active session.
@@ -30,27 +39,22 @@ import { formatDuration } from "../ui/fleet-panel.js";
 export const DEFAULT_WAIT_MS = 30_000;
 /** Hard cap on `wait`, so a single call can never become a new hang point. */
 export const MAX_WAIT_MS = 120_000;
+/** Bytes of log tail `status` may read (context-frugal on purpose). */
+export const STATUS_TAIL_BYTES = 2048;
+/** Lines of log tail `status` shows out of those bytes. */
+export const STATUS_TAIL_LINES = 20;
 
 export const BashJobToolParams = Type.Object({
-  action: Type.Union(
-    [Type.Literal("status"), Type.Literal("output"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")],
-    {
-      description:
-        "status: state summary; output: incremental output since your last read; " +
-        "wait: block (bounded) until the job exits; kill: terminate the process tree; list: all known jobs.",
-    },
-  ),
+  action: Type.Union([Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")], {
+    description:
+      "status: state summary plus the tail of the job's log; " +
+      "wait: block (bounded) until the job exits; kill: terminate the process tree; list: all known jobs.",
+  }),
   job_id: Type.Optional(
     Type.String({
       description:
         "Job id returned by a bash call that was moved to the background; a unique prefix is accepted. " +
         "Required for every action except list.",
-    }),
-  ),
-  offset: Type.Optional(
-    Type.Number({
-      description:
-        "output only: byte offset to read from (default: continue from the last read position; 0 = from the beginning).",
     }),
   ),
   wait_ms: Type.Optional(
@@ -76,28 +80,7 @@ function jobLabel(record: JobRecord): string {
   return `Bash job ${record.jobId} ($ ${previewCommand(record.command, 60)})`;
 }
 
-/** Human phrase for a status, carrying the exit code when there is one. */
-export function describeJobStatus(record: JobRecord): string {
-  const code = record.exitCode;
-  switch (record.status) {
-    case "staged":
-      return "not started yet";
-    case "running":
-      return "running";
-    case "completed":
-      return `completed (exit ${code ?? 0})`;
-    case "failed":
-      return code === null ? "failed (no exit code)" : `failed (exit ${code})`;
-    case "timed_out":
-      return "timed out";
-    case "killed":
-      return "killed";
-    case "exited_unknown":
-      return "gone (its process disappeared, exit code lost)";
-    case "orphaned":
-      return "orphaned (left behind by an earlier pi process)";
-  }
-}
+export { describeJobStatus };
 
 function elapsedMs(record: JobRecord, now: Millis): Millis {
   const start = record.spawnedAt ?? record.createdAt;
@@ -184,32 +167,62 @@ function text(value: string): { content: [{ type: "text"; text: string }] } {
   return { content: [{ type: "text" as const, text: value }] };
 }
 
-// ── output assembly ────────────────────────────────────────────────────────
+// ── status assembly (summary + bounded log tail) ───────────────────────────
 
-function outputFootnote(read: JobOutputRead, truncatedIncrement: boolean, shownBytes: number): string {
-  const bytesRead = read.nextOffset - read.startOffset;
-  const state = isTerminalJobStatus(read.state) ? `job ${read.state}` : "job still running";
-  const notes = [`[read bytes ${read.startOffset}-${read.nextOffset} of ${read.logBytes}; ${state}]`];
-  if (truncatedIncrement) {
-    notes.push(
-      `[this increment was clipped to its last ${formatSize(shownBytes)} of ${formatSize(bytesRead)}; ` +
-        `re-read the skipped part with offset: ${read.startOffset}]`,
-    );
-  }
-  if (read.logTruncated) notes.push("[the job's log hit its size cap; some output was dropped]");
-  if (read.nextOffset < read.logBytes) {
-    notes.push(`[more output is available; call output again to continue from byte ${read.nextOffset}]`);
-  }
-  return notes.join("\n");
+/** The model is told, everywhere, that the log is an ordinary file. */
+export function formatLogFileHint(logPath: string): string {
+  return (
+    `Full log: ${logPath} — a plain file: read it directly with the read tool, or with tail/grep/awk. ` +
+    `Prefer grep/tail over reading a large log whole.`
+  );
 }
 
-function formatOutput(read: JobOutputRead): string {
-  const truncation = truncateTail(read.content);
-  const body = truncation.content.length > 0 ? truncation.content : "(no new output)";
-  const footnote = outputFootnote(read, truncation.truncated, truncation.outputBytes);
-  const done = isTerminalJobStatus(read.state) && read.nextOffset >= read.logBytes;
-  const closing = done ? `\n${finalStatusLine(read.record)}` : "";
-  return `${body}\n\n${footnote}${closing}`;
+function tailOffset(size: number): number {
+  return Math.max(0, size - STATUS_TAIL_BYTES);
+}
+
+function lastLines(content: string, max: number): string {
+  const trimmed = content.replace(/\n+$/, "");
+  if (trimmed.length === 0) return "";
+  const lines = trimmed.split("\n");
+  return lines.slice(Math.max(0, lines.length - max)).join("\n");
+}
+
+/**
+ * Best-effort tail read for `status`. Never advances the persisted cursor —
+ * `status` is a pollable, side-effect-free view — and never throws: a missing
+ * or unreadable log costs the tail, not the status.
+ *
+ * Two passes, like the completion notice: a record's `logBytes` can lag behind
+ * the file (adopted jobs, throttled counters), and the first read reports the
+ * real size.
+ */
+async function readStatusTail(manager: BashJobManager, record: JobRecord): Promise<JobOutputRead | undefined> {
+  const options = { advanceCursor: false as const, maxBytes: STATUS_TAIL_BYTES };
+  try {
+    let read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(record.logBytes) });
+    if (read.logBytes > record.logBytes) {
+      read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(read.logBytes) });
+    }
+    return read;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Millis): string {
+  const lines: string[] = [formatJobSummary(record, at)];
+  const raw = read ? lastLines(read.content, STATUS_TAIL_LINES) : "";
+  if (raw.length > 0) {
+    // truncateTail is pi's own context guard: even 20 lines can be huge.
+    lines.push(`--- log tail (last ${STATUS_TAIL_LINES} lines, ${formatSize(read!.logBytes)} total) ---`);
+    lines.push(truncateTail(raw).content, "---");
+  } else {
+    lines.push(read && read.logBytes > 0 ? "(no readable log tail)" : "(the log is empty so far)");
+  }
+  if (record.outputTruncated) lines.push("(the job's log hit its size cap; some output was dropped)");
+  lines.push(formatLogFileHint(record.logPath));
+  return lines.join("\n");
 }
 
 // ── tool ───────────────────────────────────────────────────────────────────
@@ -241,12 +254,15 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
     description:
       "Manage bash commands that were moved to the background (a bash call that runs past the threshold returns a " +
       "job_id instead of blocking; the process keeps running with its output captured to a log file). " +
-      "Actions: status (state summary), output (incremental output since your last read), wait (block up to wait_ms, " +
-      "returns the current status on timeout), kill (terminate the process tree; safe to repeat), list (all known jobs). " +
-      "Reading output never consumes the job, so you can keep polling it.",
+      "Actions: status (state summary plus the tail of the log), wait (block up to wait_ms, returns the current " +
+      "status on timeout), kill (terminate the process tree; safe to repeat), list (all known jobs). " +
+      "The log is a plain file: for the full or a targeted view, read its path directly with the read tool or with " +
+      "tail/grep/awk instead of calling this tool (grep a large log rather than reading it whole). " +
+      "Nothing here consumes the job, so status is safe to poll.",
     promptSnippet:
-      'bash_job(action: "status"|"output"|"wait"|"kill"|"list", job_id?, offset?, wait_ms?) - inspect, wait for, or ' +
-      "stop a backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix works)",
+      'bash_job(action: "status"|"wait"|"kill"|"list", job_id?, wait_ms?) - inspect, wait for, or stop a ' +
+      "backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix " +
+      "works); its log is a plain file you can also read/tail/grep directly",
     parameters: BashJobToolParams,
     renderCall(args, theme, context) {
       const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
@@ -277,27 +293,15 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       if (params.action === "status") {
         const record = await loadRecord(manager, jobId);
         const at = now();
-        const suffix = isTerminalJobStatus(record.status)
-          ? `\nCollect its output with bash_job(action: "output", job_id: "${jobId}").`
-          : "";
-        return { ...text(`${formatJobSummary(record, at)}${suffix}`), details: jobDetails(record, at) };
-      }
-
-      if (params.action === "output") {
-        const read = await manager.readOutput(
-          jobId,
-          params.offset !== undefined && Number.isFinite(params.offset)
-            ? { offset: Math.max(0, Math.trunc(params.offset)) }
-            : {},
-        );
+        // The tail read is side-effect free (advanceCursor: false), so status
+        // stays a safe poll: it never hides output from a later read.
+        const read = await readStatusTail(manager, record);
         return {
-          ...text(formatOutput(read)),
+          ...text(formatStatus(record, read, at)),
           details: {
-            ...jobDetails(read.record, now()),
-            startOffset: read.startOffset,
-            nextOffset: read.nextOffset,
-            bytesRead: read.nextOffset - read.startOffset,
-            done: isTerminalJobStatus(read.state) && read.nextOffset >= read.logBytes,
+            ...jobDetails(record, at),
+            tailBytes: read ? read.nextOffset - read.startOffset : 0,
+            tailFromOffset: read?.startOffset ?? 0,
           },
         };
       }
@@ -312,7 +316,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         const at = now();
         const finished = isTerminalJobStatus(record.status);
         const suffix = finished
-          ? `\n${finalStatusLine(record)}\nCollect its output with bash_job(action: "output", job_id: "${jobId}").`
+          ? `\n${finalStatusLine(record)}\n${formatLogFileHint(record.logPath)}`
           : `\nStill running after waiting ${formatDuration(waitMs)}; the job was not stopped. ` +
             "Wait again, keep working, or wait for its completion notification.";
         return {
@@ -332,7 +336,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         return {
           ...text(
             `Bash job ${jobId} has already finished (${phrase}); nothing to kill.\n` +
-              `Collect its output with bash_job(action: "output", job_id: "${jobId}").`,
+              formatLogFileHint(result.record.logPath),
           ),
           details: { ...jobDetails(result.record, at), alreadyTerminal: true, killed: false },
         };
@@ -340,8 +344,8 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       const how = result.outcome === "already-dead" ? "its process was already gone" : `signalled (${result.outcome})`;
       return {
         ...text(
-          `Bash job ${jobId} ($ ${previewCommand(result.record.command, 60)}): ${how}. ` +
-            `Its captured output is still readable with bash_job(action: "output", job_id: "${jobId}").`,
+          `Bash job ${jobId} ($ ${previewCommand(result.record.command, 60)}): ${how}.\n` +
+            formatLogFileHint(result.record.logPath),
         ),
         details: { ...jobDetails(result.record, at), alreadyTerminal: false, killed: true, outcome: result.outcome },
       };

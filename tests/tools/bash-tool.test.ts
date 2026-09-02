@@ -311,7 +311,10 @@ describe("bash override tool — auto-background", () => {
     expect(text).toContain(details.jobId);
     expect(text).toContain("NOT killed");
     expect(text).toContain('bash_job(action: "status"');
-    expect(text).toContain('bash_job(action: "output"');
+    // Change A: no `output` action — the log is a plain file the model reads.
+    expect(text).not.toContain('bash_job(action: "output"');
+    expect(text).toMatch(/plain file/);
+    expect(text).toMatch(/tail\/grep\/awk/);
     expect(text).toContain('bash_job(action: "kill"');
     // The process was not touched and the job is now notification-eligible.
     expect(harness.port.killCalls).toHaveLength(0);

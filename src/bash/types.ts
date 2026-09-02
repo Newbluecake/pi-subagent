@@ -109,8 +109,60 @@ export interface JobRecord {
   readonly outputTruncated: boolean;
   /** Set once the completion notification was delivered (§5 idempotency key). */
   readonly notifiedAt?: Millis;
-  /** Byte offset already handed to the model by `bash_job output` (§4.3). */
+  /**
+   * Persisted incremental-read offset. **No longer driven by the tool layer**:
+   * `bash_job status` reads a bounded tail with `advanceCursor: false`, and the
+   * completion notice always did. The field is kept because the on-disk record
+   * schema (`v: 1`) must stay readable across versions, and because an internal
+   * consumer (or a future action) may want a resumable cursor again.
+   */
   readonly readCursor: number;
+}
+
+/**
+ * Human phrase for a job's outcome, carrying the exit code when there is one.
+ * Lives here (not in the tool layer) because the log footer written by the
+ * manager must use exactly the same wording as the model-facing tool text.
+ */
+export function describeJobStatus(record: Pick<JobRecord, "status" | "exitCode">): string {
+  const code = record.exitCode;
+  switch (record.status) {
+    case "staged":
+      return "not started yet";
+    case "running":
+      return "running";
+    case "completed":
+      return `completed (exit ${code ?? 0})`;
+    case "failed":
+      return code === null ? "failed (no exit code)" : `failed (exit ${code})`;
+    case "timed_out":
+      return "timed out";
+    case "killed":
+      return "killed";
+    case "exited_unknown":
+      return "gone (its process disappeared, exit code lost)";
+    case "orphaned":
+      return "orphaned (left behind by an earlier pi process)";
+  }
+}
+
+/** Prefix of the terminal footer line appended to a job log (change B). */
+export const JOB_LOG_FOOTER_PREFIX = "[pi-subagent]";
+
+/**
+ * The single line appended to a job's log when it reaches a terminal state, so
+ * the log is self-contained: `tail -3 <log>` answers "how did this end?"
+ * without a tool call. Wording is `describeJobStatus`, so no exit code is
+ * invented for killed / timed-out / exit-code-lost jobs.
+ */
+export function formatJobLogFooter(input: {
+  jobId: JobId;
+  status: JobStatus;
+  exitCode: number | null;
+  duration: string;
+}): string {
+  const phrase = describeJobStatus({ status: input.status, exitCode: input.exitCode });
+  return `${JOB_LOG_FOOTER_PREFIX} job ${input.jobId} ${phrase} after ${input.duration}`;
 }
 
 /** One-line, length-capped command preview for UI/model-facing summaries. */

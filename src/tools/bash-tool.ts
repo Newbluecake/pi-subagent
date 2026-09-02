@@ -111,10 +111,10 @@ export function formatAutoBackgroundText(jobId: JobId, elapsedMs: number, logPat
   return (
     `Bash command is still running after ${formatDuration(elapsedMs)} and has been moved to the background ` +
     `(job_id: ${jobId}). The process was NOT killed — it keeps running with output captured to a log ` +
-    `(${logPath}), and you will receive a completion notification when it finishes. Do not block or poll for it now: ` +
-    `inspect it later with bash_job(action: "status", job_id: "${jobId}") or ` +
-    `bash_job(action: "output", job_id: "${jobId}"), and stop it with ` +
-    `bash_job(action: "kill", job_id: "${jobId}").`
+    `(${logPath}), and you will receive a completion notification when it finishes. Do not block or poll for it now. ` +
+    `Later: bash_job(action: "status", job_id: "${jobId}") for a summary plus the log tail, or read that log path ` +
+    `directly — it is a plain file, so the read tool and tail/grep/awk all work (grep a large log rather than ` +
+    `reading it whole). Stop it with bash_job(action: "kill", job_id: "${jobId}").`
   );
 }
 
@@ -123,9 +123,9 @@ export function formatExplicitBackgroundText(jobId: JobId, pid: number, logPath:
   return (
     `Bash command started in the background (job_id: ${jobId}, pid: ${pid}). The process was NOT killed — ` +
     `output is captured to a log (${logPath}), and you will receive a completion notification when it finishes. ` +
-    `Do not block or poll for it now: inspect it later with bash_job(action: "status", job_id: "${jobId}") or ` +
-    `bash_job(action: "output", job_id: "${jobId}"), and stop it with ` +
-    `bash_job(action: "kill", job_id: "${jobId}").`
+    `Do not block or poll for it now. Later: bash_job(action: "status", job_id: "${jobId}") for a summary plus the ` +
+    `log tail, or read that log path directly — it is a plain file, so the read tool and tail/grep/awk all work ` +
+    `(grep a large log rather than reading it whole). Stop it with bash_job(action: "kill", job_id: "${jobId}").`
   );
 }
 
@@ -152,7 +152,8 @@ export function formatDescriptionSuffix(autoBackgroundMs: number): string {
   return (
     ` If a command runs longer than ~${formatDuration(autoBackgroundMs)}, the call returns early with a job_id — ` +
     `the process is NOT killed, it keeps running with its output captured to a log file, and you are notified when ` +
-    `it finishes. Manage it with the bash_job tool (status / output / wait / kill). ` +
+    `it finishes. Manage it with the bash_job tool (status / wait / kill / list); the log is a plain file, so you ` +
+    `can also read it directly with the read tool or with tail/grep/awk. ` +
     `Set run_in_background: true to background it immediately.`
   );
 }

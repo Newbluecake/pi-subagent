@@ -100,7 +100,8 @@ export function formatBashJobNotification(record: JobRecord, tail?: string, now:
   return [
     head,
     ...body,
-    `Collect full output with bash_job(action: "output", job_id: "${record.jobId}").`,
+    `Full log: ${record.logPath} — a plain file: read it directly with the read tool, or with tail/grep/awk ` +
+      `(grep a large log rather than reading it whole). Its last line records this outcome.`,
     ...(record.outputTruncated ? ["(the job's log hit its size cap; some output was dropped)"] : []),
   ].join("\n");
 }

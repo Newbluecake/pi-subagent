@@ -7,6 +7,7 @@ import type { JobStore } from "./job-store.js";
 import type { JobExit, KillOutcome, ProcessPort, SpawnedJob } from "./process.js";
 import {
   createJobRecord,
+  formatJobLogFooter,
   isTerminalJobStatus,
   needsCompletionNotice,
   previewCommand,
@@ -17,6 +18,7 @@ import {
   type JobStatus,
   type JobTransitionPatch,
 } from "./types.js";
+import { formatDuration } from "../ui/fleet-panel.js";
 
 /**
  * bash auto-background §3 — `BashJobManager`, the owner of a backgrounded
@@ -113,9 +115,9 @@ export interface CreatedJob {
 }
 
 export interface ReadOutputOptions {
-  /** Explicit byte offset; defaults to the persisted `readCursor` (§4.3). */
+  /** Explicit byte offset; defaults to the persisted `readCursor` (now always 0 in practice). */
   offset?: number;
-  /** Persist the advanced cursor (default `true`). */
+  /** Persist the advanced cursor (default `true`). Tool callers pass `false`. */
   advanceCursor?: boolean;
   /** Per-call read cap; defaults to the manager's `maxReadBytes`. */
   maxBytes?: number;
@@ -221,6 +223,10 @@ interface LocalHandle {
   written: number;
   truncated: boolean;
   closed: boolean;
+  /** False once anything was written that did not end in a newline. */
+  atLineStart: boolean;
+  /** Idempotency latch for the terminal footer line (change B). */
+  footerWritten: boolean;
   termination?: "killed" | "timed_out";
 }
 
@@ -430,6 +436,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   function pushWrite(handle: LocalHandle, buffer: Buffer): void {
     if (buffer.length === 0) return;
     handle.written += buffer.length;
+    handle.atLineStart = buffer[buffer.length - 1] === 0x0a;
     handle.flush = handle.flush.then(
       () =>
         new Promise<void>((resolve) => {
@@ -476,15 +483,45 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     return exit.exitCode === 0 ? "completed" : "failed";
   }
 
+  /**
+   * Change B — append the terminal footer to the log *before the stream is
+   * closed* (never reopen the file), exactly once per job.
+   *
+   * Deliberate cap violation: the footer is written even when the log already
+   * hit `maxLogBytes`, so the log may end up slightly over the limit. The
+   * footer is the conclusion of the log — losing it to a capacity policy would
+   * defeat the whole point (a reader must be able to `tail` the file and know
+   * how the job ended). One short line is a bounded overshoot.
+   */
+  function appendLogFooter(entry: Entry, handle: LocalHandle, status: JobStatus, exitCode: number | null, at: Millis) {
+    if (handle.footerWritten || handle.closed) return;
+    handle.footerWritten = true;
+    const record = entry.record;
+    const startedAt = record.spawnedAt ?? record.createdAt;
+    const line = formatJobLogFooter({
+      jobId: record.jobId,
+      status,
+      exitCode,
+      duration: formatDuration(Math.max(0, at - startedAt)),
+    });
+    pushWrite(handle, Buffer.from(`${handle.atLineStart ? "" : "\n"}${line}\n`, "utf8"));
+    // The footer is part of the log, so it counts towards logBytes like any
+    // other byte; the terminal transition below persists `handle.written`.
+    entry.record = { ...entry.record, logBytes: handle.written };
+  }
+
   async function finalizeLocal(jobId: JobId, entry: Entry, handle: LocalHandle): Promise<JobRecord> {
     // `exitPromise` never rejects (process.ts contract), so this can only fail
     // on a persistence error — which must not surface as a rejection either.
     const exit = await handle.spawned.exitPromise;
+    const at = clock.now();
+    const status = terminalStatusFor(handle, exit);
+    appendLogFooter(entry, handle, status, exit.exitCode, at);
     await handle.flush.catch(() => undefined);
     handle.closed = true;
     await new Promise<void>((resolve) => handle.stream.end(() => resolve()));
-    const stored = await applyTransition(jobId, terminalStatusFor(handle, exit), {
-      at: clock.now(),
+    const stored = await applyTransition(jobId, status, {
+      at,
       exitCode: exit.exitCode,
       logBytes: handle.written,
       outputTruncated: handle.truncated,
@@ -532,6 +569,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       written: 0,
       truncated: false,
       closed: false,
+      atLineStart: true,
+      footerWritten: false,
     };
     handle.stream.on("error", (error) => {
       warn(`bash job ${jobId} log write failed: ${String(error)}`);

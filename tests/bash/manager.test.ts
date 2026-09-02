@@ -20,7 +20,13 @@ import type {
   ProcessPort,
   SpawnedJob,
 } from "../../src/bash/process.js";
-import { createJobRecord, transitionJob, type JobRecord, type JobStatus } from "../../src/bash/types.js";
+import {
+  createJobRecord,
+  formatJobLogFooter,
+  transitionJob,
+  type JobRecord,
+  type JobStatus,
+} from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 
 /**
@@ -126,6 +132,18 @@ const managers: BashJobManager[] = [];
 /** Drain the microtask + immediate queues so stream/fs callbacks land. */
 async function settle(times = 25): Promise<void> {
   for (let i = 0; i < times; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * `pushWrite` chains log writes asynchronously, so draining the event loop a
+ * fixed number of times does *not* guarantee the bytes reached the file — under
+ * full-suite CPU contention a pending chunk can still be in flight (observed as
+ * a ~1-in-5 flake on the log-cap assertion). `readOutput` awaits that chain by
+ * contract, so it is the deterministic way to sync before reading the log file
+ * directly.
+ */
+async function flushLog(manager: BashJobManager, jobId: string): Promise<void> {
+  await manager.readOutput(jobId, { offset: 0, advanceCursor: false, maxBytes: 1 });
 }
 
 /**
@@ -239,6 +257,7 @@ describe("bash job manager: create and terminal settlement", () => {
     proc.stdout.write("out\n");
     proc.stderr.write("err\n");
     await settle();
+    await flushLog(h.manager, job.jobId);
 
     expect(relayed).toEqual(["out\n", "err\n"]);
     expect(await readFile(job.logPath, "utf8")).toBe("out\nerr\n");
@@ -314,6 +333,7 @@ describe("bash job manager: log cap (§3.4)", () => {
     proc.stdout.write("789abcdef");
     proc.stdout.write("ignored entirely");
     await settle();
+    await flushLog(h.manager, job.jobId);
 
     const log = await readFile(job.logPath, "utf8");
     expect(log).toBe(`0123456789${formatLogTruncationNotice(10)}`);
@@ -323,7 +343,14 @@ describe("bash job manager: log cap (§3.4)", () => {
     proc.exit({ exitCode: 0 });
     const final = await job.exit;
     expect(final.outputTruncated).toBe(true);
-    expect(final.logBytes).toBe(log.length);
+    // Change B: the terminal footer is appended even though the cap was hit —
+    // the conclusion of a log must never be swallowed by a capacity policy, so
+    // the file is allowed to end up slightly over maxLogBytes.
+    const capped = await readFile(job.logPath, "utf8");
+    expect(capped.startsWith(log)).toBe(true);
+    expect(capped.trimEnd().endsWith(`job ${job.jobId} completed (exit 0) after 0ms`)).toBe(true);
+    expect(capped.length).toBeGreaterThan(10);
+    expect(final.logBytes).toBe(capped.length);
     // The cap protects the disk; it is never a reason to kill the process.
     expect(h.port.killCalls).toEqual([]);
   });
@@ -371,7 +398,10 @@ describe("bash job manager: readOutput cursor (§4.3)", () => {
     expect(closing.state).toBe("failed");
     expect(closing.exitCode).toBe(2);
     expect(closing.finalText).toBe("Command exited with code 2");
-    expect(closing.logBytes).toBe(11);
+    // 11 bytes of output + the terminal footer line (change B).
+    const withFooter = await readFile(job.logPath, "utf8");
+    expect(closing.logBytes).toBe(withFooter.length);
+    expect(withFooter.startsWith("hello world\n[pi-subagent] job ")).toBe(true);
   });
 
   it("reports an empty read for a job whose log never materialised", async () => {
@@ -880,7 +910,7 @@ describe("foreground record discard", () => {
     h.clock.advance(1_000);
     await settle();
     expect(h.manager.get(job.jobId)?.status).toBe("completed");
-    expect((await h.manager.readOutput(job.jobId)).content).toBe("hi\n");
+    expect((await h.manager.readOutput(job.jobId)).content).toContain("hi\n");
 
     h.clock.advance(5_000);
     await waitFor(() => h.manager.get(job.jobId) === undefined, "record discarded");
@@ -938,5 +968,72 @@ describe("foreground record discard", () => {
     await waitFor(() => next.get("b_STAX0001") === undefined, "leftover discarded");
     expect(await h.store.load("b_STAX0001")).toBeUndefined();
     expect(h.notified).toHaveLength(0);
+  });
+});
+
+/**
+ * Change B — the log is self-contained: its last line states the outcome, so
+ * `tail -3 <log>` answers "how did this end?" without a tool call.
+ */
+describe("bash job manager: terminal log footer (change B)", () => {
+  it("appends exactly one footer line, counted in logBytes, on a normal exit", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "echo hi", cwd: "/repo" });
+    h.port.last().stdout.write("hi\n");
+    await settle();
+    h.clock.advance(2_000);
+    h.port.last().exit({ exitCode: 0 });
+    const final = await job.exit;
+
+    const log = await readFile(job.logPath, "utf8");
+    expect(log).toBe(
+      `hi\n${formatJobLogFooter({ jobId: job.jobId, status: "completed", exitCode: 0, duration: "2s" })}\n`,
+    );
+    expect(final.logBytes).toBe(Buffer.byteLength(log, "utf8"));
+    expect((await h.store.load(job.jobId))?.logBytes).toBe(final.logBytes);
+
+    // Idempotent: a repeated terminal settlement must not write a second line.
+    h.port.last().exit({ exitCode: 0 });
+    await settle();
+    expect(await readFile(job.logPath, "utf8")).toBe(log);
+    expect((log.match(/\[pi-subagent\]/g) ?? []).length).toBe(1);
+  });
+
+  it("starts the footer on its own line when the output has no trailing newline", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "printf x", cwd: "/repo" });
+    h.port.last().stdout.write("no-newline");
+    await settle();
+    h.port.last().exit({ exitCode: 1 });
+    await job.exit;
+    const lines = (await readFile(job.logPath, "utf8")).split("\n");
+    expect(lines[0]).toBe("no-newline");
+    expect(lines[1]).toBe(formatJobLogFooter({ jobId: job.jobId, status: "failed", exitCode: 1, duration: "0ms" }));
+  });
+
+  it.each([
+    ["killed", { signal: "SIGTERM" as const, exitCode: null }, /killed after/],
+    ["timed out", { signal: "SIGKILL" as const, exitCode: null }, /timed out after/],
+  ])("writes no invented exit code for a %s job", async (label, exit, expected) => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 300", cwd: "/repo" });
+    h.manager.noteTermination(job.jobId, label === "killed" ? "killed" : "timed_out");
+    h.port.last().exit(exit);
+    await job.exit;
+    const log = await readFile(job.logPath, "utf8");
+    expect(log).toMatch(expected);
+    expect(log).not.toMatch(/exit /);
+  });
+
+  it("is visible to readOutput, which sees exactly what the file holds", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "echo done", cwd: "/repo" });
+    h.port.last().stdout.write("done\n");
+    h.port.last().exit({ exitCode: 0 });
+    await job.exit;
+    const read = await h.manager.readOutput(job.jobId, { offset: 0, advanceCursor: false });
+    expect(read.content).toBe(await readFile(job.logPath, "utf8"));
+    expect(read.content.trimEnd().endsWith(`job ${job.jobId} completed (exit 0) after 0ms`)).toBe(true);
+    expect(read.logBytes).toBe(Buffer.byteLength(read.content, "utf8"));
   });
 });

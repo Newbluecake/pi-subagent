@@ -15,7 +15,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
 - **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
 - **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
-- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 120s) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / output / wait / kill / list). POSIX only — see below.
+- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 120s) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / wait / kill / list) — and the log is a plain file you can read/tail/grep directly. POSIX only — see below.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
@@ -57,13 +57,17 @@ The `bash` tool takes one extra parameter, `run_in_background: true` — backgro
 
 The `bash_job` tool manages those jobs (`job_id` accepts a unique prefix):
 
-| Action   | What it does                                                                        |
-| -------- | ----------------------------------------------------------------------------------- |
-| `status` | State summary: running/terminal, elapsed, pid, log size                             |
-| `output` | Incremental output since your last read (`offset` re-reads); never consumes the job |
-| `wait`   | Bounded block (default 30s, hard cap 120s); returns the current status on timeout   |
-| `kill`   | Terminate the whole process group (SIGTERM → grace → SIGKILL); idempotent           |
-| `list`   | Known jobs (id · state · command preview · age); backgrounded jobs only             |
+| Action   | What it does                                                                                                          |
+| -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `status` | State summary (running/terminal, elapsed, pid, log size) **plus the log tail** (last 20 lines / 2KB) and the log path |
+| `wait`   | Bounded block (default 30s, hard cap 120s); returns the current status on timeout                                     |
+| `kill`   | Terminate the whole process group (SIGTERM → grace → SIGKILL); idempotent, with pid-reuse guards                      |
+| `list`   | Known jobs (id · state · command preview · age); backgrounded jobs only                                               |
+
+**There is deliberately no `output` action.** The log is an ordinary file at
+`~/.pi/agent/bash-jobs/<job>.log`, and reading it with the `read` tool or with `tail`/`grep`/`awk` is strictly more
+capable than any parameter set a tool could offer (grep a large log instead of reading it whole). The tail in
+`status` is only a "what is it doing / how did it end" snapshot; anything full or targeted goes straight to the file.
 
 Settings (durations are whole seconds, like everywhere else):
 
@@ -82,6 +86,11 @@ Behaviour notes:
 - **Not overridden on win32**: no process-group semantics there, so the built-in `bash` is left alone and neither `bash` nor `bash_job` is registered.
 - **Same-name override conflicts**: in pi the first registration of a tool name wins. If another extension also overrides `bash` and registers first, this feature is simply inert (it never breaks the other one); to disable the override deliberately, set `bashJobs.autoBackgroundS` to `0`.
 - **Logs and sensitive output**: job records and logs live in `~/.pi/agent/bash-jobs/` (mode 0600, same threat model as pi's session files). Secrets printed by a command **land on disk** until `retentionS` prunes them — point `bashJobs.dir` elsewhere, or redirect sensitive output, if that matters to you.
+- **Self-contained logs**: when a job reaches a terminal state, one footer line is appended to its log —
+  `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s` (no exit code is invented for killed / timed-out /
+  exit-code-lost jobs). `tail -3 <log>` therefore answers "how did this end?" without a tool call. The line is written
+  exactly once, counts towards the log's byte total, and is appended even when the log already hit `maxLogBytes` — the
+  conclusion must not be swallowed by a capacity policy, so the file may end up slightly over the cap.
 - **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
 - Like every non-`budget.*` setting, changes here take effect after `/reload`.
 

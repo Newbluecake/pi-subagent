@@ -601,7 +601,7 @@ describe("S7 /agent status bash jobs section", () => {
     void cmd.handler("b_NOPE", ctx as never);
     expect(notified[0]).toContain("Bash job b_3F7K2M9P · failed (exit 1)");
     expect(notified[0]).toContain("Command: $ npm run build:all");
-    expect(notified[0]).toContain('bash_job(action: "output", job_id: "b_3F7K2M9P")');
+    expect(notified[0]).toContain("Read that log file directly (read tool, or tail/grep/awk)");
     expect(notified[1]).toBe(notified[0]);
     expect(notified[2]).toBe('No bash job matches "b_NOPE".');
   });

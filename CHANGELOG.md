@@ -19,9 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own result (the foreground path delegates to pi's bash implementation, including its `timeout`,
   abort and truncation semantics), so the only intentional behaviour change is that a command past
   the threshold returns a `job_id` instead of blocking indefinitely. New `bash` parameter
-  `run_in_background: true` backgrounds immediately; the new `bash_job` tool inspects and stops jobs
-  (`status` / `output` / `wait` / `kill` / `list`, bounded `wait`, idempotent `kill`, re-readable
-  incremental `output`). Configured under `bashJobs.*` (`autoBackgroundS` — `0` disables the whole
+  `run_in_background: true` backgrounds immediately; the new `bash_job` tool inspects and stops jobs with four
+  actions (`status` / `wait` / `kill` / `list`): `status` returns a state summary **plus the tail of the log**
+  (last 20 lines / 2KB, context-guarded), `wait` is bounded, `kill` is idempotent and pid-reuse guarded, `list`
+  enumerates known jobs. There is deliberately no `output` action — the log is a plain file
+  (`~/.pi/agent/bash-jobs/<job>.log`) and every model-facing string (tool descriptions, the backgrounding replies,
+  the completion notice, `/agent status`) says so, so the model reads it with the `read` tool or with
+  `tail`/`grep`/`awk` instead of being confined to a tool's parameters. The log is also self-contained: a single
+  footer line — `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`, with no exit code invented for
+  killed / timed-out / exit-code-lost jobs — is appended once when the process settles, counted in the log's byte
+  total, and written even past `maxLogBytes` so a `tail -3` always reveals the outcome. Configured under `bashJobs.*` (`autoBackgroundS` — `0` disables the whole
   feature and registers no override, `maxLogBytes`, `maxBackgroundJobs`, `retentionS`,
   `shutdownPolicy`, plus JSON-only `dir` / `shellPath`) and surfaced in `/agent status`. Only jobs
   that actually reached the model as a `job_id` are retained: a command that finished in the

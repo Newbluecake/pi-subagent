@@ -142,7 +142,10 @@ describe("S7 stack wiring: BashJobManager construction", () => {
       expect(content).toContain("Bash job b_TEST0001 ($ npm test) finished: exit 1 after");
       expect(content).toContain("--- output tail ---");
       expect(content).toContain("failing assertion");
-      expect(content).toContain('Collect full output with bash_job(action: "output", job_id: "b_TEST0001").');
+      // Change A: the notice names the log file once and authorises reading it.
+      expect(content).toContain(`Full log: ${record.logPath}`);
+      expect(content).toMatch(/read tool.*tail\/grep\/awk/);
+      expect(content.split(record.logPath).length - 1).toBe(1);
       // Distinguishable from the subagent channel (delivery/format.ts).
       expect(content.startsWith("Subagent")).toBe(false);
       expect(delivery!.message.details).toMatchObject({

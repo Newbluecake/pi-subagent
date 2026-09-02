@@ -615,3 +615,22 @@ autoBackgrounded:true}`；此后 gatedOnUpdate 不再发。
 - **R5 shutdownPolicy 默认 `"keep"`**（原 Q1，维持 §3.7）。
 - **R6 win32：v1 不覆盖**，不注册覆盖工具（原 Q4，维持 §2.5；路线图后续再议）。
 - **R7 schema 派生：手写三字段 + 测试防漂移**（原 Q5 默认项）。
+
+## 14. 产品决策收敛（用户拍板，实施后追记）
+
+实测反馈:日志本来就是普通文件,模型用 `read`/`tail`/`grep`/`awk` 直接分析比任何工具参数都灵活;
+只教模型用 `bash_job output` 等于用话术锁住模型能力。据此收敛三项:
+
+- **A 明确授权直读日志文件**:`formatAutoBackgroundText` / `formatExplicitBackgroundText` /
+  bash description 追加段 / `bash_job` 的 description 与 promptSnippet / 完成通知
+  (`formatBashJobNotification`) / `/agent status <b_…>` 一律写清"日志是普通文件,可用 read 工具或
+  tail/grep/awk 直接分析,大日志优先 grep"。路径在每条文案里只出现一次。
+- **B 日志自洽(终态页脚)**:`BashJobManager.finalizeLocal` 在**关流之前**向日志尾部追加一行
+  `[pi-subagent] job <id> <describeJobStatus 口径> after <duration>`。幂等(`LocalHandle.footerWritten`)、
+  计入 `logBytes`、即使已达 `maxLogBytes` 也照写(有意略微超限:结论不能被容量策略吞掉)。
+  `describeJobStatus` 因此下沉到 `src/bash/types.ts`(工具层再导出),保证工具文案与日志页脚同一口径。
+- **C `output` 合并进 `status`**:删除 `output` 动作与 `offset` 参数,`status` = 状态摘要 + 日志尾部
+  (`STATUS_TAIL_LINES=20` / `STATUS_TAIL_BYTES=2048`,经 pi 的 `truncateTail` 收窄)+ 日志路径指引。
+  `wait` / `kill` / `list` 不变(`kill` 明确保留:它承载 pid 复用防护与进程组安全校验,是安全不变量)。
+  `manager.readOutput` 保留(status 复用其 flush 等待与截断逻辑),但工具侧一律 `advanceCursor: false`;
+  `JobRecord.readCursor` 字段保留(磁盘 schema 兼容,`v` 不变),仅供内部/未来使用。

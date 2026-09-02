@@ -5,16 +5,20 @@ import {
   MAX_WAIT_MS,
   finalStatusLine,
   formatJobSummary,
-  type BashJobToolParams,
+  STATUS_TAIL_BYTES,
+  STATUS_TAIL_LINES,
+  BashJobToolParams,
+  type BashJobToolParams as BashJobToolParamsType,
 } from "../../src/tools/bash-job-tool.js";
 import type { BashJobManager, JobOutputRead, KillJobResult, ReadOutputOptions } from "../../src/bash/manager.js";
 import { isTerminalJobStatus, type JobId, type JobRecord, type JobStatus } from "../../src/bash/types.js";
 
 /**
  * T10-T16 (docs/dev/bash-auto-background/plan-fable.md section 9): the
- * `bash_job` tool's five actions against a fake BashJobManager — status
- * wording per state, output cursor semantics, bounded wait, idempotent kill,
- * list, and prefix resolution.
+ * `bash_job` tool's four actions against a fake BashJobManager — status
+ * wording per state, the log tail `status` carries, bounded wait, idempotent
+ * kill, list, and prefix resolution. There is no `output` action: the log is a
+ * plain file the model reads directly (change C).
  */
 
 const theme = { fg: (_tone: string, value: string) => value, bold: (value: string) => value } as never;
@@ -42,6 +46,7 @@ function makeRecord(over: Partial<JobRecord> & { jobId: JobId }): JobRecord {
 
 interface FakeManager extends BashJobManager {
   readonly calls: string[];
+  failReads?: boolean;
   put(record: JobRecord, log?: string): void;
   setLog(jobId: JobId, log: string): void;
   settleWait(jobId: JobId, record?: JobRecord): void;
@@ -109,10 +114,12 @@ function fakeManager(options: { waitResolvesImmediately?: boolean } = {}): FakeM
     async readOutput(jobId: JobId, readOptions: ReadOutputOptions = {}): Promise<JobOutputRead> {
       const record = records.get(jobId);
       if (!record) throw new Error(`bash job not found: ${jobId}`);
+      if (manager.failReads) throw new Error("log unreadable");
       const log = Buffer.from(logs.get(jobId) ?? "", "utf8");
       const startOffset = Math.min(Math.max(0, readOptions.offset ?? record.readCursor), log.length);
-      const content = log.subarray(startOffset).toString("utf8");
-      const nextOffset = log.length;
+      const end = Math.min(log.length, startOffset + (readOptions.maxBytes ?? log.length));
+      const content = log.subarray(startOffset, end).toString("utf8");
+      const nextOffset = end;
       calls.push(`readOutput:${jobId}:${startOffset}`);
       if (readOptions.advanceCursor !== false && nextOffset > record.readCursor) {
         records.set(jobId, { ...record, readCursor: nextOffset, logBytes: log.length });
@@ -178,7 +185,7 @@ async function waitForCall(manager: FakeManager, call: string): Promise<void> {
   if (!manager.calls.includes(call)) throw new Error(`never observed ${call} (saw ${manager.calls.join(", ")})`);
 }
 
-function run(manager: BashJobManager | undefined, params: BashJobToolParams) {
+function run(manager: BashJobManager | undefined, params: BashJobToolParamsType) {
   const tool = createBashJobTool({ manager: () => manager, now: () => NOW });
   return tool.execute("tc", params, undefined, undefined, {} as never);
 }
@@ -201,93 +208,124 @@ describe("bash_job — T10 status wording per state", () => {
     expect(response.content[0]!.text).toContain("$ npm test");
   });
 
-  it("carries a structured details payload and an output hint once terminal", async () => {
+  it("carries a structured details payload and points at the log file", async () => {
     const manager = fakeManager();
     manager.put(
       makeRecord({ jobId: "b_AAAA1111", status: "failed", exitCode: 2, endedAt: NOW, pid: 77, logBytes: 12 }),
+      "boom\n",
     );
     const response = await run(manager, { action: "status", job_id: "b_AAAA1111" });
-    expect(response.content[0]!.text).toContain('bash_job(action: "output", job_id: "b_AAAA1111")');
+    const out = response.content[0]!.text;
+    expect(out).toContain("Full log: /tmp/b_AAAA1111.log");
+    expect(out).toMatch(/read tool.*tail\/grep\/awk/);
+    expect(out).not.toContain('action: "output"');
     expect(response.details).toMatchObject({
       jobId: "b_AAAA1111",
       status: "failed",
       exitCode: 2,
       terminal: true,
       pid: 77,
-      logBytes: 12,
       logPath: "/tmp/b_AAAA1111.log",
     });
   });
 });
 
-describe("bash_job — T11/T12 output cursor semantics", () => {
-  it("reads incrementally, then returns nothing new until more output arrives", async () => {
+/**
+ * T11/T12 (reshaped by change C): `output` is gone; `status` carries a bounded
+ * log tail and always names the log file. The tail read must never advance the
+ * persisted cursor, so status stays a free, repeatable poll.
+ */
+describe("bash_job — T11/T12 status log tail", () => {
+  it("shows the tail of a running job's log without consuming it", async () => {
     const manager = fakeManager();
-    manager.put(makeRecord({ jobId: "b_BBBB2222" }), "hello\n");
-    const first = await run(manager, { action: "output", job_id: "b_BBBB2222" });
-    expect(first.content[0]!.text).toContain("hello");
-    expect(first.content[0]!.text).toContain("[read bytes 0-6 of 6; job still running]");
-    expect(first.details).toMatchObject({ startOffset: 0, nextOffset: 6, bytesRead: 6, done: false });
+    manager.put(makeRecord({ jobId: "b_BBBB2222", logBytes: 6 }), "hello\n");
+    const first = await run(manager, { action: "status", job_id: "b_BBBB2222" });
+    const out = first.content[0]!.text;
+    expect(out).toContain("running for 1m00s");
+    expect(out).toContain("--- log tail (last 20 lines");
+    expect(out).toContain("hello");
+    expect(first.details).toMatchObject({ tailBytes: 6, tailFromOffset: 0 });
 
-    // T12: the cursor persisted, so the second read starts where we stopped.
+    // No cursor was advanced, so the same content is still there next time,
+    // and the whole log remains readable from byte 0.
     manager.setLog("b_BBBB2222", "hello\nworld\n");
-    const second = await run(manager, { action: "output", job_id: "b_BBBB2222" });
+    const second = await run(manager, { action: "status", job_id: "b_BBBB2222" });
+    expect(second.content[0]!.text).toContain("hello");
     expect(second.content[0]!.text).toContain("world");
-    expect(second.content[0]!.text).not.toContain("hello");
-    expect(second.content[0]!.text).toContain("[read bytes 6-12 of 12; job still running]");
-
-    const third = await run(manager, { action: "output", job_id: "b_BBBB2222" });
-    expect(third.content[0]!.text).toContain("(no new output)");
-    expect(third.details).toMatchObject({ bytesRead: 0 });
+    expect(manager.get("b_BBBB2222")!.readCursor).toBe(0);
   });
 
-  it("honours an explicit offset (0 re-reads from the beginning)", async () => {
+  it("keeps only the last STATUS_TAIL_LINES lines", async () => {
     const manager = fakeManager();
-    manager.put(makeRecord({ jobId: "b_BBBB2222", readCursor: 6 }), "hello\nworld\n");
-    const response = await run(manager, { action: "output", job_id: "b_BBBB2222", offset: 0 });
-    expect(response.content[0]!.text).toContain("hello");
-    expect(manager.calls).toContain("readOutput:b_BBBB2222:0");
+    const log = `${Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n")}\n`;
+    manager.put(makeRecord({ jobId: "b_BBBB2222", logBytes: log.length }), log);
+    const out = (await run(manager, { action: "status", job_id: "b_BBBB2222" })).content[0]!.text;
+    expect(out).toContain("line 59");
+    expect(out).not.toContain("line 39");
+    expect(out.split("\n").filter((line) => line.startsWith("line ")).length).toBe(STATUS_TAIL_LINES);
   });
 
-  it("appends the final status line once a terminal job is read to the end", async () => {
+  it("says so when the log is still empty", async () => {
     const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_BBBB2222" }), "");
+    const out = (await run(manager, { action: "status", job_id: "b_BBBB2222" })).content[0]!.text;
+    expect(out).toContain("(the log is empty so far)");
+    expect(out).toContain("Full log: /tmp/b_BBBB2222.log");
+  });
+
+  it("surfaces the terminal footer the manager wrote into the log", async () => {
+    const manager = fakeManager();
+    const log = "boom\n[pi-subagent] job b_CCCC3333 failed (exit 1) after 2m30s\n";
     manager.put(
-      makeRecord({
-        jobId: "b_CCCC3333",
-        status: "failed",
-        exitCode: 1,
-        endedAt: NOW,
-        finalText: "boom\n\nCommand exited with code 1",
-      }),
-      "boom\n",
+      makeRecord({ jobId: "b_CCCC3333", status: "failed", exitCode: 1, endedAt: NOW, logBytes: log.length }),
+      log,
     );
-    const response = await run(manager, { action: "output", job_id: "b_CCCC3333" });
-    const out = response.content[0]!.text;
-    expect(out).toContain("[read bytes 0-5 of 5; job failed]");
-    expect(out.trimEnd().endsWith("Command exited with code 1")).toBe(true);
-    expect(response.details).toMatchObject({ done: true });
+    const out = (await run(manager, { action: "status", job_id: "b_CCCC3333" })).content[0]!.text;
+    expect(out).toContain("failed (exit 1) after 1m00s");
+    expect(out).toContain("[pi-subagent] job b_CCCC3333 failed (exit 1) after 2m30s");
   });
 
-  it("synthesizes the closing line when the inner text is missing, and flags a capped log", async () => {
+  it("flags a capped log", async () => {
     const manager = fakeManager();
     manager.put(
-      makeRecord({ jobId: "b_CCCC3333", status: "killed", endedAt: NOW, outputTruncated: true }),
+      makeRecord({ jobId: "b_CCCC3333", status: "killed", endedAt: NOW, outputTruncated: true, logBytes: 8 }),
       "partial\n",
     );
-    const out = (await run(manager, { action: "output", job_id: "b_CCCC3333" })).content[0]!.text;
-    expect(out).toContain("[the job's log hit its size cap; some output was dropped]");
-    expect(out.trimEnd().endsWith("Command was killed")).toBe(true);
+    const out = (await run(manager, { action: "status", job_id: "b_CCCC3333" })).content[0]!.text;
+    expect(out).toContain("(the job's log hit its size cap; some output was dropped)");
   });
 
-  it("clips a huge increment with truncateTail instead of flooding the context", async () => {
+  it("reads at most STATUS_TAIL_BYTES from the end and clips with truncateTail", async () => {
     const manager = fakeManager();
-    const huge = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
-    manager.put(makeRecord({ jobId: "b_DDDD4444" }), huge);
-    const out = (await run(manager, { action: "output", job_id: "b_DDDD4444" })).content[0]!.text;
+    const huge = `${Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n")}\n`;
+    manager.put(makeRecord({ jobId: "b_DDDD4444", logBytes: huge.length }), huge);
+    const response = await run(manager, { action: "status", job_id: "b_DDDD4444" });
+    const out = response.content[0]!.text;
     expect(out.length).toBeLessThan(huge.length);
     expect(out).toContain("line 4999");
-    expect(out).toContain("this increment was clipped");
-    expect(out).toContain("offset: 0");
+    expect(out).not.toContain("line 0\n");
+    expect(response.details).toMatchObject({ tailBytes: STATUS_TAIL_BYTES });
+    // Two passes: the record's byte counter can lag behind the real file.
+    expect(manager.calls.filter((call) => call.startsWith("readOutput:b_DDDD4444")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("degrades to a plain summary when the log cannot be read", async () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_DDDD4444", status: "completed", exitCode: 0, endedAt: NOW }));
+    manager.failReads = true;
+    const out = (await run(manager, { action: "status", job_id: "b_DDDD4444" })).content[0]!.text;
+    expect(out).toContain("completed (exit 0)");
+    expect(out).toContain("Full log: /tmp/b_DDDD4444.log");
+  });
+
+  it("no longer accepts an offset parameter", () => {
+    const properties = (BashJobToolParams as { properties: Record<string, unknown> }).properties;
+    expect(Object.keys(properties).sort()).toEqual(["action", "job_id", "wait_ms"]);
+    expect(properties.offset).toBeUndefined();
+    const actions = (
+      BashJobToolParams as { properties: { action: { anyOf: { const: string }[] } } }
+    ).properties.action.anyOf.map((entry) => entry.const);
+    expect(actions).toEqual(["status", "wait", "kill", "list"]);
   });
 });
 
@@ -417,7 +455,7 @@ describe("bash_job — T16 job_id resolution and guards", () => {
 
   it("requires job_id for every action except list", async () => {
     const manager = fakeManager();
-    for (const action of ["status", "output", "wait", "kill"] as const) {
+    for (const action of ["status", "wait", "kill"] as const) {
       await expect(run(manager, { action })).rejects.toThrow(`bash_job(action: "${action}") requires job_id`);
       await expect(run(manager, { action, job_id: "   " })).rejects.toThrow("requires job_id");
     }
@@ -430,10 +468,10 @@ describe("bash_job — T16 job_id resolution and guards", () => {
 
   it("renders a single-line call", () => {
     const tool = createBashJobTool({ manager: () => undefined });
-    const rendered = tool.renderCall!({ action: "output", job_id: "b_AAAA1111" }, theme, renderContext) as {
+    const rendered = tool.renderCall!({ action: "status", job_id: "b_AAAA1111" }, theme, renderContext) as {
       text: string;
     };
-    expect(rendered.text).toBe("bash_job output b_AAAA1111");
+    expect(rendered.text).toBe("bash_job status b_AAAA1111");
     const list = tool.renderCall!({ action: "list" }, theme, renderContext) as { text: string };
     expect(list.text).toBe("bash_job list");
   });
@@ -444,6 +482,9 @@ describe("bash_job — T16 job_id resolution and guards", () => {
     for (const value of strings) expect(value).not.toMatch(/[§]|architecture/);
     expect(tool.description).toContain("job_id");
     expect(tool.promptSnippet).toContain("unique prefix");
+    // Change A: the model must be told the log is an ordinary file.
+    expect(tool.description).toMatch(/plain file/);
+    expect(tool.description).toMatch(/read tool|tail\/grep\/awk/);
   });
 });
 
