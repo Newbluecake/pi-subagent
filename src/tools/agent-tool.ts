@@ -131,7 +131,10 @@ export const AgentToolParams = Type.Object({
     }),
   ),
   resume: Type.Optional(
-    Type.String({ description: "Agent label or run_id of a completed subagent session to continue." }),
+    Type.String({
+      description:
+        "Agent label or run_id of a terminal subagent session (completed, failed, timed_out or aborted) with an existing persisted session to continue.",
+    }),
   ),
   isolation: Type.Optional(
     Type.Literal("worktree", {
@@ -156,7 +159,7 @@ export const AgentToolParams = Type.Object({
       description:
         "Optional JSON Schema object. When set, the subagent must submit its final result through an injected " +
         "StructuredOutput tool matching this schema; the host independently re-validates the submitted payload " +
-        "before the run is considered completed (double validation — architecture §7.2 X10). If the run ends " +
+        "before the run is considered completed (validated twice — by the injected tool at submission and independently by the host before completion). If the run ends " +
         "without a schema-valid submission it is reported as failed, not completed with free text.",
     }),
   ),
@@ -195,7 +198,7 @@ export function createAgentTool(deps: {
       "Launch an autonomous subagent to handle a complex, multi-step task. The subagent runs in its own bounded session " +
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
       "(completed/failed/timed_out/aborted). Use get_subagent_result to check on or wait for a background run, and " +
-      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to a completed Agent label or run_id to continue its persisted session. " +
+      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
       "Set schema to require a structured (schema-validated) result instead of free text." +
       nestedNote,
     promptSnippet:
@@ -295,7 +298,18 @@ export function createAgentTool(deps: {
       })();
       if (outcome.status !== "completed") {
         const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
-        throw new Error(`Subagent "${params.description}" did not complete successfully: ${reason}`);
+        const tail = outcome.text?.trim();
+        const excerpt = tail ? (tail.length > 500 ? `…${tail.slice(-500)}` : tail) : undefined;
+        const parts = [
+          `Subagent "${params.description}" did not complete successfully: ${reason} (run_id: ${outcome.runId}).`,
+        ];
+        if (outcome.diag.sessionFile) {
+          parts.push(`A persisted session may be resumable — retry with resume: "${outcome.runId}".`);
+        } else {
+          parts.push("The run failed before a session was created; there is nothing to resume.");
+        }
+        if (excerpt) parts.push(`Partial output (tail): ${excerpt}`);
+        throw new Error(parts.join(" "));
       }
       return {
         content: [

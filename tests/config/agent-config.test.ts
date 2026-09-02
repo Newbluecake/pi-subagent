@@ -192,8 +192,38 @@ describe("formatAgentTypesForPrompt (system-prompt injection)", () => {
     const lines = out.split("\n");
     const row = lines.find((l) => l.startsWith("- verbose:"))!;
     expect(row).toContain("line one line two"); // whitespace collapsed
-    expect(row!.length).toBeLessThan(230); // "- verbose: " + ≤200 chars
+    expect(row!.length).toBeLessThan(320); // "- verbose: " + ≤300 chars
     expect(row).toMatch(/\.\.\.$/);
+  });
+
+  it("clips at an English sentence boundary within the limit", () => {
+    const out = formatAgentTypesForPrompt([type("verbose", `First sentence. ${"x".repeat(400)}`)]);
+    const row = out.split("\n").find((l) => l.startsWith("- verbose:"))!;
+    expect(row).toContain("First sentence.");
+    expect(row).not.toMatch(/\.\.\.$/);
+  });
+
+  it("treats CJK sentence punctuation as a boundary without trailing whitespace", () => {
+    const out = formatAgentTypesForPrompt([type("verbose", `句一。${"字".repeat(400)}`)]);
+    const row = out.split("\n").find((l) => l.startsWith("- verbose:"))!;
+    expect(row).toContain("句一。");
+    expect(row).not.toMatch(/\.\.\.$/);
+  });
+
+  it("falls back to a hard cut when the window has no sentence boundary", () => {
+    const out = formatAgentTypesForPrompt([type("verbose", "x".repeat(400))]);
+    const row = out.split("\n").find((l) => l.startsWith("- verbose:"))!;
+    expect(row.endsWith("...")).toBe(true);
+    expect(row.slice("- verbose: ".length).length).toBe(300);
+  });
+
+  it("appends the tool-usage protocol lines", () => {
+    const out = formatAgentTypesForPrompt([type("worker", "Does work.")]);
+    expect(out).toContain("run_in_background");
+    expect(out).toContain("get_subagent_result");
+    expect(out).toContain("steer_subagent");
+    expect(out).toContain("terminal run");
+    expect(out).toContain("label");
   });
 
   it("returns an empty string when no types are registered (nothing to inject)", () => {

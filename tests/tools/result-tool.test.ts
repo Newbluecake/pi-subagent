@@ -83,6 +83,61 @@ describe("X9 get_subagent_result usage output", () => {
   });
 });
 
+describe("structured result + progress", () => {
+  const queryFor = (snapshot: RunSnapshot): QueryService => ({
+    get: () => snapshot,
+    list: () => [],
+    wait: async () => ({ ok: true, outcome: snapshot.outcome! }),
+    waitAll: async () => ({ settled: [], pending: [] }),
+    steer: async () => undefined,
+    stop: async () => false,
+  });
+
+  it("serializes structuredResult and preserves the usage tail", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, text: undefined, structuredResult: { ok: true } };
+    const tool = createResultTool({ query: queryFor(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith(JSON.stringify({ ok: true }))).toBe(true);
+    expect(text).toContain("cost:$0.0055");
+  });
+
+  it("serializes structuredResult on the wait path and prefers it over text", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, text: "stale text", structuredResult: null };
+    const tool = createResultTool({ query: queryFor(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text.startsWith("null")).toBe(true);
+    expect(text).not.toContain("stale text");
+  });
+
+  it("appends the full progress situation for a non-terminal lookup", async () => {
+    const snap = completedSnapshot();
+    snap.status = "running";
+    snap.outcome = undefined;
+    snap.phase = "model_turn";
+    snap.diag.model = { provider: "p", id: "kimi-k3" };
+    snap.diag.toolHistory = [
+      { name: "bash", toolCallId: "a", startedAt: 0, endedAt: 1_000, isError: false, argsPreview: "ls" },
+      { name: "edit", toolCallId: "b", startedAt: 2_000, argsPreview: "x.ts" },
+    ];
+    snap.diag.text = "working on the result";
+    const tool = createResultTool({ query: queryFor(snap) });
+    const text = (
+      (await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never)).content[0] as {
+        text: string;
+      }
+    ).text;
+    expect(text).toContain("still running");
+    expect(text).toContain("⏳ p/kimi-k3");
+    expect(text).toContain("✓ bash ls");
+    expect(text).toContain("▸ edit x.ts");
+    expect(text).toContain("💬 working on the result");
+  });
+});
+
 describe("pi usage accounting: tool-result usage attach + first-terminal dedupe", () => {
   const query = (): QueryService => ({
     get: () => completedSnapshot(),

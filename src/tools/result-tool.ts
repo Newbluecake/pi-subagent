@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
+import { buildProgressLines } from "./agent-tool.js";
 import { toPiToolUsage } from "./usage.js";
 
 /**
@@ -11,7 +12,10 @@ import { toPiToolUsage } from "./usage.js";
  * — this closes the original plugin's P2 defect (unbounded wait:true).
  */
 export const ResultToolParams = Type.Object({
-  run_id: Type.String({ description: "The run id returned by the Agent tool." }),
+  run_id: Type.String({
+    description:
+      "The run id returned by the Agent tool; also accepts a unique run_id prefix or the Agent call's label (its description).",
+  }),
   wait: Type.Optional(
     Type.Boolean({ description: "If true, block until the run reaches a terminal state (bounded by wait_ms)." }),
   ),
@@ -56,7 +60,10 @@ export function createResultTool(deps: {
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
         const text = snapshot.outcome
           ? formatOutcome(snapshot.outcome)
-          : `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`;
+          : [
+              `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
+              ...buildProgressLines(snapshot, Date.now()),
+            ].join("\n");
         return {
           content: [{ type: "text" as const, text }],
           ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
@@ -102,6 +109,7 @@ export function createResultTool(deps: {
 function formatOutcome(outcome: {
   status: string;
   text?: string;
+  structuredResult?: unknown;
   error?: { message: string };
   timeoutReason?: string;
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
@@ -109,7 +117,13 @@ function formatOutcome(outcome: {
   const usage = outcome.usage
     ? `\n\n(usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
     : "";
-  if (outcome.status === "completed") return (outcome.text ?? "(subagent completed with no text output)") + usage;
+  if (outcome.status === "completed") {
+    const body =
+      outcome.structuredResult !== undefined
+        ? JSON.stringify(outcome.structuredResult)
+        : (outcome.text ?? "(subagent completed with no text output)");
+    return body + usage;
+  }
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
   return `Subagent run ${outcome.status}: ${reason}${usage}`;
 }

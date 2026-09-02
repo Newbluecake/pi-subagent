@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { Text } from "@earendil-works/pi-tui";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
-import type { RunOutcome, SpawnRequest } from "../../src/core/types.js";
+import type { RunDiagnostics, RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
-function outcome(runId: string): RunOutcome {
+function outcome(
+  runId: string,
+  overrides: Partial<RunOutcome> = {},
+  diagOverrides: Partial<RunDiagnostics> = {},
+): RunOutcome {
   return {
     runId,
     status: "completed",
@@ -22,7 +26,9 @@ function outcome(runId: string): RunOutcome {
       degraded: [],
       staleInputs: 0,
       unkillable: [],
+      ...diagOverrides,
     },
+    ...overrides,
   };
 }
 
@@ -100,6 +106,70 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
       {} as never,
     );
     expect(port.seen?.schema).toEqual(schema);
+  });
+});
+
+describe("tools/agent-tool: foreground failure diagnostics", () => {
+  const failed = (text?: string, sessionFile?: string) =>
+    outcome("failed-42", { status: "failed", text, error: { message: "boom" } }, { sessionFile });
+
+  it("includes runId, a non-committal resume hint, and a capped output tail", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async () => failed("x".repeat(1000), "/missing/session.json");
+    const tool = createAgentTool({ spawn: port });
+    await expect(
+      tool.execute(
+        "tc1",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/did not complete successfully: boom.*run_id: failed-42.*may be resumable.*resume: "failed-42"/);
+    try {
+      await tool.execute(
+        "tc2",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        undefined,
+        {} as never,
+      );
+    } catch (error) {
+      const message = String(error);
+      expect(message).toContain(`…${"x".repeat(500)}`);
+      expect(message).not.toContain("x".repeat(502));
+      expect(message.length).toBeGreaterThan(500);
+    }
+  });
+
+  it("does not check session-file existence before using the non-committal hint", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async () => failed(undefined, "/definitely/not/on/disk");
+    const tool = createAgentTool({ spawn: port });
+    await expect(
+      tool.execute(
+        "tc1",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/may be resumable/);
+  });
+
+  it("explains when no session was created and omits blank output tails", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async () => failed("   ");
+    const tool = createAgentTool({ spawn: port });
+    await expect(
+      tool.execute(
+        "tc1",
+        { description: "demo", prompt: "p", subagent_type: "general" },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/nothing to resume/);
   });
 });
 

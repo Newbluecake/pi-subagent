@@ -186,11 +186,21 @@ export function createAgentTypeRegistry(cwd = process.cwd(), home = homedir()): 
  * to one line and clipped so a verbose .md description cannot blow up the
  * prompt. Returns "" when no types are registered (nothing to inject).
  */
+/** Clip at the last sentence boundary within `limit`; hard `...` cut when none exists. */
+function clipAtSentenceBoundary(text: string, limit: number): string {
+  const window = text.slice(0, limit);
+  const matches = [...window.matchAll(/[.!?;](?=\s|$)|[。！？；]/g)];
+  const last = matches[matches.length - 1];
+  if (last?.index !== undefined) return window.slice(0, last.index + 1);
+  return `${text.slice(0, limit - 3)}...`;
+}
+
 export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): string {
   if (types.length === 0) return "";
+  const DESC_LIMIT = 300;
   const lines = types.map((t) => {
     const desc = t.description.replace(/\s+/g, " ").trim();
-    const clipped = desc.length > 200 ? `${desc.slice(0, 197)}...` : desc;
+    const clipped = desc.length > DESC_LIMIT ? clipAtSentenceBoundary(desc, DESC_LIMIT) : desc;
     // Surface a pinned model (strict pair or fuzzy hint) so the calling
     // model knows the type's default and only passes `model` to override.
     const pinned = t.model ? `${t.model.provider}/${t.model.id}` : t.modelHint;
@@ -200,6 +210,10 @@ export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): st
     "## Available subagent types (pi-subagent)",
     "When calling the Agent tool, pass one of these exact names as `subagent_type`:",
     ...lines,
+    "Tool protocol: a foreground Agent call blocks until the subagent finishes and returns its result directly.",
+    "With run_in_background: true the Agent call returns immediately with a run_id — poll or block with get_subagent_result(run_id, wait?).",
+    "steer_subagent works only on a run that is still running; the Agent tool's resume parameter works only on a terminal run with an existing persisted session (terminal includes completed, failed, timed_out and aborted).",
+    "Anywhere a run_id is accepted (get_subagent_result, steer_subagent, resume), the Agent call's label (its description) works too.",
   ].join("\n");
 }
 

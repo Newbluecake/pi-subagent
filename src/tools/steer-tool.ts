@@ -11,7 +11,10 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
  * QueryService.steer contract, service/query-service.ts).
  */
 export const SteerToolParams = Type.Object({
-  run_id: Type.String({ description: "The run id of the subagent to steer." }),
+  run_id: Type.String({
+    description:
+      "The run id of the subagent to steer; also accepts a unique run_id prefix or the Agent call's label (its description).",
+  }),
   text: Type.String({ description: "The follow-up instruction to send to the running subagent." }),
 });
 export type SteerToolParams = Static<typeof SteerToolParams>;
