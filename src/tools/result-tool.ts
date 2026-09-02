@@ -21,7 +21,10 @@ export const ResultToolParams = Type.Object({
       "The run id returned by the Agent tool; also accepts a unique run_id prefix or the Agent call's label (its description).",
   }),
   wait: Type.Optional(
-    Type.Boolean({ description: "If true, block until the run reaches a terminal state (bounded by wait_ms)." }),
+    Type.Boolean({
+      description:
+        "If true, block until the run reaches a terminal state (bounded by wait_ms). Prefer waiting for the run's completion notification instead of blocking your turn; use wait only as a fallback when an expected notification never arrived.",
+    }),
   ),
   wait_ms: Type.Optional(
     Type.Number({
@@ -62,8 +65,11 @@ export function createResultTool(deps: {
     name: "get_subagent_result",
     label: "Get Subagent Result",
     description:
-      "Check on, or wait for, a subagent run started with the Agent tool (run_in_background: true). " +
-      "Set wait: true to block until the run finishes, up to wait_ms.",
+      "Check on, or collect the result of, a subagent run started with the Agent tool (run_in_background: true). " +
+      "Background runs push a completion notification on terminal state, so the normal flow is: continue other " +
+      "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
+      "to block until the run finishes (up to wait_ms) — avoid it while anything else could proceed; it is a " +
+      "fallback for when an expected notification never arrived.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
     /**

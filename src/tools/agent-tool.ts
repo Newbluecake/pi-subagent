@@ -200,8 +200,10 @@ export function createAgentTool(deps: {
     description:
       "Launch an autonomous subagent to handle a complex, multi-step task. The subagent runs in its own bounded session " +
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
-      "(completed/failed/timed_out/aborted). Use get_subagent_result to check on or wait for a background run, and " +
-      "steer_subagent to send a follow-up instruction to a still-running one. A foreground call that exceeds the configured auto-background threshold returns early with a run_id (the run keeps going; collect it with get_subagent_result). abort_subagent stops a running subagent. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
+      "(completed/failed/timed_out/aborted). A background run pushes a completion notification to you when it " +
+      "reaches a terminal state: prefer continuing other work (or ending your turn) and collecting the result " +
+      "with get_subagent_result after that notification arrives, rather than blocking with wait: true. Use " +
+      "steer_subagent to send a follow-up instruction to a still-running one. A foreground call that exceeds the configured auto-background threshold returns early with a run_id (the run keeps going; you will be notified on completion). abort_subagent stops a running subagent. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
       "Set schema to require a structured (schema-validated) result instead of free text." +
       nestedNote,
     promptSnippet:
@@ -260,7 +262,7 @@ export function createAgentTool(deps: {
           content: [
             {
               type: "text" as const,
-              text: `Subagent "${params.description}" started in background (run_id: ${spawned.runId}). Use get_subagent_result(run_id: "${spawned.runId}") to check on it.`,
+              text: `Subagent "${params.description}" started in background (run_id: ${spawned.runId}). You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
             },
           ],
           details: { runId: spawned.runId, background: true },
@@ -324,7 +326,7 @@ export function createAgentTool(deps: {
                 content: [
                   {
                     type: "text" as const,
-                    text: `Subagent "${params.description}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget. You must collect it later: get_subagent_result(run_id: "${spawned.runId}", wait: true) to block for its result; steer_subagent to send a follow-up instruction; abort_subagent to stop it.`,
+                    text: `Subagent "${params.description}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget, and you will receive a completion notification when it finishes; collect it then with get_subagent_result(run_id: "${spawned.runId}"). Meanwhile you can use steer_subagent to send a follow-up instruction, or abort_subagent to stop it.`,
                   },
                 ],
                 details: { runId: spawned.runId, background: true, autoBackgrounded: true },
