@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import type { LifecycleEvent, RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
@@ -578,6 +578,86 @@ describe("FleetWidgetController (fake ui)", () => {
       widget.dispose();
     }).not.toThrow();
     expect(ui.calls).toBe(1); // sticky dead: no further attempts
+  });
+
+  // The tick is a self-rescheduling one-shot, so a throw that skips the
+  // re-arm is not a dropped frame but a permanently frozen agent tree; and the
+  // constructor's initial refresh() runs inside buildSessionStack, so a throw
+  // there takes the whole extension down with the session_start handler. (The
+  // onLifecycle path below is defense in depth only — mergeExtensionPoints
+  // already catches throws on the H1 fan-out.)
+  it("a throwing view-model source drops the frame, warns once, and keeps the tick alive (recovers next frame)", () => {
+    const clock = new FakeClock(NOW);
+    const ui = fakeUi();
+    const query = fakeQuery([snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) })]);
+    const healthy = query.list;
+    let boom = true;
+    query.list = () => {
+      if (boom) throw new Error("registry exploded");
+      return healthy();
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const widget = new FleetWidgetController({ ui, query, clock });
+      expect(ui.calls).toHaveLength(0); // initial frame dropped, nothing pushed
+      expect(clock.pendingTimers).toBe(1); // ...but the tick is armed anyway
+
+      clock.advance(3_000); // three more failing frames
+      expect(ui.calls).toHaveLength(0);
+      expect(clock.pendingTimers).toBe(1); // clock never stopped
+      expect(warn).toHaveBeenCalledTimes(1); // warn-once, not once per tick
+
+      boom = false;
+      clock.advance(1_000);
+      const last = ui.calls[ui.calls.length - 1]!;
+      expect(last.key).toBe(FLEET_WIDGET_KEY);
+      expect(last.content![0]).toContain("1 active Agents"); // recovered on its own
+      widget.dispose();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("construction survives a throwing view model (a throw would escape buildSessionStack → session_start)", () => {
+    const clock = new FakeClock(NOW);
+    const ui = fakeUi();
+    const query = fakeQuery([snapshot({ runId: "live-0000" })]);
+    query.list = () => {
+      throw new Error("registry exploded");
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let widget: FleetWidgetController | undefined;
+      expect(() => {
+        widget = new FleetWidgetController({ ui, query, clock });
+      }).not.toThrow();
+      expect(clock.pendingTimers).toBe(1); // still armed, so it can recover later
+      widget!.dispose();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("onLifecycle never propagates a refresh failure (warn-once shared with the tick path)", () => {
+    const clock = new FakeClock(NOW);
+    const ui = fakeUi();
+    const query = fakeQuery([snapshot({ runId: "live-0000" })]);
+    query.list = () => {
+      throw new Error("registry exploded");
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const widget = new FleetWidgetController({ ui, query, clock });
+      expect(() => widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"))).not.toThrow();
+      expect(() => widget.refresh()).not.toThrow();
+      expect(() => clock.advance(2_000)).not.toThrow();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(clock.pendingTimers).toBe(1);
+      widget.dispose();
+      expect(clock.pendingTimers).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("settings off (enabled: false) → inert: no setWidget call, no timer", () => {

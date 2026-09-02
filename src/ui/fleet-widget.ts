@@ -39,7 +39,16 @@ import {
  *     setWidget → the controller goes inert silently), and the H1
  *     `onLifecycle` immediate-refresh hook exposed as
  *     SubagentExtensionPoints so stack.ts can merge it into the existing
- *     extension-point fan-out (no new hook surface).
+ *     extension-point fan-out (no new hook surface). Failure isolation is
+ *     part of the contract, but note WHICH paths actually needed it: the H1
+ *     fan-out is already guarded upstream (mergeExtensionPoints catches +
+ *     WARNs every onLifecycle throw), so the two unprotected paths were the
+ *     1Hz tick — a self-rescheduling one-shot whose skipped re-arm freezes
+ *     the tree for the whole session, not just one frame — and the
+ *     constructor's initial refresh(), which runs inside buildSessionStack
+ *     and would therefore take the *entire extension* down with it (a throw
+ *     escapes the session_start handler before `holder.current = stack`, so
+ *     every later Agent call fails with "no active session yet").
  *
  * The data source is always QueryService.list() → buildFleetViewModel (the
  * same view-model the panel renders); lifecycle events only trigger an early
@@ -312,6 +321,8 @@ export class FleetWidgetController {
   private disposed = false;
   /** Sticky: one setWidget throw (degenerate non-interactive host) disables the widget silently. */
   private uiDead = false;
+  /** Sticky: refresh() failures are reported once — the 1Hz tick keeps running. */
+  private warnedRefreshFailure = false;
   /** H1 observer; merge into the session's SubagentExtensionPoints fan-out. */
   readonly lifecycle: SubagentExtensionPoints;
 
@@ -325,9 +336,20 @@ export class FleetWidgetController {
     if (!this.live) return; // initial push already hit a degenerate host — stay inert, no tick
     const refreshMs = deps.refreshMs ?? 1000;
     const tick = () => {
-      if (this.disposed) return;
-      this.refresh();
-      this.timer = this.clock.setTimer(refreshMs, tick);
+      if (!this.live) return;
+      try {
+        this.refresh();
+      } finally {
+        // Unconditional re-arm. This is a self-rescheduling ONE-SHOT timer, not
+        // a setInterval: a skipped setTimer is not a dropped frame but a
+        // permanently stopped clock (the agent tree would freeze for the rest
+        // of the session, recoverable only by a /reload-driven stack rebuild).
+        // `live` — not `!disposed` — is the correct guard: push() sets uiDead +
+        // stopTimer() as its deliberate give-up path for a degenerate host, and
+        // re-arming there would resurrect a zombie 1Hz tick that only ever
+        // early-returns out of refresh().
+        if (this.live) this.timer = this.clock.setTimer(refreshMs, tick);
+      }
     };
     this.timer = this.clock.setTimer(refreshMs, tick);
   }
@@ -336,9 +358,37 @@ export class FleetWidgetController {
     return !this.disposed && !this.uiDead && this.setWidget !== undefined && this.deps.enabled !== false;
   }
 
-  /** Re-pull the view model and push lines (or hide). Safe to call from H1 lifecycle sinks. */
+  /**
+   * Re-pull the view model and push lines (or hide). A view-model/render
+   * failure is swallowed here (frame dropped, warned once) rather than
+   * propagated, because refresh() has three callers with very different blast
+   * radii:
+   *  - the constructor, running inside buildSessionStack → a throw escapes the
+   *    session_start handler before `holder.current = stack` is assigned and
+   *    kills the whole extension for that session (every Agent call then fails
+   *    with "no active session yet"). This is the worst one.
+   *  - the 1Hz tick → see the re-arm note in the constructor.
+   *  - the H1 onLifecycle sink wired in stack.ts → defense in depth only;
+   *    mergeExtensionPoints already catches and WARNs throws on that path.
+   * Dropping a frame is always safe: the widget holds no incremental state, so
+   * the next tick rebuilds it from scratch.
+   */
   refresh(): void {
     if (!this.live) return;
+    try {
+      this.renderFrame();
+    } catch (error) {
+      // Warn-once: a 1Hz tick would otherwise spam the TUI with the same line.
+      if (!this.warnedRefreshFailure) {
+        this.warnedRefreshFailure = true;
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[pi-subagent] fleet widget refresh failed (frame dropped, tick continues): ${detail}`);
+      }
+    }
+  }
+
+  /** Unguarded refresh core — never call directly, always go through refresh(). */
+  private renderFrame(): void {
     const model = buildFleetViewModel(this.deps.query.list(), {
       now: this.clock.now(),
       recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
