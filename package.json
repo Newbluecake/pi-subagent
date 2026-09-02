@@ -11,6 +11,8 @@
   "bugs": "https://github.com/Newbluecake/pi-subagent/issues",
   "files": [
     "index.js",
+    "index.ts",
+    "src",
     "dist",
     "README.md",
     "README.en.md",
@@ -24,7 +26,7 @@
   "main": "dist/index.js",
   "pi": {
     "extensions": [
-      "./index.js"
+      "./index.ts"
     ]
   },
   "exports": {
@@ -42,10 +44,24 @@
     "@earendil-works/pi-coding-agent": ">=0.84.0 <0.86.0",
     "@earendil-works/pi-tui": ">=0.84.0 <0.86.0"
   },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "@sinclair/typebox": "^0.34.49"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0 <0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0 <0.86.0",
+    "@earendil-works/pi-tui": ">=0.84.0 <0.86.0",
     "@types/node": "^22.0.0",
     "prettier": "^3.9.6",
     "tsx": "^4.23.13",

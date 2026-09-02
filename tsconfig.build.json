@@ -1,7 +1,9 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "removeComments": true
+    "removeComments": true,
+    "outDir": "dist",
+    "rootDir": "src"
   },
-  "exclude": ["src/workflow/orchestrator.testing.ts", "node_modules", "dist"]
+  "exclude": ["src/workflow/orchestrator.testing.ts", "index.ts", "node_modules", "dist"]
 }

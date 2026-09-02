@@ -86,6 +86,18 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
 }
 ```
 
+## Installation
+
+pi loads TypeScript source directly (via jiti) — no build step required:
+
+```sh
+pi install git:github.com/Newbluecake/pi-subagent
+# Update later with:
+pi update --extension git:github.com/Newbluecake/pi-subagent
+```
+
+Alternatively download the zip from [GitHub Releases](https://github.com/Newbluecake/pi-subagent/releases) (prebuilt `dist/` included), unzip, and `pi install ./pi-subagent` (local-path install; not covered by `pi update`).
+
 ## Development
 
 ```sh

@@ -30,8 +30,11 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 
 ## Repository layout
 
-- `index.js` — package-root entry. Thin re-export of `./dist/index.js` so pi's resource list
-  shows `pi-subagent/index.js` instead of `dist/index.js`. Keep it thin.
+- `index.ts` — package-root entry **for pi** (the `pi.extensions` manifest target). pi loads
+  extensions through jiti (runtime TypeScript), so git installs need no build step. Thin
+  re-export of `./src/index.js` (jiti maps the `.js` suffix to the `.ts` file). Keep it thin.
+- `index.js` — companion entry for plain Node consumers, re-exporting `./dist/index.js`
+  (package.json `main`/`exports`). Not used by pi.
 - `src/index.ts` — **assembly only** (invariant I7): wire tools/commands/hooks, rebuild the
   session stack on `session_start`. No logic lives here.
 - `src/core/` — pure domain: state machine, deadline budgets, ids, types. No pi imports.
@@ -61,8 +64,12 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 
 ## pi-extension specifics (easy to get wrong)
 
-- `dist/` is **gitignored but required at load time** — pi's git/npm install does not run a
-  build. Any packaging path must include a compiled `dist/`.
+- pi loads this package straight from TypeScript source (`index.ts` → `src/`) via jiti —
+  that is what makes `pi install git:...` work despite `dist/` being gitignored (pi's git
+  install runs no build). `dist/` is still built in CI and published to npm for the Node
+  `main`/`exports` entry, but pi never reads it. The pi peers are `peerDependenciesMeta`
+  optional (pi aliases them to its own bundled modules at load time) and duplicated in
+  `devDependencies` for local typecheck/tests.
 - The extension re-activates on pi's `/reload` in the same process without busting Node's
   module cache. Never keep mutable state at module scope; rebuild per `activate()` (see the
   `HOST_KEY` globalThis guard and its identity-checked release in `src/index.ts`).

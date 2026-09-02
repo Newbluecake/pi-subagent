@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Zero-build git installs** — the `pi.extensions` manifest now points at a source-form
+  root entry (`./index.ts` → `./src/index.js`), which pi loads through its bundled jiti
+  TypeScript runtime. `pi install git:github.com/Newbluecake/pi-subagent` and
+  `pi update --extension ...` now work end to end despite `dist/` staying gitignored (pi's
+  git install runs no build). The `@earendil-works/pi-*` peers are marked
+  `peerDependenciesMeta.optional` (pi aliases them to its own bundled modules) and duplicated
+  in `devDependencies`, so pi's `npm install --omit=dev` in the clone no longer pulls a
+  second copy of pi. The compiled `index.js`/`dist` entries remain for npm/Node consumers.
+
 ## [0.2.0] - 2026-09-02
 
 ### Added

@@ -87,6 +87,18 @@ queue_wait → resolve_config → session_create → extension_bind
 }
 ```
 
+## 安装
+
+pi 直接加载 TypeScript 源码（经 jiti），无需构建：
+
+```sh
+pi install git:github.com/Newbluecake/pi-subagent
+# 更新：
+pi update --extension git:github.com/Newbluecake/pi-subagent
+```
+
+也可以从 [GitHub Releases](https://github.com/Newbluecake/pi-subagent/releases) 下载 zip（已含编译产物），解压后 `pi install ./pi-subagent`（本地路径方式，不参与 `pi update`）。
+
 ## 开发
 
 ```sh
