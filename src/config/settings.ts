@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
@@ -193,5 +193,51 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
       `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
     );
     return loadSettings(undefined);
+  }
+}
+
+/**
+ * Persist a single settings override to the user settings file (backs
+ * `/agent settings set|reset`). `dottedKey` is a path like "budget.idleMs"
+ * or "worktree.enabled"; value === undefined removes the override (and
+ * prunes parent objects left empty). Other fields are preserved. Returns an
+ * error message on failure, undefined on success; never throws — a
+ * malformed existing file is reported rather than silently clobbered.
+ */
+export function persistSettingOverride(
+  dottedKey: string,
+  value: unknown,
+  path: string = defaultSettingsPath(),
+): string | undefined {
+  let raw: Record<string, unknown> = {};
+  try {
+    if (existsSync(path)) {
+      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+        return `${path}: top-level value is not an object; not modifying it`;
+      raw = parsed as Record<string, unknown>;
+    }
+  } catch (error) {
+    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const segments = dottedKey.split(".");
+  let node: Record<string, unknown> = raw;
+  for (const segment of segments.slice(0, -1)) {
+    const child = node[segment];
+    const next =
+      child !== null && typeof child === "object" && !Array.isArray(child)
+        ? { ...(child as Record<string, unknown>) }
+        : {};
+    node[segment] = next;
+    node = next;
+  }
+  const leaf = segments[segments.length - 1]!;
+  if (value === undefined) delete node[leaf];
+  else node[leaf] = value;
+  try {
+    writeFileSync(path, JSON.stringify(raw, null, 2) + "\n", "utf8");
+    return undefined;
+  } catch (error) {
+    return `${path}: ${error instanceof Error ? error.message : String(error)}`;
   }
 }

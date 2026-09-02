@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { renderStatus } from "../../src/commands/status.js";
+import { createStatusCommand, renderStatus } from "../../src/commands/status.js";
+import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
+import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 
 function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
@@ -224,5 +226,111 @@ describe("M7 renderCosts", () => {
   it("handles an empty session", async () => {
     const { renderCosts } = await import("../../src/commands/status.js");
     expect(renderCosts({ list: () => [] } as never)).toContain("No subagent runs");
+  });
+});
+
+describe("/agent settings subcommand", () => {
+  function settingsDeps() {
+    const persisted: Array<[string, unknown]> = [];
+    const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    const d = {
+      ...deps([]),
+      settings: {
+        current,
+        persist: (key: string, value: unknown) => {
+          persisted.push([key, value]);
+          return undefined;
+        },
+        path: "/tmp/test-pi-subagent.json",
+      },
+    };
+    return { d, persisted, current };
+  }
+  function run(d: unknown, args: string): string {
+    const cmd = createStatusCommand(d as never);
+    let seen = "";
+    void cmd.handler(args, { ui: { notify: (m: string) => (seen = m) } } as never);
+    return seen;
+  }
+
+  it("lists all settings and marks overrides", () => {
+    const { d, current } = settingsDeps();
+    current.budget.idleMs = 600000;
+    const out = run(d, "settings");
+    expect(out).toContain("budget.idleMs");
+    expect(out).toContain("600000 (default 240000)");
+    expect(out).toContain("concurrencyLimit");
+    expect(out).toContain("worktree.enabled");
+    expect(out).toContain("workflow.runawayPolicy");
+  });
+
+  it("budget.* set mutates live settings, persists, and reports immediate effect", () => {
+    const { d, persisted, current } = settingsDeps();
+    const out = run(d, "settings set budget.idleMs 600000");
+    expect(current.budget.idleMs).toBe(600000);
+    expect(persisted).toEqual([["budget.idleMs", 600000]]);
+    expect(out).toContain("240000 → 600000");
+    expect(out).toContain("applies to new runs immediately");
+  });
+
+  it("non-budget set persists but reports /reload", () => {
+    const { d, persisted, current } = settingsDeps();
+    const out = run(d, "settings set fleetWidget false");
+    expect(current.fleetWidget).toBe(false);
+    expect(persisted).toEqual([["fleetWidget", false]]);
+    expect(out).toContain("takes effect after /reload");
+  });
+
+  it("supports nested booleans, enums, and strings", () => {
+    const { d, current } = settingsDeps();
+    run(d, "settings set worktree.enabled on");
+    expect(current.worktree.enabled).toBe(true);
+    run(d, "settings set workflow.replayScope content");
+    expect(current.workflow.replayScope).toBe("content");
+    expect(run(d, "settings set workflow.replayScope bogus")).toContain("expected one of: chain, content");
+    run(d, "settings set workflow.journalDir /tmp/journal");
+    expect(current.workflow.journalDir).toBe("/tmp/journal");
+  });
+
+  it("reset restores the default and removes the override", () => {
+    const { d, persisted, current } = settingsDeps();
+    current.budget.idleMs = 600000;
+    const out = run(d, "settings reset budget.idleMs");
+    expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
+    expect(persisted).toEqual([["budget.idleMs", undefined]]);
+    expect(out).toContain("reset to default");
+  });
+
+  it("rejects unknown keys and bad values without touching state", () => {
+    const { d, persisted, current } = settingsDeps();
+    expect(run(d, "settings set nope 1")).toContain("Unknown settings key");
+    expect(run(d, "settings set budget.idleMs -5")).toContain("Invalid value");
+    expect(run(d, "settings set budget.startupRetries 1.5")).toContain("Invalid value");
+    expect(run(d, "settings set fleetWidget maybe")).toContain("expected true/false");
+    expect(run(d, "settings frobnicate")).toContain("Unknown settings action");
+    expect(persisted).toEqual([]);
+    expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
+  });
+
+  it("reports persist failures but keeps the in-memory change", () => {
+    const { d, current } = settingsDeps();
+    d.settings.persist = () => "disk full";
+    const out = run(d, "settings set budget.idleMs 1");
+    expect(current.budget.idleMs).toBe(1);
+    expect(out).toContain("Persist failed: disk full");
+  });
+
+  it("/agent budget alias scopes keys to budget.*", () => {
+    const { d, persisted, current } = settingsDeps();
+    const out = run(d, "budget set idleMs 600000");
+    expect(current.budget.idleMs).toBe(600000);
+    expect(persisted).toEqual([["budget.idleMs", 600000]]);
+    expect(out).toContain("applies to new runs immediately");
+    // alias 下非 budget key 被拒绝
+    expect(run(d, "budget set fleetWidget false")).toContain("Unknown budget key");
+    // 列出时只显示 budget 行
+    const list = run(d, "budget");
+    expect(list).toContain("budget.idleMs");
+    expect(list).not.toContain("fleetWidget");
   });
 });

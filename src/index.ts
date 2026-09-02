@@ -6,7 +6,12 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
-import { loadSettingsFromFile, type AgentSettings } from "./config/settings.js";
+import {
+  defaultSettingsPath,
+  loadSettingsFromFile,
+  persistSettingOverride,
+  type AgentSettings,
+} from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack, type Stack } from "./stack.js";
@@ -146,6 +151,16 @@ export default function activate(pi: ExtensionAPI): void {
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
       workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
+      settings: {
+        // settings.budget is passed by reference into every session stack
+        // (stack.ts) and read at spawn time (spawn-service mergeBudget), so
+        // in-place budget.* mutation takes effect for new runs without a
+        // reload. Other keys are captured at activate/session build — the
+        // command tells the user to /reload for those.
+        current: settings,
+        persist: (key, value) => persistSettingOverride(key, value),
+        path: defaultSettingsPath(),
+      },
     }),
   );
 
