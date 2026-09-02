@@ -1,4 +1,5 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { RunSnapshot, UsageDelta } from "../core/types.js";
 import {
   SETTING_SPECS,
@@ -19,6 +20,8 @@ import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
+import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
+import { describeJobStatus } from "../tools/bash-job-tool.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 
 /** Live settings object + persistence port (see config/setting-specs.ts). */
@@ -32,6 +35,12 @@ export interface StatusCommandDeps {
   resolveRun?: (handle: string) => ResolveRunResult;
   /** M3.6: in-flight workflow rows for `/agent status`'s own WORKFLOWS section. */
   workflow?: { activity: { list(): readonly WorkflowActivitySnapshot[] }; now?: () => number };
+  /**
+   * bash auto-background §7: backgrounded bash jobs for the `bash jobs`
+   * section and `/agent status <b_…>`. Absent (or empty) ⇒ nothing rendered,
+   * so hosts without the feature see the previous output byte-for-byte.
+   */
+  bashJobs?: { list(): readonly JobRecord[] };
   /** `/agent settings` (+ `/agent budget` alias) — absent only in tests/minimal hosts. */
   settings?: SettingsCommandDeps;
 }
@@ -99,6 +108,11 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
       // M-C4: `/agent status <runId-or-prefix>` (or `/agent <runId>`) — one run's tool timeline.
       const idArg = sub === "status" ? tokens[1] : sub;
       if (idArg) {
+        // §7: `b_` is the bash job namespace, `r_`/labels stay with the runs.
+        if (idArg.startsWith("b_") && deps.bashJobs) {
+          ctx.ui.notify(renderBashJobDetail(deps.bashJobs, idArg), "info");
+          return;
+        }
         ctx.ui.notify(renderRunDetail(deps.query, idArg, deps.resolveRun), "info");
         return;
       }
@@ -268,6 +282,76 @@ export function renderCosts(query: QueryService): string {
   return lines.join("\n");
 }
 
+/** Rows shown per group in the `bash jobs` section (§7). */
+const BASH_JOB_ROWS = 5;
+
+function bashJobElapsed(record: JobRecord, now: number): number {
+  return Math.max(0, (record.endedAt ?? now) - (record.spawnedAt ?? record.createdAt));
+}
+
+function bashJobRow(record: JobRecord, now: number, suffix: string): string {
+  return (
+    `  ${record.jobId}  ${describeJobStatus(record)}  ${formatDuration(bashJobElapsed(record, now))}  ` +
+    `$ ${previewCommand(record.command, 40)}  (log ${formatSize(record.logBytes)}${suffix})`
+  );
+}
+
+/**
+ * §7: the `bash jobs` section of `/agent status`. Running jobs first (the
+ * ones the user may still want to kill), then terminal jobs whose completion
+ * notice has not gone out yet. The whole section disappears when there are no
+ * jobs at all — users who never hit the auto-background threshold should not
+ * see a new empty header.
+ */
+export function renderBashJobsSection(port: { list(): readonly JobRecord[] }, now: number): string[] {
+  let jobs: readonly JobRecord[] = [];
+  try {
+    jobs = port.list();
+  } catch {
+    return [];
+  }
+  if (jobs.length === 0) return [];
+  const running = jobs.filter((record) => !isTerminalJobStatus(record.status));
+  const unread = jobs.filter((record) => isTerminalJobStatus(record.status) && record.notifiedAt === undefined);
+  const lines = [`bash jobs (${running.length} running, ${unread.length} finished unread):`];
+  for (const record of running.slice(0, BASH_JOB_ROWS)) lines.push(bashJobRow(record, now, ""));
+  if (running.length > BASH_JOB_ROWS) lines.push(`  … ${running.length - BASH_JOB_ROWS} more running`);
+  for (const record of unread.slice(0, BASH_JOB_ROWS)) lines.push(bashJobRow(record, now, ", unnotified"));
+  if (unread.length > BASH_JOB_ROWS) lines.push(`  … ${unread.length - BASH_JOB_ROWS} more finished unread`);
+  return lines;
+}
+
+/** §7: `/agent status <b_prefix>` — one bash job (exact id or unique prefix). */
+export function renderBashJobDetail(
+  port: { list(): readonly JobRecord[] },
+  handle: string,
+  now: number = Date.now(),
+): string {
+  const jobs = port.list();
+  const matches = jobs.filter((record) => record.jobId === handle || record.jobId.startsWith(handle));
+  const exact = jobs.find((record) => record.jobId === handle);
+  const record = exact ?? (matches.length === 1 ? matches[0] : undefined);
+  if (!record) {
+    if (matches.length > 1) return `Ambiguous "${handle}" — matches: ${matches.map((m) => m.jobId).join(", ")}`;
+    return `No bash job matches "${handle}".`;
+  }
+  const lines = [
+    `Bash job ${record.jobId} · ${describeJobStatus(record)} · ${formatDuration(bashJobElapsed(record, now))}`,
+    `  Command: $ ${previewCommand(record.command, 200)}`,
+    `  Cwd: ${record.cwd || "(unknown)"}`,
+    `  Log: ${record.logPath} (${formatSize(record.logBytes)}${record.outputTruncated ? ", size cap reached" : ""})`,
+  ];
+  if (record.pid !== undefined)
+    lines.push(`  Pid: ${record.pid}${record.pgid !== undefined ? ` (pgid ${record.pgid})` : ""}`);
+  lines.push(
+    `  Flags: ${record.backgroundedAt !== undefined ? "backgrounded" : "foreground"}, ` +
+      `${record.notifiedAt !== undefined ? "notified" : "not notified"}, read cursor ${record.readCursor}`,
+  );
+  if (record.finalText) lines.push(`  Final: ${record.finalText.slice(-300)}`);
+  lines.push(`  Collect output with bash_job(action: "output", job_id: "${record.jobId}").`);
+  return lines.join("\n");
+}
+
 export function renderStatus(deps: StatusCommandDeps): string {
   const runs = deps.query.list();
   const active = runs.filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
@@ -308,5 +392,6 @@ export function renderStatus(deps: StatusCommandDeps): string {
     `Delivery: staged=${delivery.staged} pending=${delivery.pending} batched=${delivery.batched} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned} acked=${deps.notifier.ackedSuppressions}`,
   );
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
+  if (deps.bashJobs) lines.push(...renderBashJobsSection(deps.bashJobs, deps.workflow?.now?.() ?? Date.now()));
   return lines.join("\n");
 }

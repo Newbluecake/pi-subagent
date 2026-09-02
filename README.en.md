@@ -15,6 +15,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
 - **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
 - **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
+- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 120s) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / output / wait / kill / list). POSIX only — see below.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
@@ -47,6 +48,42 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 | `/agent status`         | Diagnostics for every non-terminal run: phase, last event, idle time, orphans |
 | `/agent status <runId>` | One run's full tool timeline                                                  |
 | `/agent costs`          | Per-run spend, cost-descending                                                |
+
+## bash auto-backgrounding
+
+When enabled (on by default, POSIX only) the extension overrides pi's built-in `bash` tool by name. Short commands are **byte-for-byte identical** to the built-in: the foreground path delegates to pi's own bash implementation, so output accumulation, truncation, the temp-file footer and `Command exited with code N` are produced by pi's code, not a lookalike. Only commands that outlive the threshold behave differently — the call returns early with a `job_id`, the process keeps running in its own process group, stdout/stderr are merged into a log file, and when it exits a `bash-job:notification` message is injected with the output tail (triggering a fresh turn). The command's own `timeout` parameter keeps its meaning: it still kills the process tree when it expires, background or not.
+
+The `bash` tool takes one extra parameter, `run_in_background: true` — background it immediately instead of waiting out the threshold.
+
+The `bash_job` tool manages those jobs (`job_id` accepts a unique prefix):
+
+| Action   | What it does                                                                        |
+| -------- | ----------------------------------------------------------------------------------- |
+| `status` | State summary: running/terminal, elapsed, pid, log size                             |
+| `output` | Incremental output since your last read (`offset` re-reads); never consumes the job |
+| `wait`   | Bounded block (default 30s, hard cap 120s); returns the current status on timeout   |
+| `kill`   | Terminate the whole process group (SIGTERM → grace → SIGKILL); idempotent           |
+| `list`   | Every known job (id · state · command preview · age)                                |
+
+Settings (durations are whole seconds, like everywhere else):
+
+| Key                          | Default                         | Meaning                                                                                                            |
+| ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `bashJobs.autoBackgroundS`   | `120`                           | Background a foreground bash call after this; `0` turns the whole feature off (no override registered at all)      |
+| `bashJobs.maxLogBytes`       | `10485760`                      | Per-job log cap; once hit the log stops growing and is flagged truncated — **the process keeps running**           |
+| `bashJobs.maxBackgroundJobs` | `8`                             | Concurrent background jobs; when full the threshold keeps waiting in the foreground and an explicit request errors |
+| `bashJobs.retentionS`        | `86400`                         | How long terminal job records/logs are kept; expired files are pruned on the next startup scan                     |
+| `bashJobs.shutdownPolicy`    | `"keep"`                        | Running jobs on a real `quit`: `keep` or `kill`. reload/new/resume/fork always keep them                           |
+| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`         | Job state + log directory (**JSON file only**, not exposed in `/agent settings`)                                   |
+| `bashJobs.shellPath`         | `$SHELL` (whitelisted) → `bash` | Shell used for job commands; `$SHELL` is honoured only when its basename ∈ {bash, zsh, sh} (**JSON file only**)    |
+
+Behaviour notes:
+
+- **Not overridden on win32**: no process-group semantics there, so the built-in `bash` is left alone and neither `bash` nor `bash_job` is registered.
+- **Same-name override conflicts**: in pi the first registration of a tool name wins. If another extension also overrides `bash` and registers first, this feature is simply inert (it never breaks the other one); to disable the override deliberately, set `bashJobs.autoBackgroundS` to `0`.
+- **Logs and sensitive output**: job records and logs live in `~/.pi/agent/bash-jobs/` (mode 0600, same threat model as pi's session files). Secrets printed by a command **land on disk** until `retentionS` prunes them — point `bashJobs.dir` elsewhere, or redirect sensitive output, if that matters to you.
+- **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
+- Like every non-`budget.*` setting, changes here take effect after `/reload`.
 
 ## Anti-hang architecture
 

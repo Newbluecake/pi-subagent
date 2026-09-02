@@ -5,6 +5,8 @@ import { createSteerTool } from "../../src/tools/steer-tool.js";
 import { createAbortTool } from "../../src/tools/abort-tool.js";
 import { createWorkflowTool } from "../../src/tools/workflow-tool.js";
 import { createStructuredOutputTool } from "../../src/tools/structured-output-tool.js";
+import { createBashTool } from "../../src/tools/bash-tool.js";
+import { createBashJobTool } from "../../src/tools/bash-job-tool.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
   if (!schema || typeof schema !== "object") return out;
@@ -29,6 +31,11 @@ function tools() {
     createAbortTool({ query: {} as never }),
     createWorkflowTool({} as never),
     createStructuredOutputTool({ schema: { type: "object" }, onSubmit: () => ({ ok: true }) }),
+    // bash auto-background surfaces: both are model-facing, so they are held
+    // to the same no-internal-vocabulary bar (the threshold paragraph and the
+    // job wording are generated, so drift here is easy to miss).
+    createBashTool({ manager: () => undefined, autoBackgroundMs: () => 120_000 }),
+    createBashJobTool({ manager: () => undefined }),
   ];
 }
 
@@ -54,5 +61,49 @@ describe("model-facing tool strings", () => {
     const resume = descriptions.find((text) => text.includes("terminal subagent session"));
     expect(resume).toContain("terminal");
     expect(resume).not.toContain("completed subagent session");
+  });
+
+  /**
+   * The bash pair is generated from pi's own bash definition plus our own
+   * wording; these guards cover what the T1 drift test in
+   * `tests/tools/bash-tool.test.ts` does not: that the *model-visible*
+   * vocabulary stays free of plugin-internal terms (job status enum values,
+   * settings paths, file-layout details) and that the shared job/threshold
+   * contract is actually stated where the model can read it.
+   */
+  describe("bash auto-background tools", () => {
+    const bash = () => tools().find((tool) => tool.name === "bash")!;
+    const bashJob = () => tools().find((tool) => tool.name === "bash_job")!;
+
+    it("uses no internal vocabulary in the bash pair's descriptions", () => {
+      for (const tool of [bash(), bashJob()]) {
+        const strings = [tool.description, tool.promptSnippet, ...collectDescriptions(tool.parameters)].filter(
+          (value): value is string => typeof value === "string",
+        );
+        for (const value of strings) {
+          // Internal identifiers that must never leak into a prompt.
+          expect(value).not.toMatch(/exited_unknown|orphaned|BashJobManager|readCursor|bashJobs\./);
+          expect(value).not.toMatch(/plan-fable|autoBackgroundMs|maxLogBytes/);
+        }
+      }
+    });
+
+    it("states the job contract the two tools share", () => {
+      const description = bash().description;
+      expect(description).toContain("job_id");
+      expect(description).toContain("NOT killed");
+      expect(description).toContain("bash_job");
+      expect(description).toContain("run_in_background: true");
+      // The threshold is rendered as a duration, never as a raw ms number.
+      expect(description).toMatch(/runs longer than ~\d+m/);
+
+      const params = collectDescriptions(bashJob().parameters).join(" ");
+      expect(params).toContain("unique prefix is accepted");
+      expect(params).toContain("Required for every action except list");
+      for (const action of ["status", "output", "wait", "kill", "list"]) {
+        expect(bashJob().description).toContain(action);
+        expect(params).toContain(action);
+      }
+    });
   });
 });

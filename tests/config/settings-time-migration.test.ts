@@ -41,11 +41,11 @@ describe("settings file time-unit migration", () => {
     expect(TIME_SETTING_MS_PATHS).toContain("budget.idleMs");
     expect(TIME_SETTING_MS_PATHS).not.toContain("budget.startupRetries");
     expect(TIME_SETTING_MS_PATHS).toContain("workflow.budget.terminateConfirmMs");
-    expect(TIME_SETTING_MS_PATHS).toContain("worktree.gitTimeoutMs");
-    expect(TIME_SETTING_MS_PATHS).not.toContain("budget.startupRetries");
+    expect(TIME_SETTING_MS_PATHS).toContain("bashJobs.retentionMs");
+    expect(TIME_SETTING_MS_PATHS).not.toContain("bashJobs.maxLogBytes");
     expect(TIME_SETTING_MS_PATHS.every((p) => p.endsWith("Ms"))).toBe(true);
     expect(isTimeSettingKey("budget.idleS")).toBe(true);
-    expect(isTimeSettingKey("concurrencyLimit")).toBe(false);
+    expect(isTimeSettingKey("bashJobs.maxLogBytes")).toBe(false);
   });
 
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {
@@ -54,6 +54,7 @@ describe("settings file time-unit migration", () => {
       foregroundAutoBackgroundS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },
+      bashJobs: { autoBackgroundS: 30, retentionS: 3_600, maxLogBytes: 1_024 },
     });
     const s = loadSettingsFromFile(path);
     expect(s.budget.idleMs).toBe(600_000);
@@ -63,12 +64,16 @@ describe("settings file time-unit migration", () => {
     expect(s.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000 });
     expect(s.workflow.replayTtlMs).toBe(60_000);
     expect(s.workflow.budget.gateMs).toBe(30_000);
+    expect(s.bashJobs.autoBackgroundMs).toBe(30_000);
+    expect(s.bashJobs.retentionMs).toBe(3_600_000);
+    expect(s.bashJobs.maxLogBytes).toBe(1_024);
     // nothing to migrate ⇒ file untouched, no WARN
     expect(readBack()).toEqual({
       budget: { idleS: 600, totalS: 0, startupRetries: 4 },
       foregroundAutoBackgroundS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },
+      bashJobs: { autoBackgroundS: 30, retentionS: 3_600, maxLogBytes: 1_024 },
     });
     expect(warn).not.toHaveBeenCalled();
   });
@@ -82,6 +87,7 @@ describe("settings file time-unit migration", () => {
       ackWindowMs: 1_000,
       worktree: { enabled: true, gitTimeoutMs: 30_000 },
       workflow: { replayTtlMs: 604_800_000, budget: { scriptLoadMs: 5_000, workflowTotalMs: 3_600_000 } },
+      bashJobs: { autoBackgroundMs: 120_000, retentionMs: 86_400_000 },
       concurrencyLimit: 4,
     });
     const s = loadSettingsFromFile(path);
@@ -94,12 +100,14 @@ describe("settings file time-unit migration", () => {
       ackWindowS: 1,
       worktree: { enabled: true, gitTimeoutS: 30 },
       workflow: { replayTtlS: 604_800, budget: { scriptLoadS: 5, workflowTotalS: 3_600 } },
+      bashJobs: { autoBackgroundS: 120, retentionS: 86_400 },
       concurrencyLimit: 4,
     });
     // and the in-memory settings are unchanged in meaning
     expect(s.budget.idleMs).toBe(600_000);
     expect(s.coalesceWindowMs).toBe(2_000);
     expect(s.workflow.budget.workflowTotalMs).toBe(3_600_000);
+    expect(s.bashJobs.retentionMs).toBe(86_400_000);
     expect(s.concurrencyLimit).toBe(4);
     expect(warnings()).toContain("time settings are now stored in seconds");
     expect(warnings()).toContain("budget.idleMs → budget.idleS (600)");

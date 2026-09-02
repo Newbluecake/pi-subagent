@@ -168,6 +168,27 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ),
   "workflow.journalDir": { kind: "string", path: "workflow.journalDir", description: "Workflow journal directory" },
   ...WORKFLOW_BUDGET_SPECS,
+  // bash auto-background (§6): v1 exposes the numeric knobs plus the shutdown
+  // policy enum; bashJobs.dir / bashJobs.shellPath stay JSON-file-only.
+  "bashJobs.autoBackgroundS": seconds("bashJobs.autoBackgroundMs", {
+    hint: "0 turns the whole feature off",
+    description: "Auto-background foreground bash after this",
+  }),
+  "bashJobs.maxLogBytes": {
+    kind: "number",
+    path: "bashJobs.maxLogBytes",
+    min: 0,
+    description: "Per-job log file cap in bytes",
+  },
+  "bashJobs.maxBackgroundJobs": count("bashJobs.maxBackgroundJobs", 0, "Max concurrent background jobs"),
+  "bashJobs.retentionS": seconds("bashJobs.retentionMs", {
+    description: "Terminal job records pruned after this age",
+  }),
+  "bashJobs.shutdownPolicy": choice(
+    "bashJobs.shutdownPolicy",
+    ["keep", "kill"],
+    "What to do with running jobs on shutdown",
+  ),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

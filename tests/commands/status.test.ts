@@ -3,6 +3,7 @@ import { createStatusCommand, renderStatus } from "../../src/commands/status.js"
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { RunSnapshot } from "../../src/core/types.js";
+import type { JobRecord } from "../../src/bash/types.js";
 
 function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
   return {
@@ -367,6 +368,52 @@ describe("/agent settings subcommand", () => {
     expect(list).not.toContain("fleetWidget");
   });
 
+  it("S1: exposes and persists bashJobs.* settings in seconds, rejecting illegal values", () => {
+    const { d, persisted, current } = settingsDeps();
+    const listing = run(d, "settings");
+    for (const key of [
+      "bashJobs.autoBackgroundS",
+      "bashJobs.maxLogBytes",
+      "bashJobs.maxBackgroundJobs",
+      "bashJobs.retentionS",
+      "bashJobs.shutdownPolicy",
+    ]) {
+      expect(listing).toContain(key);
+    }
+    // defaults are shown in seconds, and dir/shellPath stay JSON-file-only in v1
+    expect(listing).toContain("120");
+    expect(listing).not.toContain("120000");
+    expect(listing).not.toContain("bashJobs.dir");
+    expect(listing).not.toContain("bashJobs.shellPath");
+
+    const out = run(d, "settings set bashJobs.autoBackgroundS 30");
+    expect(current.bashJobs.autoBackgroundMs).toBe(30_000);
+    expect(persisted).toEqual([["bashJobs.autoBackgroundS", 30]]);
+    expect(out).toContain("takes effect after /reload");
+
+    // 0 disables the whole feature and must be accepted
+    expect(run(d, "settings set bashJobs.autoBackgroundS 0")).toContain("Persisted to");
+    expect(current.bashJobs.autoBackgroundMs).toBe(0);
+
+    run(d, "settings set bashJobs.shutdownPolicy kill");
+    expect(current.bashJobs.shutdownPolicy).toBe("kill");
+    run(d, "settings reset bashJobs.autoBackgroundS");
+    expect(current.bashJobs.autoBackgroundMs).toBe(DEFAULT_SETTINGS.bashJobs.autoBackgroundMs);
+  });
+
+  it("S1: rejects illegal bashJobs.* values without touching state", () => {
+    const { d, persisted, current } = settingsDeps();
+    expect(run(d, "settings set bashJobs.autoBackgroundS -1")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.autoBackgroundS abc")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.maxLogBytes -5")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.maxBackgroundJobs 1.5")).toContain("expected an integer >= 0");
+    expect(run(d, "settings set bashJobs.retentionS Infinity")).toContain("Invalid value");
+    expect(run(d, "settings set bashJobs.shutdownPolicy terminate")).toContain("expected one of: keep, kill");
+    expect(run(d, "settings set bashJobs.dir /tmp/x")).toContain("Unknown settings key");
+    expect(persisted).toEqual([]);
+    expect(current.bashJobs).toEqual(DEFAULT_SETTINGS.bashJobs);
+  });
+
   it("tab completion offers second-valued keys with their second defaults", () => {
     const cmd = createStatusCommand(settingsDeps().d as never);
     const items = cmd.getArgumentCompletions?.("settings set budget.idle", 0) as
@@ -452,5 +499,117 @@ describe("/agent settings interactive editor wiring", () => {
     };
     await createStatusCommand(editorDeps() as never).handler("budget", ctx as never);
     expect(budgetOnly).toBe(true);
+  });
+});
+
+// ── S7: bash jobs section (`/agent status`) ────────────────────────────────
+
+function jobRecord(overrides: Partial<JobRecord> = {}): JobRecord {
+  return {
+    v: 1,
+    jobId: "b_3F7K2M9P",
+    command: "npm run build:all",
+    cwd: "/repo",
+    sessionId: "s1",
+    hostPid: 1000,
+    status: "running",
+    createdAt: 0,
+    spawnedAt: 0,
+    exitCode: null,
+    logPath: "/tmp/bash-jobs/b_3F7K2M9P.log",
+    logBytes: 3_500_000,
+    outputTruncated: false,
+    readCursor: 0,
+    pid: 23456,
+    ...overrides,
+  } as JobRecord;
+}
+
+function bashDeps(jobs: JobRecord[]) {
+  return { ...deps([]), bashJobs: { list: () => jobs }, workflow: undefined };
+}
+
+describe("S7 /agent status bash jobs section", () => {
+  it("hides the whole section when there are no jobs (and when the port is absent)", () => {
+    expect(renderStatus(bashDeps([]) as never)).not.toContain("bash jobs");
+    expect(renderStatus(deps([]) as never)).not.toContain("bash jobs");
+  });
+
+  it("counts running vs finished-unread jobs and renders one row per job", () => {
+    const running = jobRecord({ spawnedAt: Date.now() - 12 * 60_000 });
+    const unread = jobRecord({
+      jobId: "b_8Q1RN4ZC",
+      command: "pytest -x",
+      status: "completed",
+      exitCode: 0,
+      spawnedAt: Date.now() - 2 * 60_000,
+      endedAt: Date.now(),
+      logBytes: 2048,
+    });
+    const notified = jobRecord({
+      jobId: "b_NOTIFIED",
+      status: "failed",
+      exitCode: 1,
+      endedAt: Date.now(),
+      notifiedAt: Date.now(),
+    });
+    const text = renderStatus(bashDeps([running, unread, notified]) as never);
+    expect(text).toContain("bash jobs (1 running, 1 finished unread):");
+    expect(text).toContain("b_3F7K2M9P  running  12m");
+    expect(text).toContain("$ npm run build:all");
+    expect(text).toContain("b_8Q1RN4ZC  completed (exit 0)");
+    expect(text).toContain("unnotified");
+    // an already-notified terminal job is counted nowhere and printed nowhere
+    expect(text).not.toContain("b_NOTIFIED");
+  });
+
+  it("caps the running rows at 5 and reports the remainder", () => {
+    const jobs = Array.from({ length: 7 }, (_, i) => jobRecord({ jobId: `b_RUN0000${i}` }));
+    const text = renderStatus(bashDeps(jobs) as never);
+    expect(text).toContain("bash jobs (7 running, 0 finished unread):");
+    expect(text).toContain("b_RUN00004");
+    expect(text).not.toContain("b_RUN00005");
+    expect(text).toContain("… 2 more running");
+  });
+
+  it("never lets a failing job port break the rest of the diagnostics", () => {
+    const broken = {
+      ...deps([]),
+      bashJobs: {
+        list: () => {
+          throw new Error("no active session yet");
+        },
+      },
+    };
+    const text = renderStatus(broken as never);
+    expect(text).toContain("Subagent runs:");
+    expect(text).not.toContain("bash jobs");
+  });
+
+  it("`/agent status <b_prefix>` renders one job's detail, resolving unique prefixes", () => {
+    const job = jobRecord({ status: "failed", exitCode: 1, endedAt: 60_000, finalText: "Command exited with code 1" });
+    const notified: string[] = [];
+    const cmd = createStatusCommand({
+      ...bashDeps([job]),
+      resolveRun: () => {
+        throw new Error("bash ids must not reach the run resolver");
+      },
+    } as never);
+    const ctx = { ui: { notify: (text: string) => notified.push(text) } };
+    void cmd.handler("status b_3F7", ctx as never);
+    void cmd.handler("b_3F7K2M9P", ctx as never);
+    void cmd.handler("b_NOPE", ctx as never);
+    expect(notified[0]).toContain("Bash job b_3F7K2M9P · failed (exit 1)");
+    expect(notified[0]).toContain("Command: $ npm run build:all");
+    expect(notified[0]).toContain('bash_job(action: "output", job_id: "b_3F7K2M9P")');
+    expect(notified[1]).toBe(notified[0]);
+    expect(notified[2]).toBe('No bash job matches "b_NOPE".');
+  });
+
+  it("`/agent status <b_prefix>` reports ambiguity instead of guessing", () => {
+    const notified: string[] = [];
+    const cmd = createStatusCommand(bashDeps([jobRecord({ jobId: "b_AA1" }), jobRecord({ jobId: "b_AA2" })]) as never);
+    void cmd.handler("status b_AA", { ui: { notify: (t: string) => notified.push(t) } } as never);
+    expect(notified[0]).toContain('Ambiguous "b_AA" — matches: b_AA1, b_AA2');
   });
 });

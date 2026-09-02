@@ -14,7 +14,7 @@ import {
 } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
-import { buildSessionStack, type Stack } from "./stack.js";
+import { buildSessionStack, bashJobsEnabled, type Stack } from "./stack.js";
 import { installMentionInput } from "./mention/mention.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
@@ -29,6 +29,10 @@ import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
+import { createBashTool } from "./tools/bash-tool.js";
+import { createBashJobTool } from "./tools/bash-job-tool.js";
+import type { BashJobManager } from "./bash/manager.js";
+import { isTerminalJobStatus } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
@@ -137,6 +141,18 @@ export default function activate(pi: ExtensionAPI): void {
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // bash auto-background (§2.6/R6): the same-name `bash` override and its
+  // `bash_job` management tool exist only when the feature is on — off means
+  // pi's built-in bash stays in place with zero behaviour change.
+  if (bashJobsEnabled(settings)) {
+    pi.registerTool(
+      createBashTool({
+        manager: forwardBashJobs(holder),
+        autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
+      }),
+    );
+    pi.registerTool(createBashJobTool({ manager: forwardBashJobs(holder) }));
+  }
   // Inject the registered agent types into the system prompt: the model has
   // no other way to learn valid `subagent_type` values and otherwise burns
   // turns on trial-and-error "unknown agent type" failures. `types` reloads
@@ -163,6 +179,7 @@ export default function activate(pi: ExtensionAPI): void {
       orphans: forwardOrphans(holder),
       notifier: forwardNotifier(holder),
       workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
+      bashJobs: { list: () => holder.current?.bashJobs?.list() ?? [] },
       settings: {
         // settings.budget is passed by reference into every session stack
         // (stack.ts) and read at spawn time (spawn-service mergeBudget), so
@@ -204,7 +221,7 @@ export default function activate(pi: ExtensionAPI): void {
     await stack.scheduler.start(); // X5
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     const stack = holder.current;
     if (!stack) return;
     stack.scheduler.stop(); // X5
@@ -215,7 +232,22 @@ export default function activate(pi: ExtensionAPI): void {
       .filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
     await Promise.all(pending.map((s) => stack.query.stop(s.runId, "shutdown")));
     await stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs });
+    // bash auto-background §3.7: reload/new/resume/fork always keep the
+    // processes (the next stack adopts them); only a real `quit` consults
+    // shutdownPolicy, and even `kill` is bounded best-effort — a background
+    // job that refuses to die must never delay pi's exit.
+    if (stack.bashJobs && event.reason === "quit" && settings.bashJobs.shutdownPolicy === "kill") {
+      await killBashJobsBounded(stack.bashJobs, settings.budget.abortGraceMs);
+    }
   });
+}
+
+/** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
+async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): Promise<void> {
+  const live = bashJobs.list().filter((record) => !isTerminalJobStatus(record.status));
+  if (live.length === 0) return;
+  const kills = Promise.allSettled(live.map((record) => bashJobs.kill(record.jobId).catch(() => undefined)));
+  await Promise.race([kills, new Promise<void>((resolve) => systemClock.setTimer(Math.max(0, graceMs), resolve))]);
 }
 
 /**
@@ -284,6 +316,12 @@ function forwardWorkflow(holder: { current?: Stack }): {
     // (same QueryService the Agent tool's M-B progress port reads).
     snapshotOf: (runId) => holder.current?.query.get(runId),
   };
+}
+/** bash auto-background: the current session's job manager (absent before the
+ *  first session_start, or when the feature is off) — both bash tools read it
+ *  at call time so they survive session rebuilds. */
+function forwardBashJobs(holder: { current?: Stack }): () => BashJobManager | undefined {
+  return () => holder.current?.bashJobs;
 }
 function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {
   return {

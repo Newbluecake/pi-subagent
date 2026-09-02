@@ -1,7 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { systemClock } from "./core/clock.js";
+import { createBashJobManager, type BashJobManager } from "./bash/manager.js";
+import { createJobStore } from "./bash/job-store.js";
+import { createProcessPort } from "./bash/process.js";
+import { previewCommand, type JobRecord } from "./bash/types.js";
+import { describeJobStatus } from "./tools/bash-job-tool.js";
+import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
@@ -43,6 +50,149 @@ let previousFleetWidget: FleetWidgetController | undefined;
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
 let previousCoalescer: Coalescer | undefined;
 let previousAckHold: Coalescer | undefined;
+/**
+ * bash auto-background §3.6: the previous session's job manager, disposed at
+ * the top of the next build. `dispose()` only clears timers — it never kills a
+ * process and never notifies afterwards, so the next stack's `recover()` can
+ * adopt the still-running jobs and own the single notification channel.
+ */
+let previousBashJobs: BashJobManager | undefined;
+
+/** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
+export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
+/** Output tail attached to a completion notice (§5). */
+export const BASH_JOB_TAIL_BYTES = 1024;
+export const BASH_JOB_TAIL_LINES = 10;
+
+/**
+ * §2.5/§2.6 (R6): the whole bash-job subsystem is off on win32 (no process
+ * groups) and off when the threshold is 0. Read by `index.ts` to decide
+ * whether the `bash` override and `bash_job` are registered at all, and here
+ * to decide whether a manager (directory scan + poll timer) exists.
+ */
+export function bashJobsEnabled(settings: AgentSettings): boolean {
+  return process.platform !== "win32" && settings.bashJobs.autoBackgroundMs > 0;
+}
+
+/** Wall-clock life of a job (spawn → exit, or → now while it runs). */
+export function bashJobElapsedMs(record: JobRecord, now: number): number {
+  return Math.max(0, (record.endedAt ?? now) - (record.spawnedAt ?? record.createdAt));
+}
+
+/** `exit N` when the code is known, otherwise the tool layer's own phrase. */
+function bashJobOutcomePhrase(record: JobRecord): string {
+  if ((record.status === "completed" || record.status === "failed") && record.exitCode !== null) {
+    return `exit ${record.exitCode}`;
+  }
+  return describeJobStatus(record);
+}
+
+/**
+ * §5 completion notice. Deliberately prefixed "Bash job" (vs. the
+ * "Subagent …" wording of `delivery/format.ts`) so a downstream hook, the
+ * user and the model can all tell the two notification channels apart.
+ */
+export function formatBashJobNotification(record: JobRecord, tail?: string, now: number = Date.now()): string {
+  const head =
+    `Bash job ${record.jobId} ($ ${previewCommand(record.command, 60)}) finished: ` +
+    `${bashJobOutcomePhrase(record)} after ${formatDuration(bashJobElapsedMs(record, now))}.`;
+  const body = tail !== undefined && tail.length > 0 ? ["--- output tail ---", tail, "---"] : [];
+  return [
+    head,
+    ...body,
+    `Collect full output with bash_job(action: "output", job_id: "${record.jobId}").`,
+    ...(record.outputTruncated ? ["(the job's log hit its size cap; some output was dropped)"] : []),
+  ].join("\n");
+}
+
+function tailOffset(size: number): number {
+  return Math.max(0, size - BASH_JOB_TAIL_BYTES);
+}
+
+function lastLines(content: string, max: number): string | undefined {
+  const lines = content.replace(/\n+$/, "").split("\n");
+  const tail = lines.slice(Math.max(0, lines.length - max)).join("\n");
+  return tail.trim().length > 0 ? tail : undefined;
+}
+
+/**
+ * Best-effort log tail for the notice. Never advances the model-facing read
+ * cursor (`bash_job output` must still see everything) and never rejects — a
+ * missing/unreadable log only costs the tail, not the notification.
+ *
+ * Two passes: a terminal record's `logBytes` is usually exact, but an adopted
+ * or `exited_unknown` job's counter can lag behind the file, so the first read
+ * (which reports the real size) is repeated from the true tail offset.
+ */
+async function readBashJobTail(manager: BashJobManager, record: JobRecord): Promise<string | undefined> {
+  try {
+    const options = { advanceCursor: false, maxBytes: BASH_JOB_TAIL_BYTES } as const;
+    let read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(record.logBytes) });
+    if (read.logBytes > record.logBytes) {
+      read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(read.logBytes) });
+    }
+    return lastLines(read.content, BASH_JOB_TAIL_LINES);
+  } catch {
+    return undefined;
+  }
+}
+
+function currentSessionId(ctx: ExtensionContext): string {
+  try {
+    return (ctx.sessionManager as { getSessionId?: () => string } | undefined)?.getSessionId?.() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * bash auto-background §3/§5 assembly: store + process port + manager, with
+ * the completion notice bound to `pi.sendMessage` (the manager itself has no
+ * pi imports). A rejecting `notify` means "retry on the next poll", so
+ * `notifiedAt` is only stamped once the message actually went out.
+ */
+function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: AgentSettings): BashJobManager {
+  const config = settings.bashJobs;
+  const store = createJobStore({
+    dir: config.dir ?? join(getAgentDir(), "bash-jobs"),
+    retentionMs: config.retentionMs,
+    clock: systemClock,
+  });
+  const processPort = createProcessPort(config.shellPath !== undefined ? { shellPath: config.shellPath } : {});
+  // Late-bound: `notify` needs the manager it is being constructed with (to
+  // read the log tail) — same pattern as widgetRef/spawnRef above.
+  const managerRef: { current?: BashJobManager } = {};
+  const manager = createBashJobManager({
+    store,
+    processPort,
+    clock: systemClock,
+    sessionId: currentSessionId(ctx),
+    hostPid: process.pid,
+    maxLogBytes: config.maxLogBytes,
+    maxBackgroundJobs: config.maxBackgroundJobs,
+    notify: async (record) => {
+      const tail = managerRef.current ? await readBashJobTail(managerRef.current, record) : undefined;
+      pi.sendMessage(
+        {
+          customType: BASH_JOB_NOTIFICATION_TYPE,
+          content: formatBashJobNotification(record, tail),
+          display: true,
+          details: {
+            kind: "bash-job",
+            jobId: record.jobId,
+            status: record.status,
+            exitCode: record.exitCode,
+            durationMs: bashJobElapsedMs(record, systemClock.now()),
+            logPath: record.logPath,
+          },
+        },
+        { triggerTurn: true },
+      );
+    },
+  });
+  managerRef.current = manager;
+  return manager;
+}
 
 export interface WorkflowSupport {
   readonly enabled: boolean;
@@ -73,6 +223,8 @@ export interface Stack {
   scheduler: Scheduler;
   rpc: RPCServer;
   workflow: WorkflowSupport;
+  /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
+  bashJobs?: BashJobManager;
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -95,6 +247,10 @@ export function buildSessionStack(
   previousCoalescer = undefined;
   previousAckHold?.dispose();
   previousAckHold = undefined;
+  // §3.6/§3.7: timers only — the processes keep running and are re-adopted by
+  // the new manager's recover() below.
+  previousBashJobs?.dispose();
+  previousBashJobs = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -393,6 +549,16 @@ export function buildSessionStack(
   }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
+  const bashJobs = bashJobsEnabled(settings) ? buildBashJobManager(pi, ctx, settings) : undefined;
+  previousBashJobs = bashJobs;
+  // §3.6: adopt still-running jobs and re-arm pending notices. Fire-and-forget
+  // like notifier.reconcile() — a directory scan must never delay session start,
+  // and a failure only means "no adoption this session", not a broken session.
+  if (bashJobs) {
+    void bashJobs.recover().catch((error: unknown) => {
+      console.warn(`[pi-subagent] bash job recovery failed (jobs stay unadopted): ${String(error)}`);
+    });
+  }
 
   // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —
   // built unconditionally (cheap: a spawner adapter closure + a budget
@@ -434,5 +600,15 @@ export function buildSessionStack(
       });
     },
   };
-  return { spawn, query, orphans: reaper.registry, notifier, mention, scheduler, rpc, workflow };
+  return {
+    spawn,
+    query,
+    orphans: reaper.registry,
+    notifier,
+    mention,
+    scheduler,
+    rpc,
+    workflow,
+    ...(bashJobs ? { bashJobs } : {}),
+  };
 }

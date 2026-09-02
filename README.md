@@ -15,6 +15,7 @@
 - **`steer_subagent`** —— 向运行中的子 agent 发送追加指令。
 - **`abort_subagent`** —— 停止运行中的子 agent（包括自动转后台的 run）；对终态 run 幂等返回。
 - **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundS`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
+- **bash 自动转后台** —— 覆盖 pi 内置 `bash` 工具:命令跑过 `bashJobs.autoBackgroundS`(默认 120 秒)后调用提前返回 `job_id`,**进程不杀**、输出继续落日志,结束时推送完成通知;用 `bash_job`(status / output / wait / kill / list)管理。仅 POSIX,详见下文。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
 - **Agent tree 组件** —— run 活跃期间常驻编辑器上方(见下文)。
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
@@ -47,6 +48,42 @@
 | `/agent status`         | 所有非终态 run 的诊断:相位、最近事件、空闲时长、孤儿 session |
 | `/agent status <runId>` | 单个 run 的完整工具时间线                                    |
 | `/agent costs`          | 按花费降序的逐 run 明细                                      |
+
+## bash 自动转后台
+
+开启后(默认开启,仅 POSIX)本扩展以同名方式覆盖 pi 内置的 `bash` 工具:短命令与内置行为**逐字节一致**——前台路径直接复用 pi 自己的 bash 实现,输出累积、截断、临时文件、`Command exited with code N` 等全部由 pi 的代码产生。只有跑过阈值的命令会改变行为:调用提前返回一个 `job_id`,进程留在自己的进程组里继续跑,stdout/stderr 合流写入日志文件,退出时以 `bash-job:notification` 消息注入完成通知(带输出尾巴,并触发一个新 turn)。命令自带的 `timeout` 参数语义不变,转后台后到期照样杀进程树。
+
+`bash` 工具额外接受 `run_in_background: true`——明知是长命令时立刻转后台,不用等阈值。
+
+`bash_job` 工具管理这些 job(`job_id` 支持唯一前缀):
+
+| 动作     | 内容                                                          |
+| -------- | ------------------------------------------------------------- |
+| `status` | 状态摘要:运行中/终态、耗时、pid、日志大小                     |
+| `output` | 从上次读取处继续取增量输出(可用 `offset` 重读);读取不消费 job |
+| `wait`   | 有界阻塞(默认 30s,硬上限 120s);超时正常返回当前状态,不报错    |
+| `kill`   | 终止整个进程组(SIGTERM → 宽限 → SIGKILL);对已结束的 job 幂等  |
+| `list`   | 列出全部已知 job(id · 状态 · 命令预览 · 年龄)                 |
+
+设置项(时间字段同样是**整数秒**):
+
+| 键                           | 默认                     | 含义                                                                                        |
+| ---------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| `bashJobs.autoBackgroundS`   | `120`                    | 前台 bash 超过该时长后转后台;`0` = 整个功能关闭(覆盖工具都不注册,内置 bash 零变化)          |
+| `bashJobs.maxLogBytes`       | `10485760`               | 单个 job 日志上限;写满后停写并标记截断,**进程继续跑**                                       |
+| `bashJobs.maxBackgroundJobs` | `8`                      | 并发后台 job 上限;满位时阈值到期也继续前台等待,显式 `run_in_background` 则直接报错          |
+| `bashJobs.retentionS`        | `86400`                  | 终态 job 的 JSON/日志保留时长,过期文件在下次启动扫描时清理                                  |
+| `bashJobs.shutdownPolicy`    | `"keep"`                 | pi 真退出(`quit`)时对仍在跑的 job:`keep` 保留 / `kill` 终止;reload/new/resume/fork 一律保留 |
+| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`  | job 状态 JSON 与日志目录(**仅 JSON 文件可配**,不在 `/agent settings` 中)                    |
+| `bashJobs.shellPath`         | `$SHELL`(白名单)→ `bash` | 执行命令的 shell;`$SHELL` 仅在 basename ∈ {bash, zsh, sh} 时采用(**仅 JSON 文件可配**)      |
+
+行为说明:
+
+- **win32 不覆盖**:该平台没有进程组语义,内置 `bash` 原样保留,`bash` 与 `bash_job` 都不注册。
+- **同名覆盖冲突**:pi 里同名工具"首个注册者胜出"。若另一个扩展也覆盖 `bash` 且先注册,本功能整体失效(不会破坏对方);想禁用本覆盖把 `bashJobs.autoBackgroundS` 设为 `0` 即可。
+- **日志与敏感输出**:job 状态与日志默认写在 `~/.pi/agent/bash-jobs/`(权限 0600,与 session 文件同威胁模型)。命令输出里的密钥/令牌会**落盘**,直到 `retentionS` 过期被清理——需要更严的隔离时用 `bashJobs.dir` 指到别处,或把敏感命令的输出重定向掉。
+- **重启/reload 后收养**:仍在跑的 job 在下一个 session 里被重新接管并继续通知;pid 归属无法确认(可能被复用)的 job 只标记不杀,`kill` 会明确拒绝。
+- 设置改动与其他非 `budget.*` 键一样,`/reload` 后生效。
 
 ## 防卡死架构
 

@@ -113,7 +113,7 @@ describe("SettingsEditorModel navigation", () => {
     expect(byKey.get("budget.startupRetries")?.value).toBe("2");
     expect(byKey.get("foregroundAutoBackgroundS")?.value).toBe("600");
     expect(byKey.get("worktree.gitTimeoutS")?.value).toBe("30");
-    expect(byKey.get("worktree.gitTimeoutS")?.value).toBe("30");
+    expect(byKey.get("bashJobs.retentionS")?.value).toBe("86400");
     // workflow.budget.* is unset in DEFAULT_SETTINGS but shows its effective default
     expect(byKey.get("workflow.budget.gateS")?.value).toBe(String(DEFAULT_WORKFLOW_BUDGET.gateMs / 1000));
     expect(byKey.get("workflow.journalDir")?.value).toBe("(unset)");
@@ -496,10 +496,10 @@ describe("editor → settings file round trip", () => {
     model.handleInput("\r"); // commit
     focus(model, "worktree.enabled");
     model.handleInput(" "); // toggle
-    focus(model, "worktree.gitTimeoutS");
+    focus(model, "bashJobs.retentionS");
     model.handleInput("\r");
     model.handleInput("\u0015");
-    for (const ch of "45") model.handleInput(ch);
+    for (const ch of "3600") model.handleInput(ch);
     model.handleInput("\r");
     model.handleInput("\u001b"); // Esc closes
     expect(model.closed).toBe(true);
@@ -508,17 +508,19 @@ describe("editor → settings file round trip", () => {
     const raw = readFileSync(path, "utf8");
     expect(JSON.parse(raw)).toEqual({
       budget: { idleS: 600 },
-      worktree: { enabled: true, gitTimeoutS: 45 },
+      worktree: { enabled: true },
+      bashJobs: { retentionS: 3_600 },
     });
     expect(raw).not.toContain("Ms");
 
     // and reloading yields the milliseconds the runtime expects
     const reloaded = loadSettingsFromFile(path);
     expect(reloaded.budget.idleMs).toBe(600_000);
-    expect(reloaded.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000 });
+    expect(reloaded.worktree).toEqual({ enabled: true, gitTimeoutMs: DEFAULT_SETTINGS.worktree.gitTimeoutMs });
+    expect(reloaded.bashJobs.retentionMs).toBe(3_600_000);
     // the live object edited in place matches the reloaded file
     expect(current.budget.idleMs).toBe(reloaded.budget.idleMs);
-    expect(current.worktree.gitTimeoutMs).toBe(reloaded.worktree.gitTimeoutMs);
+    expect(current.bashJobs.retentionMs).toBe(reloaded.bashJobs.retentionMs);
   });
 });
 

@@ -31,6 +31,9 @@ function buildStackForSender(
   const settings = {
     ...DEFAULT_SETTINGS,
     fleetWidget: false,
+    // S7: never let a stack built in a test scan/mutate the developer's real
+    // ~/.pi/agent/bash-jobs (buildSessionStack now constructs a BashJobManager).
+    bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
     ...(options.coalesce ? { coalesceWindowMs: 100, coalesceMaxBatch: 3 } : {}),
   };
   const extensions = options.onDelivery ? [{ onDelivery: options.onDelivery }] : [];

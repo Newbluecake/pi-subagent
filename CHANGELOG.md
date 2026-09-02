@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **bash auto-backgrounding** — the built-in `bash` tool is overridden by name (POSIX only) so a
+  foreground command that outlives `bashJobs.autoBackgroundS` (default 120s) no longer blocks the
+  turn: the call returns a `job_id`, **the process is not killed**, its merged stdout/stderr keeps
+  streaming into `~/.pi/agent/bash-jobs/<job>.log`, and a `bash-job:notification` message (with the
+  output tail, `triggerTurn`) is injected exactly once when it exits — including after a `/reload` or
+  a pi restart, where still-running jobs are re-adopted from disk and a job whose pid ownership
+  cannot be verified is marked, never killed. Short commands are byte-for-byte the built-in tool's
+  own result (the foreground path delegates to pi's bash implementation, including its `timeout`,
+  abort and truncation semantics), so the only intentional behaviour change is that a command past
+  the threshold returns a `job_id` instead of blocking indefinitely. New `bash` parameter
+  `run_in_background: true` backgrounds immediately; the new `bash_job` tool inspects and stops jobs
+  (`status` / `output` / `wait` / `kill` / `list`, bounded `wait`, idempotent `kill`, re-readable
+  incremental `output`). Configured under `bashJobs.*` (`autoBackgroundS` — `0` disables the whole
+  feature and registers no override, `maxLogBytes`, `maxBackgroundJobs`, `retentionS`,
+  `shutdownPolicy`, plus JSON-only `dir` / `shellPath`) and surfaced in `/agent status`.
 - **Zero-build git installs** — the `pi.extensions` manifest now points at a source-form
   root entry (`./index.ts` → `./src/index.js`), which pi loads through its bundled jiti
   TypeScript runtime. `pi install git:github.com/Newbluecake/pi-subagent` and

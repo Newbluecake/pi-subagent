@@ -21,6 +21,7 @@ const PATHS = [
 describe("time-units key/scalar helpers", () => {
   it("renames *Ms ⇄ *S and leaves non-time keys alone", () => {
     expect(secondsKeyOf("budget.idleMs")).toBe("budget.idleS");
+    expect(secondsKeyOf("bashJobs.autoBackgroundMs")).toBe("bashJobs.autoBackgroundS");
     expect(secondsKeyOf("budget.startupRetries")).toBe("budget.startupRetries");
     expect(msKeyOf("budget.idleS")).toBe("budget.idleMs");
     expect(msKeyOf("concurrencyLimit")).toBe("concurrencyLimit");

@@ -93,7 +93,18 @@ async function buildHarness() {
     reload: async () => ({ types: [], errors: [] }),
   } as unknown as AgentTypeRegistry;
   const { buildSessionStack } = await import("../../src/stack.js");
-  const stack = buildSessionStack(pi, ctx, { ...DEFAULT_SETTINGS, fleetWidget: false }, types, []);
+  // S7: bash jobs off — this harness must not scan the real ~/.pi/agent/bash-jobs.
+  const stack = buildSessionStack(
+    pi,
+    ctx,
+    {
+      ...DEFAULT_SETTINGS,
+      fleetWidget: false,
+      bashJobs: { ...DEFAULT_SETTINGS.bashJobs, autoBackgroundMs: 0 },
+    },
+    types,
+    [],
+  );
   return { sendMessage, notify: harness.spawnDeps!.notifyTerminalFailure!, stack };
 }
 

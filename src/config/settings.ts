@@ -52,6 +52,29 @@ export interface WorkflowSettings {
   runawayPolicy: RunawayPolicy;
 }
 
+/**
+ * bash auto-background (§6): the `bashJobs` settings block backing the bash
+ * tool override and its BashJobManager. Every field is validated field-by-field
+ * by `parseBashJobsSettings` (never throws, illegal values fall back to the
+ * default) exactly like `parseWorkflowSettings`.
+ */
+export interface BashJobsSettings {
+  /** Foreground bash calls auto-background after this duration; 0 = whole feature off (no tool override registered). Default 120_000 (R2). */
+  autoBackgroundMs: number;
+  /** Per-job log file cap in bytes; older output is truncated past this. Default 10 MiB. */
+  maxLogBytes: number;
+  /** Hard cap on concurrently running background jobs (§3.8). Default 8. */
+  maxBackgroundJobs: number;
+  /** Terminal job records/log files are pruned after this age. Default 24h; 0 = prune immediately. */
+  retentionMs: number;
+  /** What to do with still-running jobs on session shutdown (§3.7). Default "keep". */
+  shutdownPolicy: "keep" | "kill";
+  /** Job state/log directory; defaults to `getAgentDir()/bash-jobs` when unset. */
+  dir?: string;
+  /** Shell used to run job commands; defaults to the $SHELL whitelist → bash (§3.3) when unset. */
+  shellPath?: string;
+}
+
 export interface AgentSettings {
   concurrencyLimit: number;
   budget: DeadlineBudget;
@@ -73,6 +96,8 @@ export interface AgentSettings {
   fleetWidget: boolean;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
   workflow: WorkflowSettings;
+  /** bash auto-background settings (§6). Enabled by default (R4). */
+  bashJobs: BashJobsSettings;
 }
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
@@ -96,6 +121,13 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     replayTtlMs: 7 * 24 * 60 * 60 * 1_000,
     replayScope: "chain",
     runawayPolicy: "diagnose_only",
+  },
+  bashJobs: {
+    autoBackgroundMs: 120_000,
+    maxLogBytes: 10_485_760,
+    maxBackgroundJobs: 8,
+    retentionMs: 24 * 60 * 60 * 1_000,
+    shutdownPolicy: "keep",
   },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
@@ -133,6 +165,8 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   ...Object.keys(DEFAULT_WORKFLOW_BUDGET)
     .filter((k) => k.endsWith("Ms"))
     .map((k) => `workflow.budget.${k}`),
+  "bashJobs.autoBackgroundMs",
+  "bashJobs.retentionMs",
 ];
 
 const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
@@ -214,7 +248,38 @@ export function loadSettings(source: unknown): AgentSettings {
           }
         : { ...DEFAULT_SETTINGS.worktree },
     workflow: parseWorkflowSettings(value.workflow),
+    bashJobs: parseBashJobsSettings(value.bashJobs),
   });
+}
+
+/**
+ * §6: parse the optional `bashJobs` settings block. Malformed/missing input
+ * falls back field-by-field to DEFAULT_SETTINGS.bashJobs; never throws.
+ * Numbers must be finite and >= 0, `shutdownPolicy` is whitelisted, and the
+ * optional string fields are dropped unless they are non-empty strings
+ * (exactOptionalPropertyTypes: absent, not `undefined`).
+ */
+export function parseBashJobsSettings(input: unknown): BashJobsSettings {
+  const defaults = DEFAULT_SETTINGS.bashJobs;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const num = (raw: unknown, fallback: number): number =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+  const str = (raw: unknown): string | undefined => (typeof raw === "string" && raw.length > 0 ? raw : undefined);
+  const dir = str(value.dir);
+  const shellPath = str(value.shellPath);
+  return {
+    autoBackgroundMs: num(value.autoBackgroundMs, defaults.autoBackgroundMs),
+    maxLogBytes: num(value.maxLogBytes, defaults.maxLogBytes),
+    maxBackgroundJobs: num(value.maxBackgroundJobs, defaults.maxBackgroundJobs),
+    retentionMs: num(value.retentionMs, defaults.retentionMs),
+    shutdownPolicy:
+      value.shutdownPolicy === "keep" || value.shutdownPolicy === "kill"
+        ? value.shutdownPolicy
+        : defaults.shutdownPolicy,
+    ...(dir === undefined ? {} : { dir }),
+    ...(shellPath === undefined ? {} : { shellPath }),
+  };
 }
 
 /** CC3: parse the optional `workflow` settings block; malformed/missing input falls back field-by-field to DEFAULT_SETTINGS.workflow (never throws, matches the rest of loadSettings' tolerance). */
@@ -300,8 +365,9 @@ function migrateSettingsFileTimeUnits(raw: Record<string, unknown>, path: string
 
 /**
  * Persist a single settings override to the user settings file (backs
- * `/agent settings set|reset`). `dottedKey` is a path like "budget.idleMs"
- * or "worktree.enabled"; value === undefined removes the override (and
+ * `/agent settings set|reset` and the TUI editor). `dottedKey` is a *storage*
+ * path like "budget.idleS" or "worktree.enabled" — duration keys use their
+ * second-valued `*S` name; value === undefined removes the override (and
  * prunes parent objects left empty). Other fields are preserved. Returns an
  * error message on failure, undefined on success; never throws — a
  * malformed existing file is reported rather than silently clobbered.

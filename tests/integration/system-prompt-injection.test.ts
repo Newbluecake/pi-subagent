@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import activate from "../../src/index.js";
 
 /**
@@ -11,6 +14,13 @@ import activate from "../../src/index.js";
  * time); the rendering itself is unit-tested in tests/config/agent-config.test.ts.
  */
 const HOST_KEY = Symbol.for("pi-subagent:host");
+
+// S7: session_start now builds a BashJobManager rooted at the agent dir, so
+// this suite runs against a throwaway $HOME — a test must never scan or mutate
+// the developer's real ~/.pi/agent (settings file included).
+const fakeHome = mkdtempSync(join(tmpdir(), "pi-subagent-home-"));
+const realHome = process.env.HOME;
+process.env.HOME = fakeHome;
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -42,6 +52,11 @@ describe("wiring: available agent types are injected into the system prompt", ()
   });
   afterEach(() => {
     delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
+  });
+  afterAll(() => {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 
   it("registers before_agent_start and appends the registry listing once types are loaded", async () => {
