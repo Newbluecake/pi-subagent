@@ -167,11 +167,12 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
 
 /** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors.
  *  Returns 1–2 lines: the main row plus, when the run is mid-tool / mid-thought, an indented
- *  activity continuation hung on a ╰ hook under the mark column (↳ replaced by space). */
+ *  activity continuation hung on a ╰ hook under the row's label (↳ replaced by space). */
 function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): string[] {
-  // ╰ hook under the (blank) mark column ties the activity line to the row
-  // above it — without it a bright trail line reads as the next agent's row.
-  const pad = ` ╰ ${indent.replace(/↳/g, " ")}`;
+  // ╰ hook sits directly under the row's label (mark column + space + indent),
+  // so the continuation reads as hanging from the task name itself — without
+  // it a bright trail line reads as the next agent's row.
+  const pad = `  ${indent.replace(/↳/g, " ")}╰ `;
   if (row.highlight !== "none") {
     const main = color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row)}`);
     const activity = widgetRowActivity(row);
