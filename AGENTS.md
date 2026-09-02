@@ -8,7 +8,7 @@ Guidance for AI coding agents working in this repository.
 (the `@earendil-works/pi-coding-agent` CLI). It is a drop-in replacement for the core of
 `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
 `abort_subagent` tools, the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
-agent-tree widget, and a notification delivery subsystem.
+fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler.
 
 The whole point of the project is **zero-hang guarantees**: every run has layered deadlines
 (watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
@@ -19,7 +19,7 @@ acknowledgeable delivery of results. Preserve these invariants when editing.
 ```sh
 npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # tsc -p tsconfig.build.json → dist/
-npm test             # vitest run — 1100+ tests; must stay green
+npm test             # vitest run — 1190+ tests; must stay green
 npm run typecheck    # tsc --noEmit (strict; see tsconfig flags)
 npm run format       # prettier --write .
 npm run format:check # CI gate
@@ -35,18 +35,28 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   re-export of `./src/index.js` (jiti maps the `.js` suffix to the `.ts` file). Keep it thin.
 - `index.js` — companion entry for plain Node consumers, re-exporting `./dist/index.js`
   (package.json `main`/`exports`). Not used by pi.
-- `src/index.ts` — **assembly only** (invariant I7): wire tools/commands/hooks, rebuild the
-  session stack on `session_start`. No logic lives here.
+- `src/index.ts` — **assembly only** (invariant I7): register tools/commands/hooks once per
+  `activate()`, own the HOST_KEY host-claim guard, rebuild the session stack on every
+  `session_start`. No logic lives here.
+- `src/stack.ts` — the per-session stack builder (`buildSessionStack`): constructs
+  stores/services/watchdog/reaper/scheduler/widget from `ExtensionContext`. The previous
+  session's pieces are disposed at the top of the next build (no stack dispose hook).
 - `src/core/` — pure domain: state machine, deadline budgets, ids, types. No pi imports.
-- `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency).
+- `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
+  tool scoping.
 - `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label).
+- `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
+- `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed,
-  with caller-ack suppression.
+  with caller-ack suppression and a coalescer for hold-window merges.
 - `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, runaway detection.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
-  tool surfaces, `/agent` command, agent-tree widget, `@label` mentions, RPC, extension points.
+  tool surfaces, `/agent` command, fleet widget, `@label` mentions, RPC, extension points
+  (worktree isolation).
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
+- `docs/dev/` — per-feature design docs (auto-background, delivery v2, ...); read the matching
+  one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
 
 ## Conventions
