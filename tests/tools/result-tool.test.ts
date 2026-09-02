@@ -112,6 +112,70 @@ describe("result consumption", () => {
     );
     expect((result.content[0] as { text: string }).text).toContain("done");
   });
+
+  it("includes wall-clock duration in terminal text and details (get path)", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, durationMs: 21_000 };
+    const result = await createResultTool({ query: queryForSnapshot(snap) }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("(duration: 21s · usage: in:42");
+    expect((result.details as { durationMs: number }).durationMs).toBe(21_000);
+  });
+
+  it("includes wall-clock duration in terminal text and details (wait path)", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, durationMs: 65_000 };
+    const result = await createResultTool({ query: queryForSnapshot(snap) }).execute(
+      "tc1",
+      { run_id: "r1", wait: true },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("(duration: 1m05s · usage: in:42");
+    expect((result.details as { durationMs: number }).durationMs).toBe(65_000);
+  });
+
+  it("still shows duration when the outcome has no usage", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, durationMs: 900, usage: undefined };
+    const result = await createResultTool({ query: queryForSnapshot(snap) }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    expect((result.content[0] as { text: string }).text).toContain("(duration: 900ms)");
+  });
+
+  it("appends duration to failed outcomes too", async () => {
+    const snap = completedSnapshot();
+    snap.status = "failed";
+    snap.outcome = {
+      ...snap.outcome!,
+      status: "failed",
+      durationMs: 3_200,
+      error: { kind: "runtime", message: "broken" },
+    };
+    const result = await createResultTool({ query: queryForSnapshot(snap) }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("Subagent run failed: broken");
+    expect(text).toContain("(duration: 3s · usage: in:42");
+  });
 });
 
 function queryForSnapshot(snapshot: RunSnapshot): QueryService {

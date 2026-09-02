@@ -69,7 +69,8 @@ export function createResultTool(deps: {
       "Background runs push a completion notification on terminal state, so the normal flow is: continue other " +
       "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
       "to block until the run finishes (up to wait_ms) — avoid it while anything else could proceed; it is a " +
-      "fallback for when an expected notification never arrived.",
+      "fallback for when an expected notification never arrived. Terminal results include the run's wall-clock " +
+      "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
     /**
@@ -109,6 +110,7 @@ export function createResultTool(deps: {
             runId,
             status: snapshot.status,
             usage: snapshot.diag.usage,
+            ...(snapshot.outcome ? { durationMs: snapshot.outcome.durationMs } : {}),
             ...(snapshot.outcome?.structuredResult !== undefined
               ? { structuredResult: snapshot.outcome.structuredResult }
               : {}),
@@ -167,6 +169,7 @@ export function createResultTool(deps: {
         details: {
           runId,
           status: waited.outcome.status,
+          durationMs: waited.outcome.durationMs,
           usage: waited.outcome.usage,
           ...(waited.outcome.structuredResult !== undefined
             ? { structuredResult: waited.outcome.structuredResult }
@@ -183,18 +186,23 @@ function formatOutcome(outcome: {
   structuredResult?: unknown;
   error?: { message: string };
   timeoutReason?: string;
+  durationMs: number;
   usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
 }): string {
-  const usage = outcome.usage
-    ? `\n\n(usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
-    : "";
+  // durationMs is a first-class RunOutcome field, so the trailer always
+  // carries it — unlike the completion notification (which shows `21s` once
+  // and is gone), this makes wall-clock duration retrievable on every
+  // post-terminal read of the result.
+  const trailer = outcome.usage
+    ? `\n\n(duration: ${formatDuration(outcome.durationMs)} · usage: in:${outcome.usage.input} out:${outcome.usage.output} cache_r:${outcome.usage.cacheRead} cache_w:${outcome.usage.cacheWrite} cost:$${outcome.usage.costUsd.toFixed(4)})`
+    : `\n\n(duration: ${formatDuration(outcome.durationMs)})`;
   if (outcome.status === "completed") {
     const body =
       outcome.structuredResult !== undefined
         ? JSON.stringify(outcome.structuredResult)
         : (outcome.text ?? "(subagent completed with no text output)");
-    return body + usage;
+    return body + trailer;
   }
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
-  return `Subagent run ${outcome.status}: ${reason}${usage}`;
+  return `Subagent run ${outcome.status}: ${reason}${trailer}`;
 }
