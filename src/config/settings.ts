@@ -62,6 +62,8 @@ export interface AgentSettings {
   reconcileTtlMs: number;
   maxReconcileRounds: number;
   maxReconcileBatch: number;
+  coalesceWindowMs: number;
+  coalesceMaxBatch: number;
   rememberAgents: boolean;
   worktree: { enabled: boolean; gitTimeoutMs: number };
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Exceeding this is rejected at spawn time as a config error, never silently truncated. */
@@ -80,6 +82,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   reconcileTtlMs: 24 * 60 * 60 * 1_000,
   maxReconcileRounds: 3,
   maxReconcileBatch: 10,
+  coalesceWindowMs: 0,
+  coalesceMaxBatch: 8,
   rememberAgents: true,
   worktree: { enabled: false, gitTimeoutMs: 30_000 },
   maxNestedDepth: 3,
@@ -137,6 +141,14 @@ export function loadSettings(source: unknown): AgentSettings {
       typeof value.maxReconcileBatch === "number"
         ? Math.max(1, value.maxReconcileBatch)
         : DEFAULT_SETTINGS.maxReconcileBatch,
+    coalesceWindowMs:
+      typeof value.coalesceWindowMs === "number" && Number.isFinite(value.coalesceWindowMs)
+        ? Math.min(5_000, Math.max(0, value.coalesceWindowMs))
+        : DEFAULT_SETTINGS.coalesceWindowMs,
+    coalesceMaxBatch:
+      typeof value.coalesceMaxBatch === "number" && Number.isFinite(value.coalesceMaxBatch)
+        ? Math.max(1, Math.floor(value.coalesceMaxBatch))
+        : DEFAULT_SETTINGS.coalesceMaxBatch,
     rememberAgents: typeof value.rememberAgents === "boolean" ? value.rememberAgents : DEFAULT_SETTINGS.rememberAgents,
     maxNestedDepth:
       typeof value.maxNestedDepth === "number" && value.maxNestedDepth >= 0

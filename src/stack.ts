@@ -13,6 +13,8 @@ import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
 import { createNotifier, deliveryKey, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { createCoalescer, isCoalescible, type Coalescer } from "./delivery/coalescer.js";
+import { formatDigest, formatSingle } from "./delivery/format.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
@@ -39,6 +41,7 @@ import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 let previousFleetWidget: FleetWidgetController | undefined;
 /** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
+let previousCoalescer: Coalescer | undefined;
 
 export interface WorkflowSupport {
   readonly enabled: boolean;
@@ -87,6 +90,8 @@ export function buildSessionStack(
   previousFleetWidget = undefined;
   previousUsageBroadcaster?.dispose();
   previousUsageBroadcaster = undefined;
+  previousCoalescer?.dispose();
+  previousCoalescer = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -139,7 +144,62 @@ export function buildSessionStack(
   } catch {
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
-  const notifier = createNotifier({
+  const sendFormatted = (items: readonly DeliveryPayload[]) => {
+    const stats = Object.fromEntries(
+      items.flatMap((item) => {
+        const outcome = store.get(item.runId)?.outcome;
+        return outcome ? [[item.key, formatOutcomeSummary(outcome)]] : [];
+      }),
+    );
+    if (items.length === 1) {
+      const payload = items[0]!;
+      const snapshot = store.get(payload.runId);
+      const outcome = snapshot?.outcome;
+      const fallbackReason =
+        payload.status !== "completed"
+          ? (outcome?.error?.message ?? outcome?.timeoutReason ?? snapshot?.diag.error?.message)
+          : undefined;
+      const presented = {
+        ...payload,
+        ...(payload.label === undefined && snapshot?.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
+        ...(payload.failReason === undefined && fallbackReason !== undefined ? { failReason: fallbackReason } : {}),
+      };
+      const singleStats = stats[payload.key];
+      pi.sendMessage(
+        {
+          customType: "subagent:notification",
+          content: formatSingle(presented, singleStats !== undefined ? { stats: singleStats } : undefined),
+          display: true,
+          details: payload,
+        },
+        { triggerTurn: true },
+      );
+      return;
+    }
+    // Digest details are discriminated by kind. Consumers must inspect kind first and read items.
+    const first = items[0]!;
+    pi.sendMessage(
+      {
+        customType: "subagent:notification",
+        content: formatDigest(items, { stats }),
+        display: true,
+        details: { ...first, kind: "digest", items },
+      },
+      { triggerTurn: true },
+    );
+  };
+  let notifier: Notifier;
+  const coalescer =
+    settings.coalesceWindowMs > 0
+      ? createCoalescer({
+          clock: systemClock,
+          windowMs: settings.coalesceWindowMs,
+          maxBatch: settings.coalesceMaxBatch,
+          send: sendFormatted,
+          onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+        })
+      : undefined;
+  notifier = createNotifier({
     store: outbox,
     clock: systemClock,
     maxAttempts: settings.deliveryAttempts,
@@ -147,59 +207,16 @@ export function buildSessionStack(
     reconcileTtlMs: settings.reconcileTtlMs,
     maxReconcileRounds: settings.maxReconcileRounds,
     maxBatch: settings.maxReconcileBatch,
-    ...(merged.onDelivery ? { onDelivery: merged.onDelivery } : {}), // H4
-    sender: (payload) => {
-      // G5b: sendMessage has no ack (arch. §2.5); failures stay inside
-      // Notifier's own retry/backoff loop, never surfaced to run status.
-      // M-D: append a one-line stats summary (model · turns · tools · cost ·
-      // duration) from the terminal snapshot so the parent session sees the
-      // execution profile at a glance.
-      const snapshot = store.get(payload.runId);
-      const outcome = snapshot?.outcome;
-      const stats = outcome ? formatOutcomeSummary(outcome) : undefined;
-      const label = payload.label ?? snapshot?.diag.label;
-      // Non-completed runs: textPreview is usually empty — surface the actual
-      // failure reason instead (observed in the wild: a config-failed run's
-      // notification said nothing beyond "failed", the reason required a
-      // manual get_subagent_result round-trip).
-      const failReason =
-        payload.failReason ??
-        (payload.status !== "completed"
-          ? (outcome?.error?.message ?? outcome?.timeoutReason ?? snapshot?.diag.error?.message)
-          : undefined);
-      const degradedTail =
-        payload.degradedReason === "pre-finalize"
-          ? ' (pre-finalize snapshot; run get_subagent_result "' + payload.runId.slice(0, 8) + '" to confirm)'
-          : "";
-      const tail = failReason ?? (payload.textPreview || undefined);
-      // Human-facing head: label + #shortId (matches the tree rows). The full
-      // runId stays available in `details` and in the original spawn tool
-      // result, so the model can still steer/query/resume by id.
-      const who = label ? `"${label}" (#${payload.runId.slice(0, 8)})` : `#${payload.runId.slice(0, 8)}`;
-      // triggerTurn: a terminal notification must always surface to the parent
-      // as a turn — steering into the in-flight turn while the parent is
-      // streaming (pi's default for triggerTurn!==false), and starting a fresh
-      // turn via _runAgentPrompt when the parent is idle. Without this option,
-      // idle-time notifications were only appended to history (display-only)
-      // and the parent never reacted until the next user input.
-      const truncated = tail !== undefined && tail.length > 200;
-      const hint = truncated ? ` — get_subagent_result "${payload.runId.slice(0, 8)}" for full output` : "";
-      pi.sendMessage(
-        {
-          customType: "subagent:notification",
-          content:
-            `Subagent ${who} ${payload.status}` +
-            (stats ? ` — ${stats}` : "") +
-            (tail ? `: ${tail.slice(0, 200)}` : "") +
-            degradedTail +
-            hint,
-          display: true,
-          details: payload,
-        },
-        { triggerTurn: true },
-      );
+    ...(merged.onDelivery ? { onDelivery: merged.onDelivery } : {}),
+    sender: {
+      willBuffer: (payload) => coalescer !== undefined && isCoalescible(payload),
+      sendMessage: (payload) => {
+        if (coalescer && isCoalescible(payload)) return coalescer.submit(payload);
+        sendFormatted([payload]);
+      },
     },
   });
+  previousCoalescer = coalescer;
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
   const spawnRef: { current?: SpawnService } = {};
   // M-D: runIds whose "subagent:started" event has already been emitted (once per run).

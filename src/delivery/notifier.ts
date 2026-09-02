@@ -1,6 +1,6 @@
 import type { Clock } from "../core/clock.js";
 import type { OutboxStore as CoreOutboxStore } from "../core/store.js";
-import type { DeliveryPayload } from "../core/types.js";
+import type { DeliveryPayload, SendResult } from "../core/types.js";
 import { canonicalizeDeliveryKey, deliveryKey, type DeliveryKey } from "../core/delivery-key.js";
 
 export { canonicalizeDeliveryKey, deliveryKey } from "../core/delivery-key.js";
@@ -22,11 +22,12 @@ export interface ReconcileReport {
 }
 export type OutboxStore = CoreOutboxStore<PersistedDelivery>;
 export interface MessageSender {
-  sendMessage(payload: DeliveryPayload): void;
+  sendMessage(payload: DeliveryPayload): SendResult | void;
+  willBuffer?(payload: DeliveryPayload): boolean;
 }
 export interface NotifierOptions {
   store: OutboxStore;
-  sender: MessageSender | ((payload: DeliveryPayload) => void);
+  sender: MessageSender | ((payload: DeliveryPayload) => SendResult | void);
   clock?: Clock;
   maxAttempts?: number;
   backoffMs?: number;
@@ -61,8 +62,10 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const maxBatch = Math.max(1, options.maxBatch ?? 10);
   const state = new Map<DeliveryKey, PersistedDelivery>();
   const degraded: Array<{ key: string; reason: string; at: number }> = [];
-  const send: (p: DeliveryPayload) => void =
+  const send: (p: DeliveryPayload) => SendResult | void =
     typeof options.sender === "function" ? options.sender : (p) => (options.sender as MessageSender).sendMessage(p);
+  const willBuffer = (p: DeliveryPayload) =>
+    typeof options.sender === "object" && options.sender.willBuffer?.(p) === true;
   const audit = (key: string, s: DeliveryState, error?: string) =>
     options.audit?.({ key, state: s, ...(error ? { error } : {}) });
   const notify = (p: PersistedDelivery, s: DeliveryState) => {
@@ -155,10 +158,29 @@ export function createNotifier(options: NotifierOptions): Notifier {
     notify(next, nextState);
     if (nextState === "pending") clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => attempt(next, round));
   };
+  const markBatched = (record: PersistedDelivery, round: number) => {
+    if (state.get(record.key)?.state === "batched") return;
+    const next = { ...record, state: "batched" as const, reconcileRound: round };
+    state.set(next.key, next);
+    try {
+      writeBack(record, { state: next.state, reconcileRound: round });
+    } catch (e) {
+      fail(next.key, `outbox update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    audit(next.key, "batched");
+    notify(next, "batched");
+  };
   const attempt = (record: PersistedDelivery, round: number) => {
     if (state.get(record.key)?.state === "consumed") return;
+    const outbound = { ...record, reconcileRound: round };
+    const preBuffer = willBuffer(outbound);
+    if (preBuffer) markBatched(record, round);
     try {
-      send(record);
+      const result = send(outbound);
+      if (result === "buffered") {
+        if (!preBuffer) markBatched(record, round);
+        return;
+      }
       settleDelivered(record, round);
     } catch (e) {
       settleFailed(record, round, e);

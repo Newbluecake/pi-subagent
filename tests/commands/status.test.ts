@@ -264,6 +264,17 @@ describe("/agent settings subcommand", () => {
     expect(out).toContain("workflow.runawayPolicy");
   });
 
+  it("18: exposes both coalescing settings through the whitelist and validates values", () => {
+    const { d, current } = settingsDeps();
+    const listing = run(d, "settings");
+    expect(listing).toContain("coalesceWindowMs");
+    expect(listing).toContain("coalesceMaxBatch");
+    expect(run(d, "settings set coalesceWindowMs 500")).toContain("coalesceWindowMs");
+    expect(current.coalesceWindowMs).toBe(500);
+    expect(run(d, "settings set coalesceMaxBatch 0")).toContain("Invalid value");
+    expect(current.coalesceMaxBatch).toBe(DEFAULT_SETTINGS.coalesceMaxBatch);
+  });
+
   it("budget.* set mutates live settings, persists, and reports immediate effect", () => {
     const { d, persisted, current } = settingsDeps();
     const out = run(d, "settings set budget.idleMs 600000");

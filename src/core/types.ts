@@ -304,6 +304,8 @@ export interface LifecycleEvent {
   status: RunStatus;
   at: Millis;
 }
+export type SendResult = "sent" | "buffered";
+
 export interface DeliveryPayload {
   key: string;
   runId: RunId;
@@ -313,6 +315,7 @@ export interface DeliveryPayload {
   diag: DiagSummary;
   createdAt: Millis;
   reconcileRound: number;
+  attempts?: number;
   finalized?: boolean;
   degradedReason?: "pre-finalize" | "policy-error";
   structuredPreview?: string;

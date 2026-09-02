@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { createNotifier } from "../../src/delivery/notifier.js";
+import { createCoalescer, isCoalescible } from "../../src/delivery/coalescer.js";
 import type { PersistedDelivery, OutboxStore } from "../../src/delivery/notifier.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
 import { MemoryOutboxStore } from "../../src/core/store.js";
@@ -382,5 +383,162 @@ describe("reconcile redelivery policy (duplicate-notification regression)", () =
     expect(notifier.reconcile().redelivered).toEqual([]);
     expect(sent).toHaveLength(0);
     expect(audits).toContain("illegal legacy key");
+  });
+});
+
+describe("P2 notifier/coalescer integration", () => {
+  function p(key: string, extra: Partial<PersistedDelivery> = {}): PersistedDelivery {
+    return { ...payload, key, runId: key.split(":")[0]!, ...extra };
+  }
+
+  it("12+9: marks batched before synchronous maxBatch flush and never overwrites delivered", () => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    const writes: Array<{ key: string; state?: string }> = [];
+    const originalUpdate = store.update.bind(store);
+    store.update = (key, patch) => {
+      writes.push({ key, state: patch.state });
+      originalUpdate(key, patch);
+    };
+    const sent: DeliveryPayload[][] = [];
+    let notifier!: ReturnType<typeof createNotifier>;
+    const coalescer = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 2,
+      send: (items) => sent.push([...items]),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    notifier = createNotifier({
+      store,
+      clock,
+      sender: {
+        willBuffer: isCoalescible,
+        sendMessage: (item) => coalescer.submit(item),
+      },
+    });
+    notifier.enqueue(p("a:1"));
+    notifier.enqueue(p("b:1"));
+    expect(sent).toHaveLength(1);
+    expect(notifier.stats.delivered).toBe(2);
+    for (const key of ["a:1", "b:1"]) {
+      expect(writes.filter((w) => w.key === key).map((w) => w.state)).toEqual(["batched", "delivered"]);
+    }
+    const replayed: DeliveryPayload[] = [];
+    const restarted = createNotifier({ store, clock, sender: (item) => replayed.push(item) });
+    expect(restarted.reconcile().redelivered).toEqual([]);
+    expect(replayed).toEqual([]);
+  });
+
+  it("11: flush failure returns batched delivery to backoff without changing reconcileRound", async () => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    let notifier!: ReturnType<typeof createNotifier>;
+    const { createCoalescer, isCoalescible } = await import("../../src/delivery/coalescer.js");
+    const coalescer = createCoalescer({
+      clock,
+      windowMs: 10,
+      maxBatch: 8,
+      send: (items) => {
+        if (items[0]?.attempts === 0) throw new Error("closed");
+      },
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    notifier = createNotifier({
+      store,
+      clock,
+      backoffMs: 10,
+      sender: {
+        willBuffer: isCoalescible,
+        sendMessage: (item) => (isCoalescible(item) ? coalescer.submit(item) : "sent"),
+      },
+    });
+    notifier.enqueue(p("fail:1"));
+    expect(store.records.get("fail:1")?.state).toBe("batched");
+    clock.advance(10);
+    expect(store.records.get("fail:1")).toMatchObject({ state: "pending", attempts: 1, reconcileRound: 0 });
+    expect(clock.pendingTimers).toBe(1);
+    clock.advance(10);
+    expect(store.records.get("fail:1")).toMatchObject({ state: "delivered", attempts: 2, reconcileRound: 0 });
+  });
+
+  it.each([
+    ["pending", 0],
+    ["dropped", 1],
+    ["batched", 0],
+  ] as const)("13: reconcile releases %s with effective round 1 and immediate send", async (state, attempts) => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    const sent: DeliveryPayload[] = [];
+    const { createCoalescer, isCoalescible } = await import("../../src/delivery/coalescer.js");
+    let notifier!: ReturnType<typeof createNotifier>;
+    const coalescer = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 8,
+      send: (items) => sent.push(...items),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    const record = p(`reconcile-${state}:1`, { state, attempts });
+    store.put(record);
+    notifier = createNotifier({
+      store,
+      clock,
+      sender: {
+        willBuffer: isCoalescible,
+        sendMessage: (item) => (isCoalescible(item) ? coalescer.submit(item) : (sent.push(item), "sent")),
+      },
+      maxReconcileRounds: 3,
+    });
+    const report = notifier.reconcile();
+    expect(report.redelivered).toEqual([record.key]);
+    expect(sent[0]).toMatchObject({ key: record.key, reconcileRound: 1 });
+    expect(clock.pendingTimers).toBe(0);
+    expect(store.records.get(record.key)?.state).toBe("delivered");
+  });
+
+  it("14: failed, degraded, round and retry payloads all bypass the coalescing window", async () => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    const sent: string[] = [];
+    const { createCoalescer, isCoalescible } = await import("../../src/delivery/coalescer.js");
+    let notifier!: ReturnType<typeof createNotifier>;
+    const coalescer = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 8,
+      send: (items) => sent.push(...items.map((x) => x.key)),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    notifier = createNotifier({
+      store,
+      clock,
+      sender: {
+        willBuffer: isCoalescible,
+        sendMessage: (item) => (isCoalescible(item) ? coalescer.submit(item) : (sent.push(item.key), "sent")),
+      },
+    });
+    for (const record of [
+      p("failed:1", { status: "failed" }),
+      p("degraded:1", { degradedReason: "pre-finalize" }),
+      p("round:1", { reconcileRound: 1 }),
+      p("retry:1", { attempts: 1 }),
+    ])
+      store.put(record);
+    expect(notifier.reconcile().redelivered).toHaveLength(4);
+    expect(sent).toHaveLength(4);
+    expect(clock.pendingTimers).toBe(0);
+    expect([...store.records.values()].every((item) => item.state !== "batched")).toBe(true);
+  });
+
+  it("15: replays crashed batched records immediately and only once", async () => {
+    const clock = new FakeClock();
+    const store = new FakeOutbox<PersistedDelivery>();
+    for (const key of ["crash-a:1", "crash-b:1", "crash-c:1"]) store.put(p(key, { state: "batched" }));
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({ store, clock, sender: (item) => sent.push(item), maxReconcileRounds: 3 });
+    expect(notifier.reconcile().redelivered).toHaveLength(3);
+    expect(sent.map((item) => item.reconcileRound)).toEqual([1, 1, 1]);
+    expect([...store.records.values()].every((item) => item.state === "delivered")).toBe(true);
   });
 });

@@ -130,6 +130,8 @@ const SETTING_SPECS: Record<string, SettingSpec> = {
   foregroundAutoBackgroundMs: MS,
   maxReconcileRounds: COUNT,
   maxReconcileBatch: { kind: "number", min: 1, integer: true },
+  coalesceWindowMs: MS,
+  coalesceMaxBatch: { kind: "number", min: 1, integer: true },
   "worktree.enabled": BOOL,
   "worktree.gitTimeoutMs": MS,
   "workflow.enabled": BOOL,

@@ -25,6 +25,18 @@ describe("agent config", () => {
     expect(mergeBudget({ totalMs: 10 }, { idleMs: 20 })).toMatchObject({ totalMs: 10, idleMs: 20, startupMs: 30_000 });
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);
   });
+  it("18: validates and clamps coalescing settings, including non-finite values", () => {
+    expect(loadSettings({ coalesceWindowMs: Number.NaN }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowMs: Number.POSITIVE_INFINITY }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowMs: "500" }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowMs: 99_999 }).coalesceWindowMs).toBe(5_000);
+    expect(loadSettings({ coalesceWindowMs: -5 }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceMaxBatch: Number.NaN }).coalesceMaxBatch).toBe(8);
+    expect(loadSettings({ coalesceMaxBatch: Number.NEGATIVE_INFINITY }).coalesceMaxBatch).toBe(8);
+    expect(loadSettings({ coalesceMaxBatch: "2" }).coalesceMaxBatch).toBe(8);
+    expect(loadSettings({ coalesceMaxBatch: 0 }).coalesceMaxBatch).toBe(1);
+    expect(loadSettings({ coalesceMaxBatch: 2.7 }).coalesceMaxBatch).toBe(2);
+  });
   it("parses frontmatter model: strict pairs into model, fuzzy values into modelHint", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-subagent-hint-"));
     await mkdir(join(root, ".pi/agents"), { recursive: true });
