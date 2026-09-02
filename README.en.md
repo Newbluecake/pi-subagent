@@ -22,7 +22,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 ## The agent tree
 
 ```
-● 4 active · $0.92
+● 4 active Agents · $0.92
   后端实现 surface 截断 #6b7201c9 general-purpose cloudrouter-response/gpt-5.6-sol 🔧工具 3m32s $0.91
   TaskUpdate→edit✗→read→edit×3 ▸edit src/core/quota-bucket.ts
   ↳ 并行检索候选实现 #c3d4e5f6 explore 🔧工具 48s

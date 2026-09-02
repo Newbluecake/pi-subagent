@@ -50,8 +50,9 @@ export const FLEET_WIDGET_KEY = "pi-subagent:fleet";
 
 const WIDGET_MARK: Record<FleetHighlight, string> = { none: " ", warn: "!", crit: "✗" };
 
-/** M-C: default / hard cap on run LINES below the header (a run uses 1–2: main row + activity line). */
-export const WIDGET_DEFAULT_ROWS = 5;
+/** M-C: default / hard cap on run LINES below the header (a run uses 1–2: main row + activity line).
+ *  Default 6 fully covers the common ≤3-busy-agent fleet (3 main + 3 activity lines). */
+export const WIDGET_DEFAULT_ROWS = 6;
 export const WIDGET_MAX_ROWS = 8;
 
 /**
@@ -64,7 +65,7 @@ export function formatWidgetCost(costUsd: number): string {
 }
 
 export interface FleetWidgetRenderOptions {
-  /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
   terminalLingerMs?: number;
@@ -179,7 +180,7 @@ function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): st
  *
  * - Returns undefined when no runs are active → the controller hides the
  *   widget (terminal-only history is panel material, not widget material).
- * - Line 1 (header): `<bullet> N active[ · $cost][ · +M more]` — the bullet
+ * - Line 1 (header): `<bullet> N active Agents[ · $cost][ · +M more]` — the bullet
  *   is colored by the worst active highlight (rows arrive pre-sorted
  *   crit→warn→none from buildFleetViewModel).
  * - Lines 2..: runs in tree order — mark (! warn / ✗ crit), depth indent,
@@ -188,7 +189,11 @@ function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): st
  *   mid-thought, an indented activity line (tool trail with in-flight
  *   ▸tool + args preview, and/or the » thinking stream) so long tool calls
  *   render in full instead of being truncated off the row. maxRows is a
- *   LINE budget: a run with activity consumes 2 of it.
+ *   LINE budget: main rows are dealt out first (every visible run keeps its
+ *   identity line), then the leftover lines go to activity continuations in
+ *   display order — greedy 2-lines-per-run allocation starved the LAST
+ *   visible run of its tool trail whenever N busy runs didn't fit an even
+ *   budget.
  */
 export function buildFleetWidgetLines(
   model: FleetViewModel,
@@ -219,37 +224,52 @@ export function buildFleetWidgetLines(
     } else general.push(row);
   }
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
-  const lines: string[] = [];
-  // maxRows is a line budget for run lines (a run uses 1–2: main + activity).
-  let runLinesLeft = maxRows;
-  let shownRuns = 0;
-  const pushRun = (row: FleetRow, indent: string): boolean => {
-    if (runLinesLeft <= 0) return false;
-    const runLines = renderRunLines(row, indent, color);
-    // if only one line is left, show the main row and drop the activity line
-    const take = runLines.length <= runLinesLeft ? runLines : runLines.slice(0, 1);
-    lines.push(...take);
-    runLinesLeft -= take.length;
-    shownRuns++;
-    return true;
-  };
+  // Ordered entries: workflow ⚙ group headers interleaved with their claimed
+  // runs, then the general run forest. ⚙ headers don't consume the line budget.
+  type Entry = { header: string } | { row: FleetRow; indent: string };
+  const entries: Entry[] = [];
   for (const wf of workflows) {
-    lines.push(color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`));
-    for (const row of grouped.get(wf.workflowId) ?? []) {
-      if (!pushRun(row, "↳ ")) break;
-    }
+    entries.push({ header: color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`) });
+    for (const row of grouped.get(wf.workflowId) ?? []) entries.push({ row, indent: "↳ " });
   }
   for (const { row, depth } of treeOrder(general)) {
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
-    if (!pushRun(row, indent)) break;
+    entries.push({ row, indent });
+  }
+  // Fair line budget: deal every run its main row first, then hand the
+  // leftover lines to activity continuations in display order. (Greedy
+  // 2-lines-per-run allocation starved the LAST visible run of its tool
+  // trail whenever N busy runs didn't fit an even budget.)
+  let budget = maxRows;
+  let shownRuns = 0;
+  const rendered = entries.map((entry) => {
+    if ("header" in entry) return { main: entry.header, activity: undefined as string | undefined, show: false };
+    if (budget <= 0) return undefined; // run hidden behind "+N more"
+    const [main, activity] = renderRunLines(entry.row, entry.indent, color);
+    budget -= 1;
+    shownRuns++;
+    return { main: main!, activity, show: false };
+  });
+  for (const r of rendered) {
+    if (budget <= 0) break;
+    if (r?.activity !== undefined && !r.show) {
+      r.show = true;
+      budget -= 1;
+    }
+  }
+  const lines: string[] = [];
+  for (const r of rendered) {
+    if (!r) continue;
+    lines.push(r.main);
+    if (r.show && r.activity !== undefined) lines.push(r.activity);
   }
   const hidden = model.activeCount - shownRuns;
   const header =
-    `${color(worst, "●")} ${model.activeCount} active` +
+    `${color(worst, "●")} ${model.activeCount} active Agents` +
     (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
   lines.unshift(header);
-  for (const row of recentTerminal.slice(0, Math.max(0, runLinesLeft))) {
+  for (const row of recentTerminal.slice(0, Math.max(0, budget))) {
     const mark = row.status === "completed" ? "✓" : "✗";
     lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
   }
@@ -279,7 +299,7 @@ export interface FleetWidgetDeps {
   refreshMs?: Millis;
   /** settings.budget.idleMs — same half-idle warn semantics as the panel. */
   idleBudgetMs?: Millis;
-  /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (5); hard cap WIDGET_MAX_ROWS (8). */
+  /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
   workflows?: () => readonly { workflowId: string; name: string; startedAt: number; currentPhaseId?: string }[];

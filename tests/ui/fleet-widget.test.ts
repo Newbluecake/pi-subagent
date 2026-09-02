@@ -80,7 +80,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
     expect(buildFleetWidgetLines(model)).toEqual([
-      "● 1 active · $1.05",
+      "● 1 active Agents · $1.05",
       "  aaaaaaaa architect 🧠思考 8m32s Σ8m32s $1.05",
     ]);
   });
@@ -247,17 +247,37 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
           toolHistory: [{ name: "bash", toolCallId: "t", startedAt: 9_900 }],
         }),
       });
-    // 3 busy runs with maxRows 5 → 2 full pairs (4 lines) + main-only third run
+    // 3 busy runs with maxRows 5 → 3 main rows + activity for the first two
     const three = [busy("r1-000000", 1_000), busy("r2-000000", 2_000), busy("r3-000000", 3_000)];
     const lines = buildFleetWidgetLines(buildFleetViewModel(three, OPTS), { maxRows: 5 })!;
     expect(lines).toHaveLength(1 + 5);
     expect(lines.filter((l) => l.includes("▸bash"))).toHaveLength(2); // 3rd run's activity dropped
     expect(lines.some((l) => l.includes("r3-00000") && !l.includes("▸"))).toBe(true);
     expect(lines[0]).not.toContain("more"); // all 3 runs shown (as rows)
-    // maxRows 2 → one full pair, others hidden behind +2 more
+    // fair allocation: main rows are dealt first — maxRows 2 → two main rows,
+    // no activity lines, only the third run hidden behind +1 more
     const tight = buildFleetWidgetLines(buildFleetViewModel(three, OPTS), { maxRows: 2 })!;
     expect(tight).toHaveLength(1 + 2);
-    expect(tight[0]).toContain("+2 more");
+    expect(tight.filter((l) => l.includes("▸bash"))).toHaveLength(0);
+    expect(tight[0]).toContain("+1 more");
+  });
+
+  it("default budget: 3 busy runs all keep their activity lines (main rows first, then trails)", () => {
+    const busy = (runId: string, at: number) =>
+      snapshot({
+        runId,
+        diag: diag({
+          createdAt: at,
+          lastEventAt: 9_900,
+          toolHistory: [{ name: "bash", toolCallId: "t", startedAt: 9_900 }],
+        }),
+      });
+    const three = [busy("r1-000000", 1_000), busy("r2-000000", 2_000), busy("r3-000000", 3_000)];
+    // default maxRows (6) = 3 main rows + 3 activity lines: the LAST run's
+    // tool trail is no longer starved by an odd leftover line
+    const lines = buildFleetWidgetLines(buildFleetViewModel(three, OPTS))!;
+    expect(lines).toHaveLength(1 + 6);
+    expect(lines.filter((l) => l.includes("▸bash"))).toHaveLength(3);
   });
 
   it("tree: a child whose parent is shown is indented under it (↳), not severity-sorted away", () => {
@@ -271,7 +291,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     // severity equal → elapsed order: parent(9s), other(8s), child(5s); tree pulls child up under parent
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
-      "● 3 active",
+      "● 3 active Agents",
       "  parent-0 · 🧠思考 9s Σ9s",
       "  ↳ child-00 · 🧠思考 5s Σ5s",
       "  other-00 · 🧠思考 8s Σ8s",
@@ -349,20 +369,20 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       runId: "b-0000000",
       diag: diag({ createdAt: 9_000, lastEventAt: 9_900, usage: usage(0.001) }),
     });
-    expect(buildFleetWidgetLines(buildFleetViewModel([a, b], OPTS))![0]).toBe("● 2 active · $0.0030");
+    expect(buildFleetWidgetLines(buildFleetViewModel([a, b], OPTS))![0]).toBe("● 2 active Agents · $0.0030");
     const free = snapshot({ diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
-    expect(buildFleetWidgetLines(buildFleetViewModel([free], OPTS))![0]).toBe("● 1 active");
+    expect(buildFleetWidgetLines(buildFleetViewModel([free], OPTS))![0]).toBe("● 1 active Agents");
   });
 
-  it("truncation: default 5 rows + header, overflow reported on the header as +N more", () => {
+  it("truncation: default 6 rows + header, overflow reported on the header as +N more", () => {
     const runs = Array.from({ length: 7 }, (_, i) =>
       snapshot({ runId: `run-${i}00000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
     );
     const model = buildFleetViewModel(runs, OPTS);
-    const lines = buildFleetWidgetLines(model)!; // default maxRows = 5
-    expect(lines).toHaveLength(6);
-    expect(lines[0]).toContain("7 active");
-    expect(lines[0]).toContain("+2 more");
+    const lines = buildFleetWidgetLines(model)!; // default maxRows = 6
+    expect(lines).toHaveLength(7);
+    expect(lines[0]).toContain("7 active Agents");
+    expect(lines[0]).toContain("+1 more");
   });
 
   it("overflow boundary: exactly maxRows runs → no '+more'; maxRows 1 → header + 1 row", () => {
@@ -401,7 +421,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const old = snapshot({ runId: "old-00000", status: "completed", phase: "settled", updatedAt: 1_000 }); // 9s ago
     const model = buildFleetViewModel([active, done, failed, old], { ...OPTS, recentTerminal: 3 });
     const lines = buildFleetWidgetLines(model)!;
-    expect(lines[0]).toContain("1 active");
+    expect(lines[0]).toContain("1 active Agents");
     expect(lines[1]).toContain("live-000");
     expect(
       lines.some((l) => l.startsWith("✓ 刚完成 #done-000") && l.includes("completed") && l.includes("$0.11")),
@@ -410,7 +430,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines.join("\n")).not.toContain("old-0000"); // 9s ago → expired
     // all-terminal fleet: still shown while lingering, hidden once expired
     const onlyDone = buildFleetViewModel([done], { ...OPTS, recentTerminal: 3 });
-    expect(buildFleetWidgetLines(onlyDone)![0]).toContain("0 active");
+    expect(buildFleetWidgetLines(onlyDone)![0]).toContain("0 active Agents");
     expect(buildFleetWidgetLines(onlyDone, { terminalLingerMs: 0 })).toBeUndefined();
   });
 });
@@ -470,7 +490,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s Σ1s"]);
+    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · 🧠思考 1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -502,7 +522,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active", "  live-000 · 🧠思考 1s Σ1s"]);
+    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · 🧠思考 1s Σ1s"]);
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });
@@ -587,7 +607,7 @@ describe("M9: workflow group headers in the tree", () => {
     const lines = buildFleetWidgetLines(model, {
       workflows: [{ workflowId: "wf-1", name: "plan-review", phase: "review", elapsedMs: 121_000 }],
     })!;
-    expect(lines[0]).toContain("3 active");
+    expect(lines[0]).toContain("3 active Agents");
     expect(lines[1]).toBe("⚙ plan-review · review · 2m01s");
     expect(lines[2]).toContain("↳ 评审A #child-a0");
     expect(lines[3]).toContain("↳ 评审B #child-b0");
@@ -600,7 +620,7 @@ describe("M9: workflow group headers in the tree", () => {
     const lines = buildFleetWidgetLines(model, {
       workflows: [{ workflowId: "wf-2", name: "nightly", elapsedMs: 5_000 }],
     })!;
-    expect(lines[0]).toContain("0 active");
+    expect(lines[0]).toContain("0 active Agents");
     expect(lines[1]).toBe("⚙ nightly · - · 5s");
   });
 
