@@ -75,7 +75,7 @@
 | `bashJobs.autoBackgroundS`   | `120`                    | 前台 bash 超过该时长后转后台;`0` = 整个功能关闭(覆盖工具都不注册,内置 bash 零变化)          |
 | `bashJobs.maxLogBytes`       | `10485760`               | 单个 job 日志上限;写满后停写并标记截断,**进程继续跑**                                       |
 | `bashJobs.maxBackgroundJobs` | `8`                      | 并发后台 job 上限;满位时阈值到期也继续前台等待,显式 `run_in_background` 则直接报错          |
-| `bashJobs.retentionS`        | `86400`                  | 终态 job 的 JSON/日志保留时长,过期文件在下次启动扫描时清理                                  |
+| `bashJobs.retentionS`        | `86400`                  | 终态 job 的 JSON/日志保留时长,过期文件由目录清理扫描删除(见下)                              |
 | `bashJobs.shutdownPolicy`    | `"keep"`                 | pi 真退出(`quit`)时对仍在跑的 job:`keep` 保留 / `kill` 终止;reload/new/resume/fork 一律保留 |
 | `bashJobs.dir`               | `~/.pi/agent/bash-jobs`  | job 状态 JSON 与日志目录(**仅 JSON 文件可配**,不在 `/agent settings` 中)                    |
 | `bashJobs.shellPath`         | `$SHELL`(白名单)→ `bash` | 执行命令的 shell;`$SHELL` 仅在 basename ∈ {bash, zsh, sh} 时采用(**仅 JSON 文件可配**)      |
@@ -84,6 +84,7 @@
 
 - **win32 不覆盖**:该平台没有进程组语义,内置 `bash` 原样保留,`bash` 与 `bash_job` 都不注册。
 - **同名覆盖冲突**:pi 里同名工具"首个注册者胜出"。若另一个扩展也覆盖 `bash` 且先注册,本功能整体失效(不会破坏对方);想禁用本覆盖把 `bashJobs.autoBackgroundS` 设为 `0` 即可。
+- **目录清理**:清理扫描在 session 启动时跑一次,之后每次新建 bash job 时**最多每 10 分钟**再跑一次(**不新增任何定时器**,连开几天的会话也会清理)。一次扫描处理四类:过期终态 job 的 JSON+日志;读不出来的 `.json`(文件名非法 / JSON 损坏 / schema 不认)——按**文件 mtime** 计龄,过期连同同名 `.log` 一起删;没有对应 `.json` 的孤儿 `.log`(同样按 mtime,且内存里还挂着该 job 时绝不删);原子写崩溃残留的 `.tmp`(固定 1 小时 TTL)。安全边界:**只碰 `.json` / `.log` / `.tmp` 三种后缀**,目录里其他文件一律不动;**非终态 job 永不删**;文件 mtime 与时钟不可比(例如 mtime 在未来)时一律保留。每删一个非记录类文件都会打一条 WARN。
 - **日志与敏感输出**:job 状态与日志默认写在 `~/.pi/agent/bash-jobs/`(权限 0600,与 session 文件同威胁模型)。命令输出里的密钥/令牌会**落盘**,直到 `retentionS` 过期被清理——需要更严的隔离时用 `bashJobs.dir` 指到别处,或把敏感命令的输出重定向掉。
 - **日志自洽**:进程进入终态时,日志尾部会追加一行结论,形如
   `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s`(被杀/超时/丢失退出码的 job 不会硬编出 `exit`)。

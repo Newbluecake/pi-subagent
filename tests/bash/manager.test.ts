@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -839,6 +839,25 @@ describe("bash job manager: recover (§3.6)", () => {
     expect(summary.pruned).toEqual([old.jobId]);
     expect(h.manager.list().map((r) => r.jobId)).toEqual(["b_FRESH001"]);
     expect(h.warnings.some((w) => w.includes("b_BRKEN001"))).toBe(true);
+    // The fake clock sits far behind the corrupt file's real mtime, so its age
+    // is not computable and it is (deliberately) kept rather than guessed at.
+    expect(summary.prunedFiles).toEqual([]);
+  });
+
+  it("reports swept non-record files in prunedFiles", async () => {
+    const h = await harness();
+    // The sweep judges nameless litter by file mtime (real wall-clock time), so
+    // this case needs a clock that can outrun it — hence a store of its own.
+    const clock = new FakeClock(Date.now());
+    const store = createJobStore({ dir: h.dir, retentionMs: 1_000, clock, warn: (m) => h.warnings.push(m) });
+    const manager = h.rebuild({ store, clock });
+    await mkdir(h.dir, { recursive: true });
+    await writeFile(join(h.dir, "b_0RPHAN11.log"), "left behind", "utf8");
+    clock.advance(60_000);
+
+    const summary = await manager.recover();
+    expect(summary.prunedFiles).toEqual(["b_0RPHAN11.log"]);
+    expect(summary.pruned).toEqual([]);
   });
 
   it("is safe to run twice (terminal states are sinks)", async () => {
@@ -968,6 +987,106 @@ describe("foreground record discard", () => {
     await waitFor(() => next.get("b_STAX0001") === undefined, "leftover discarded");
     expect(await h.store.load("b_STAX0001")).toBeUndefined();
     expect(h.notified).toHaveLength(0);
+  });
+});
+
+/**
+ * §15 change C — a session that never reloads must still clean up. The sweep
+ * rides on `create()` behind a throttle: no new timer, no blocking the spawn.
+ */
+describe("bash job manager: in-session retention sweep (§15)", () => {
+  /** Counts sweeps and lets a test make the sweep fail. */
+  interface Counting {
+    readonly store: JobStore;
+    calls(): number;
+    fail(error: Error): void;
+  }
+  function countingStore(store: JobStore): Counting {
+    let calls = 0;
+    let failure: Error | undefined;
+    return {
+      store: {
+        ...store,
+        pruneExpired: (pruneOptions) => {
+          calls++;
+          return failure ? Promise.reject(failure) : store.pruneExpired(pruneOptions);
+        },
+      },
+      calls: () => calls,
+      fail: (error) => {
+        failure = error;
+      },
+    };
+  }
+
+  it("sweeps once per interval across back-to-back creates, then again after the interval", async () => {
+    const h = await harness();
+    const counting = countingStore(h.store);
+    const manager = h.rebuild({ store: counting.store, sweepIntervalMs: 600_000 });
+
+    await manager.create({ command: "a", cwd: "/repo" });
+    await manager.create({ command: "b", cwd: "/repo" });
+    await settle();
+    expect(counting.calls()).toBe(1);
+
+    // Still inside the window.
+    h.clock.advance(599_000);
+    await manager.create({ command: "c", cwd: "/repo" });
+    await settle();
+    expect(counting.calls()).toBe(1);
+
+    h.clock.advance(1_000);
+    await manager.create({ command: "d", cwd: "/repo" });
+    await settle();
+    expect(counting.calls()).toBe(2);
+  });
+
+  it("adds no timer of its own (the poll timer stays the only one)", async () => {
+    const h = await harness();
+    const counting = countingStore(h.store);
+    const manager = h.rebuild({ store: counting.store, sweepIntervalMs: 1_000 });
+
+    await manager.create({ command: "a", cwd: "/repo" });
+    await settle();
+    const armed = h.clock.pendingTimers;
+    expect(armed).toBe(1); // the notification poll
+
+    h.clock.advance(2_000);
+    await manager.create({ command: "b", cwd: "/repo" });
+    await settle();
+    expect(counting.calls()).toBe(2);
+    expect(h.clock.pendingTimers).toBe(armed);
+  });
+
+  it("never lets a failing sweep break create()", async () => {
+    const h = await harness();
+    const counting = countingStore(h.store);
+    counting.fail(new Error("disk on fire"));
+    const manager = h.rebuild({ store: counting.store });
+
+    const job = await manager.create({ command: "npm test", cwd: "/repo" });
+    await settle();
+    expect(manager.get(job.jobId)?.status).toBe("running");
+    expect(counting.calls()).toBe(1);
+    expect(h.warnings.some((w) => w.includes("retention sweep failed") && w.includes("disk on fire"))).toBe(true);
+  });
+
+  it("treats a live job's log as tracked, never as an orphan", async () => {
+    const h = await harness();
+    const seen: (((jobId: string) => boolean) | undefined)[] = [];
+    const store: JobStore = {
+      ...h.store,
+      pruneExpired: (pruneOptions) => {
+        seen.push(pruneOptions?.isTracked);
+        return h.store.pruneExpired(pruneOptions);
+      },
+    };
+    const manager = h.rebuild({ store });
+    const job = await manager.create({ command: "npm test", cwd: "/repo" });
+    await settle();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.(job.jobId)).toBe(true);
+    expect(seen[0]?.("b_M1SS1NG1")).toBe(false);
   });
 });
 

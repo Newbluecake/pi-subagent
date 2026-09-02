@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJobStore, type JobStore } from "../../src/bash/job-store.js";
+import { createJobStore, TMP_RETENTION_MS, type JobStore } from "../../src/bash/job-store.js";
 import { createJobRecord, transitionJob, type JobRecord } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 
@@ -18,10 +18,10 @@ interface Harness {
   warnings: string[];
 }
 
-async function harness(retentionMs = 86_400_000): Promise<Harness> {
+async function harness(retentionMs = 86_400_000, startAt = 1_000): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "pi-subagent-bash-jobs-"));
   dirs.push(dir);
-  const clock = new FakeClock(1_000);
+  const clock = new FakeClock(startAt);
   const warnings: string[] = [];
   const store = createJobStore({
     dir: join(dir, "bash-jobs"),
@@ -194,13 +194,13 @@ describe("bash job store retention", () => {
     }
 
     clock.advance(86_400_000);
-    expect(await store.pruneExpired()).toEqual(["b_EXP1RED1"]);
+    expect(await store.pruneExpired()).toEqual({ jobs: ["b_EXP1RED1"], files: [] });
     expect((await store.loadAll()).map((r) => r.jobId)).toEqual(["b_FRESH111", "b_R4NN1NG1"]);
     expect((await readdir(store.dir)).sort()).toEqual(
       ["b_FRESH111.json", "b_FRESH111.log", "b_R4NN1NG1.json", "b_R4NN1NG1.log"].sort(),
     );
     // Idempotent: a second sweep at the same instant removes nothing new.
-    expect(await store.pruneExpired()).toEqual([]);
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
   });
 
   it("falls back to createdAt for a terminal record that lost its endedAt", async () => {
@@ -208,16 +208,16 @@ describe("bash job store retention", () => {
     const orphan = { ...record("b_N0ENDED1", store, 500), status: "orphaned" as const };
     await store.save(orphan);
     clock.advance(9_000);
-    expect(await store.pruneExpired()).toEqual([]);
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
     clock.advance(2_000);
-    expect(await store.pruneExpired()).toEqual(["b_N0ENDED1"]);
+    expect(await store.pruneExpired()).toEqual({ jobs: ["b_N0ENDED1"], files: [] });
   });
 
   it("prunes nothing when retention is disabled", async () => {
     const { store, clock } = await harness(0);
     await store.save(terminal(record("b_EXP1RED1", store), 1_000));
     clock.advance(10 * 86_400_000);
-    expect(await store.pruneExpired()).toEqual([]);
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
     expect((await store.loadAll()).map((r) => r.jobId)).toEqual(["b_EXP1RED1"]);
   });
 
@@ -228,5 +228,128 @@ describe("bash job store retention", () => {
     await store.remove("b_3F7K2M9P");
     await store.remove("b_3F7K2M9P");
     expect(await readdir(store.dir)).toEqual([]);
+  });
+});
+
+/**
+ * §15 — the sweep must also reach files that never become records. These
+ * cases are judged by *file mtime*, which is real wall-clock time, so the fake
+ * clock is started at `Date.now()` and moved forward from there: a clock that
+ * sits behind the mtime is (by design) an "incomparable" state where nothing
+ * is deleted, and that case gets its own test below.
+ */
+describe("bash job store directory sweep", () => {
+  async function sweepHarness(retentionMs = 10_000): Promise<Harness> {
+    const h = await harness(retentionMs, Date.now());
+    await mkdir(h.store.dir, { recursive: true });
+    return h;
+  }
+
+  it("drops unreadable .json files (bad name, bad JSON, bad schema) with their logs once aged", async () => {
+    const { store, clock, warnings } = await sweepHarness();
+    await writeFile(join(store.dir, "b_BADJS0N1.json"), "{ not json", "utf8");
+    await writeFile(join(store.dir, "b_BADJS0N1.log"), "body", "utf8");
+    await writeFile(join(store.dir, "b_0DVER111.json"), JSON.stringify({ v: 0, jobId: "b_0DVER111" }), "utf8");
+    // Illegal id (Crockford base32 excludes I/L/O/U) — `isJobId` rejects it.
+    await writeFile(join(store.dir, "b_ILLOU111.json"), "{}", "utf8");
+
+    // Not yet old enough: mtime is "now", so nothing goes.
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
+    expect((await readdir(store.dir)).length).toBe(4);
+
+    clock.advance(60_000);
+    const result = await store.pruneExpired();
+    expect(result.jobs).toEqual([]);
+    expect(result.files.sort()).toEqual(["b_0DVER111.json", "b_BADJS0N1.json", "b_BADJS0N1.log", "b_ILLOU111.json"]);
+    expect(await readdir(store.dir)).toEqual([]);
+    // Every non-record deletion is announced.
+    expect(warnings.filter((w) => w.startsWith("removed stale bash job file"))).toHaveLength(4);
+  });
+
+  it("never touches a non-terminal record however old the file is", async () => {
+    const { store, clock } = await sweepHarness();
+    const live = transitionJob(record("b_R4NN1NG1", store, 0), "running", { at: 1, pid: 4242, pgid: 4242 });
+    if (!live.ok) throw new Error(live.reason);
+    await store.save(live.record);
+    await writeFile(store.logPath("b_R4NN1NG1"), "output", "utf8");
+    clock.advance(10 * 86_400_000);
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
+    expect((await readdir(store.dir)).sort()).toEqual(["b_R4NN1NG1.json", "b_R4NN1NG1.log"]);
+  });
+
+  it("leaves every other file name alone (safety boundary: .json/.log/.tmp only)", async () => {
+    const { store, clock } = await sweepHarness();
+    const strays = ["notes.txt", "README", "b_3F7K2M9P.jsonl", "archive.tar.gz", ".gitkeep"];
+    for (const name of strays) await writeFile(join(store.dir, name), "x", "utf8");
+    clock.advance(365 * 86_400_000);
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
+    expect((await readdir(store.dir)).sort()).toEqual([...strays].sort());
+  });
+
+  it("keeps a .log whose stem is not a job id (we only ever write <jobId>.log)", async () => {
+    const { store, clock } = await sweepHarness();
+    // A user's own file that happens to share our suffix, and a name that
+    // looks like an id but uses letters Crockford base32 excludes (I/L/O/U).
+    const mine = ["mynotes.log", "b_ILLOU111.log"];
+    for (const name of mine) await writeFile(join(store.dir, name), "not ours", "utf8");
+    clock.advance(365 * 86_400_000);
+
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
+    expect((await readdir(store.dir)).sort()).toEqual([...mine].sort());
+  });
+
+  it("drops an aged orphan log but keeps one whose job is tracked in memory", async () => {
+    const { store, clock } = await sweepHarness();
+    await writeFile(join(store.dir, "b_0RPHAN11.log"), "left behind", "utf8");
+    await writeFile(join(store.dir, "b_TR4CKED1.log"), "live output", "utf8");
+    clock.advance(60_000);
+
+    const result = await store.pruneExpired({ isTracked: (id) => id === "b_TR4CKED1" });
+    expect(result.files).toEqual(["b_0RPHAN11.log"]);
+    expect(await readdir(store.dir)).toEqual(["b_TR4CKED1.log"]);
+  });
+
+  it("keeps a log that still has a record beside it", async () => {
+    const { store, clock } = await sweepHarness(86_400_000);
+    const live = transitionJob(record("b_R4NN1NG1", store, 0), "running", { at: 1, pid: 4242, pgid: 4242 });
+    if (!live.ok) throw new Error(live.reason);
+    await store.save(live.record);
+    await writeFile(store.logPath("b_R4NN1NG1"), "output", "utf8");
+    clock.advance(10 * 86_400_000);
+    expect((await store.pruneExpired()).files).toEqual([]);
+    expect((await readdir(store.dir)).sort()).toEqual(["b_R4NN1NG1.json", "b_R4NN1NG1.log"]);
+  });
+
+  it("sweeps stale .tmp debris on a fixed 1h TTL, even with retention disabled", async () => {
+    const { store, clock } = await sweepHarness(0);
+    const tmp = "b_3F7K2M9P.json.1234.5678.0.tmp";
+    await writeFile(join(store.dir, tmp), "half written", "utf8");
+    clock.advance(TMP_RETENTION_MS / 2);
+    expect((await store.pruneExpired()).files).toEqual([]);
+    // Generous margin: mtime is real wall-clock time and only *approximately*
+    // the clock's start, so the boundary itself is not assertable.
+    clock.advance(TMP_RETENTION_MS);
+    expect((await store.pruneExpired()).files).toEqual([tmp]);
+    expect(await readdir(store.dir)).toEqual([]);
+  });
+
+  it("deletes nothing when the clock sits behind the files' mtime", async () => {
+    // Default harness clock = 1_000ms since the epoch; every real mtime is in
+    // its future, so no age is computable and the sweep must be a no-op.
+    const { store, clock } = await harness(1);
+    await store.save(record("b_ANCH0R11", store));
+    await writeFile(join(store.dir, "b_BADJS0N1.json"), "{ not json", "utf8");
+    await writeFile(join(store.dir, "b_0RPHAN11.log"), "left behind", "utf8");
+    await writeFile(join(store.dir, "b_3F7K2M9P.json.1.2.0.tmp"), "half", "utf8");
+    clock.advance(10 * 86_400_000);
+    expect((await store.pruneExpired()).files).toEqual([]);
+    expect((await readdir(store.dir)).sort()).toEqual(
+      ["b_0RPHAN11.log", "b_3F7K2M9P.json.1.2.0.tmp", "b_ANCH0R11.json", "b_BADJS0N1.json"].sort(),
+    );
+  });
+
+  it("is a no-op on a directory that does not exist", async () => {
+    const { store } = await harness();
+    expect(await store.pruneExpired()).toEqual({ jobs: [], files: [] });
   });
 });

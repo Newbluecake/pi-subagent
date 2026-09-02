@@ -634,3 +634,54 @@ autoBackgrounded:true}`；此后 gatedOnUpdate 不再发。
   `wait` / `kill` / `list` 不变(`kill` 明确保留:它承载 pid 复用防护与进程组安全校验,是安全不变量)。
   `manager.readOutput` 保留(status 复用其 flush 等待与截断逻辑),但工具侧一律 `advanceCursor: false`;
   `JobRecord.readCursor` 字段保留(磁盘 schema 兼容,`v` 不变),仅供内部/未来使用。
+
+## 15. 文件清理机制（第一期，实施后追记）
+
+原实现有两套判据不重叠的清理，留下两个缺口：
+
+1. **坏文件永不清理** —— `loadAll()` 对文件名非法（`isJobId` 不过）或 JSON 解析/schema
+   校验失败的文件只 warn 跳过，这些文件永远进不了 `records`，`pruneExpired()` 因此看不见
+   它们，它们与同名 `.log` 永久驻留；孤儿 `.log`（无对应 `.json`）与崩溃残留的 `.tmp` 同理。
+2. **长会话不清理** —— prune 只在 `manager.recover()`（每次 stack 重建）时触发，连开数天的
+   会话期间零清理。
+
+### A. `pruneExpired()` 升级为全目录分类扫描
+
+单次 `readdir` + 按需 `stat`，逐条目分类：
+
+| 条目                                         | 判据                                                     | 动作                       |
+| -------------------------------------------- | -------------------------------------------------------- | -------------------------- |
+| 可解析的 job 记录（`.json`）                 | 终态 && `now - (endedAt ?? createdAt) >= retentionMs`    | 删 `.json` + `.log`        |
+| 可解析但非终态                               | —                                                        | **永不删**                 |
+| `.json` 文件名非法 / JSON 损坏 / schema 不过 | 读不出状态 → 用文件 **mtime** 计龄，`age >= retentionMs` | 删该 `.json`（+ 同名 log） |
+| 孤儿 `.log`（无同名 `.json`）                | `age >= retentionMs` **且** 该 jobId 不在调用方内存表中  | 删                         |
+| `.tmp` 残留（原子写崩溃）                    | `age >= TMP_RETENTION_MS`（固定 1h，tmp 本质瞬时）       | 删                         |
+| 其他任何文件名/后缀                          | —                                                        | **绝不触碰**（安全边界）   |
+
+- 时间一律取注入的 `clock.now()`，文件年龄取 `stat().mtimeMs`。**两者不可比时一律不删**：
+  `fileAge()` 在 stat 失败、非有限值、或 `now - mtimeMs < 0`（mtime 在时钟的未来 —— FakeClock、
+  时钟回拨、跨机器文件）时返回 `undefined`，调用方据此保留文件。宁可漏清，不可误删。
+- `.tmp` 即使 `retentionMs <= 0`（用户关掉保留期）也照扫：tmp 不是用户要求保留的 job 产物，
+  是中断的原子写残骸。
+- 返回值 `{ jobs: JobId[]; files: string[] }`（`files` 为被删的裸文件名）；`RecoverSummary`
+  相应新增 `prunedFiles`，`pruned` 语义不变（job id 列表）。每删一个"非记录类"文件打一条 WARN。
+- 孤儿判定需要"内存表"信息，而 store 不认识 manager：通过 `pruneExpired({ isTracked })` 传入，
+  默认"什么都不 tracked"。manager 传 `(id) => entries.has(id)`。
+
+### C. 会话内节流触发
+
+- `create()` 在 `return` 前 `void maybeSweep()` —— fire-and-forget，不阻塞 spawn 路径。
+- `maybeSweep()`：距上次扫描不足 `sweepIntervalMs`（`DEFAULT_SWEEP_INTERVAL_MS = 10min`，
+  构造参数可覆盖，**不新增对外 settings 键**）直接返回；否则先记时间戳再跑 `store.pruneExpired()`，
+  失败只 warn（清理绝不能拖垮起命令）。
+- **不新增任何定时器**：定时器会唤醒空闲会话，并给 `pi -p` 增加 handle（即便 unref 也是噪音）。
+  `recover()` 里的扫描保持不变，并同步 `lastSweepAt`，避免刚 recover 完的第一条命令重复扫。
+
+### 测试
+
+`tests/bash/job-store.test.ts` 的 `directory sweep` 一节逐行覆盖上表（到期删 / 未到期留 /
+非终态不动 / 未知后缀不动 / 孤儿 log / tracked log 不删 / 有 json 陪伴的 log 不删 / 陈旧 tmp /
+时钟落后于 mtime 时全不删 / 目录不存在）。mtime 是真实时间，所以这些用例把 FakeClock 起点设为
+`Date.now()` 再前进（边界不可断言，故留 60s 余量）；"时钟落后"用例反过来用默认 `FakeClock(1000)`。
+`tests/bash/manager.test.ts` 的 `in-session retention sweep` 一节覆盖 C：连续 create 只扫一次、
+间隔到后再扫、扫描抛错不影响 create 成功、`clock.pendingTimers` 不增长、`isTracked` 反映内存表。

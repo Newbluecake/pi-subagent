@@ -61,6 +61,13 @@ export const DEFAULT_NOTIFY_POLL_MS = 2_000;
 export const DEFAULT_DISCARD_GRACE_MS = 5_000;
 /** Cap on one `readOutput` increment; the cursor makes the rest reachable. */
 export const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
+/**
+ * Minimum spacing between in-session retention sweeps (§15). Long-lived
+ * sessions would otherwise never prune: `recover()` only runs at stack build.
+ * Throttled and piggybacked on `create()` **on purpose** — a timer here would
+ * wake an idle session and wedge `pi -p`.
+ */
+export const DEFAULT_SWEEP_INTERVAL_MS = 600_000;
 /** Candidate list cap in resolution errors (matches `resolve-target.ts`). */
 const MAX_CANDIDATES = 10;
 
@@ -92,6 +99,8 @@ export interface BashJobManagerOptions {
   /** SIGTERM → SIGKILL window handed to `killJobTree`. */
   killGraceMs?: Millis;
   maxReadBytes?: number;
+  /** Minimum spacing between `create()`-driven retention sweeps. */
+  sweepIntervalMs?: Millis;
   warn?: (message: string) => void;
 }
 
@@ -164,7 +173,10 @@ export interface RecoverSummary {
   readonly foreign: readonly JobId[];
   /** Terminal jobs still awaiting their completion notification. */
   readonly pendingNotices: readonly JobId[];
+  /** Job records dropped by the retention sweep. */
   readonly pruned: readonly JobId[];
+  /** Non-record files dropped by the sweep (bad records, orphan logs, tmp debris). */
+  readonly prunedFiles: readonly string[];
 }
 
 export interface BashJobManager {
@@ -250,6 +262,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   const maxBackgroundJobs = normalizePositive(options.maxBackgroundJobs, DEFAULT_MAX_BACKGROUND_JOBS);
   const maxReadBytes = normalizePositive(options.maxReadBytes, DEFAULT_MAX_READ_BYTES);
   const pollMs = normalizePositive(options.pollMs, DEFAULT_NOTIFY_POLL_MS);
+  const sweepIntervalMs = normalizePositive(options.sweepIntervalMs, DEFAULT_SWEEP_INTERVAL_MS);
   // Unlike the other knobs, 0 is meaningful here ("discard on the next tick").
   const discardGraceMs =
     options.discardGraceMs !== undefined && Number.isFinite(options.discardGraceMs) && options.discardGraceMs >= 0
@@ -275,6 +288,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   let pollTimer: TimerHandle | undefined;
   let ticking = false;
   let disposed = false;
+  /** `undefined` = never swept by this manager (the first `create()` will). */
+  let lastSweepAt: Millis | undefined;
 
   // ── memory table ─────────────────────────────────────────────────────────
 
@@ -429,6 +444,30 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     await store.remove(record.jobId);
     entries.delete(record.jobId);
     localJobs.delete(record.jobId);
+  }
+
+  // ── retention sweep (§15) ────────────────────────────────────────────────
+
+  function sweepArgs() {
+    // A log whose job is still in this manager's table is live output, not
+    // orphan litter — even if its record is momentarily missing from disk.
+    return { isTracked: (jobId: JobId) => entries.has(jobId) };
+  }
+
+  /**
+   * Throttled full-directory prune, driven by `create()` (never by a timer).
+   * Failure is diagnostic-only: cleanup must never break spawning a command.
+   */
+  async function maybeSweep(): Promise<void> {
+    if (disposed) return;
+    const now = clock.now();
+    if (lastSweepAt !== undefined && now - lastSweepAt < sweepIntervalMs) return;
+    lastSweepAt = now;
+    try {
+      await store.pruneExpired(sweepArgs());
+    } catch (error) {
+      warn(`bash job retention sweep failed: ${String(error)}`);
+    }
   }
 
   // ── log tee with a hard cap (§3.4) ───────────────────────────────────────
@@ -595,6 +634,10 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     });
     ensurePolling();
 
+    // Fire-and-forget (throttled): keeps a days-long session from accreting
+    // job files, without adding a timer or delaying the spawn path.
+    void maybeSweep();
+
     return { jobId, record, pid: spawned.pid, pgid: spawned.pgid, logPath, exit };
   }
 
@@ -742,7 +785,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   // ── recover (§3.6) ───────────────────────────────────────────────────────
 
   async function recover(): Promise<RecoverSummary> {
-    const pruned = await store.pruneExpired();
+    const pruned = await store.pruneExpired(sweepArgs());
+    lastSweepAt = clock.now();
     const records = await store.loadAll();
     const adopted: JobId[] = [];
     const exitedUnknown: JobId[] = [];
@@ -799,7 +843,16 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       .filter((record) => shouldNotifyJob(record))
       .map((record) => record.jobId);
     ensurePolling();
-    return { adopted, exitedUnknown, orphaned, lostStaged, foreign, pendingNotices, pruned };
+    return {
+      adopted,
+      exitedUnknown,
+      orphaned,
+      lostStaged,
+      foreign,
+      pendingNotices,
+      pruned: pruned.jobs,
+      prunedFiles: pruned.files,
+    };
   }
 
   // ── public surface ───────────────────────────────────────────────────────

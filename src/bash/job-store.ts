@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Clock } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
@@ -26,6 +26,22 @@ export interface JobStoreOptions {
   warn?: (message: string) => void;
 }
 
+export interface PruneOptions {
+  /**
+   * "This job id is live in someone's memory table" — such a job's log file is
+   * never an orphan, even while its JSON record is momentarily absent.
+   * Defaults to "nothing is tracked" (a bare store knows no manager).
+   */
+  isTracked?: (jobId: JobId) => boolean;
+}
+
+export interface PruneResult {
+  /** Job ids whose record (and log) were removed. */
+  readonly jobs: JobId[];
+  /** Bare file names removed that were *not* attributable to a job record. */
+  readonly files: string[];
+}
+
 export interface JobStore {
   readonly dir: string;
   /** Absolute path of the job's JSON record. */
@@ -48,12 +64,26 @@ export interface JobStore {
   setReadCursor(jobId: JobId, cursor: number): Promise<JobRecord | undefined>;
   /** Delete the record and its log file. Idempotent. */
   remove(jobId: JobId): Promise<void>;
-  /** Prune expired terminal jobs; resolves to the ids removed. */
-  pruneExpired(): Promise<JobId[]>;
+  /**
+   * Full-directory sweep: expired terminal job records (with their logs),
+   * plus the litter that never reaches `records` — unreadable/badly named
+   * `.json` files, orphan `.log` files and crashed atomic-write `.tmp` files.
+   * Only `.json` / `.log` / `.tmp` names are ever touched (safety boundary).
+   */
+  pruneExpired(options?: PruneOptions): Promise<PruneResult>;
 }
 
 const RECORD_SUFFIX = ".json";
 const LOG_SUFFIX = ".log";
+const TMP_SUFFIX = ".tmp";
+
+/**
+ * `.tmp` files are the debris of an interrupted `writeAtomic`: intrinsically
+ * momentary, so they get a short fixed TTL instead of `retentionMs` (a day of
+ * half-written records helps nobody). Not configurable on purpose — see
+ * plan-fable §15.
+ */
+export const TMP_RETENTION_MS = 3_600_000;
 
 export function createJobStore(options: JobStoreOptions): JobStore {
   const { dir, retentionMs, clock } = options;
@@ -145,6 +175,113 @@ export function createJobStore(options: JobStoreOptions): JobStore {
     });
   }
 
+  /**
+   * A file's own age, used only for entries whose *content* cannot tell us how
+   * old they are (unparseable records, orphan logs, tmp debris).
+   *
+   * `undefined` means "do not judge this file": either the stat failed, or the
+   * mtime lies in `clock`'s future. The latter is the FakeClock / lagging-clock
+   * / clock-jump case, and the rule there is deliberately one-sided — an
+   * incomparable pair of timestamps must never authorize a delete.
+   */
+  async function fileAge(name: string, now: Millis): Promise<Millis | undefined> {
+    let mtimeMs: number;
+    try {
+      mtimeMs = (await stat(join(dir, name))).mtimeMs;
+    } catch {
+      return undefined;
+    }
+    if (!Number.isFinite(mtimeMs) || !Number.isFinite(now)) return undefined;
+    const age = now - mtimeMs;
+    return age >= 0 ? age : undefined;
+  }
+
+  /** Delete a bare file name, reporting it (users must know what we removed). */
+  async function dropFile(name: string, reason: string, removed: string[]): Promise<void> {
+    const deleted = await enqueue(() =>
+      unlink(join(dir, name)).then(
+        () => true,
+        () => false,
+      ),
+    );
+    if (!deleted) return;
+    removed.push(name);
+    warn(`removed stale bash job file ${name} (${reason})`);
+  }
+
+  /**
+   * Whole-directory classification sweep (§15). Exactly one `readdir`, a `stat`
+   * only for entries whose age cannot be read from a record, and three
+   * suffixes of blast radius: `.json`, `.log`, `.tmp`. Anything else in `dir`
+   * — whatever the user or another tool put there — is left alone.
+   */
+  async function prune(pruneOptions: PruneOptions): Promise<PruneResult> {
+    const isTracked = pruneOptions.isTracked ?? (() => false);
+    const now = clock.now();
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") warn(`failed to scan bash job dir ${dir}: ${String(error)}`);
+      return { jobs: [], files: [] };
+    }
+    entries.sort();
+    const present = new Set(entries);
+    const jobs: JobId[] = [];
+    const files: string[] = [];
+    const retentionEnabled = retentionMs > 0;
+
+    for (const entry of entries) {
+      // Crash debris from `writeAtomic`; swept even when retention is off,
+      // because a tmp file is never a job artefact the user asked us to keep.
+      if (entry.endsWith(TMP_SUFFIX)) {
+        const age = await fileAge(entry, now);
+        if (age !== undefined && age >= TMP_RETENTION_MS) {
+          await dropFile(entry, "interrupted atomic write", files);
+        }
+        continue;
+      }
+      if (!retentionEnabled) continue;
+
+      if (entry.endsWith(RECORD_SUFFIX)) {
+        const jobId = entry.slice(0, -RECORD_SUFFIX.length);
+        const record = isJobId(jobId) ? await readRecord(jobId) : undefined;
+        if (record) {
+          // Readable record: its own status/timestamps decide. A non-terminal
+          // job is never pruned, however old it looks.
+          if (!isTerminalJobStatus(record.status)) continue;
+          if (now - (record.endedAt ?? record.createdAt) < retentionMs) continue;
+          await remove(record.jobId);
+          jobs.push(record.jobId);
+          continue;
+        }
+        // Illegal name, corrupt JSON or a failed schema check: the state is
+        // unreadable, so mtime is the only honest age we have.
+        const age = await fileAge(entry, now);
+        if (age === undefined || age < retentionMs) continue;
+        await dropFile(entry, "unreadable job record past retention", files);
+        const log = `${jobId}${LOG_SUFFIX}`;
+        if (present.has(log)) await dropFile(log, `log of unreadable record ${entry}`, files);
+        continue;
+      }
+
+      if (entry.endsWith(LOG_SUFFIX)) {
+        const jobId = entry.slice(0, -LOG_SUFFIX.length);
+        // We only ever create `<jobId>.log`, so a log whose stem is not a job
+        // id cannot be ours — leave it alone even though the suffix matches.
+        if (!isJobId(jobId)) continue;
+        // A log with a record beside it belongs to that record's fate; a log of
+        // a job someone still holds in memory is live output being written.
+        if (present.has(`${jobId}${RECORD_SUFFIX}`) || isTracked(jobId)) continue;
+        const age = await fileAge(entry, now);
+        if (age === undefined || age < retentionMs) continue;
+        await dropFile(entry, "orphan log with no job record", files);
+      }
+      // Any other suffix: not ours. Never touched.
+    }
+    return { jobs, files };
+  }
+
   return {
     dir,
     recordPath,
@@ -170,19 +307,8 @@ export function createJobStore(options: JobStoreOptions): JobStore {
       );
     },
 
-    async pruneExpired() {
-      if (!(retentionMs > 0)) return [];
-      const now = clock.now();
-      const records = await loadAll();
-      const removed: JobId[] = [];
-      for (const record of records) {
-        if (!isTerminalJobStatus(record.status)) continue;
-        const endedAt = record.endedAt ?? record.createdAt;
-        if (now - endedAt < retentionMs) continue;
-        await remove(record.jobId);
-        removed.push(record.jobId);
-      }
-      return removed;
+    pruneExpired(pruneOptions = {}) {
+      return prune(pruneOptions);
     },
   };
 }

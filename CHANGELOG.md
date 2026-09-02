@@ -34,7 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that actually reached the model as a `job_id` are retained: a command that finished in the
   foreground already returned its full result through the tool call, so its record and log are
   dropped shortly after it settles instead of lingering for `retentionS` and burying `bash_job
-list` under every `echo`.
+list` under every `echo`. Retention itself is a whole-directory sweep: besides expired terminal
+  records it also reaps the litter that never becomes a record — unreadable/badly named `.json`
+  files, orphan `.log` files with no record beside them (aged by file mtime, and never while the
+  job is still tracked in memory) and `.tmp` debris from an interrupted atomic write (fixed 1h
+  TTL) — each such deletion is WARNed. Only `.json` / `.log` / `.tmp` names are ever touched, a
+  file whose mtime cannot be compared to the clock is always kept, and a non-terminal record is
+  never pruned. The sweep runs on session start **and**, throttled to once per 10 minutes, when a
+  new bash job is created, so a session that stays open for days still cleans up — without adding
+  a single timer.
 - **Zero-build git installs** — the `pi.extensions` manifest now points at a source-form
   root entry (`./index.ts` → `./src/index.js`), which pi loads through its bundled jiti
   TypeScript runtime. `pi install git:github.com/Newbluecake/pi-subagent` and
