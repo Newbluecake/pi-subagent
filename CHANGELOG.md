@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-02
+
 ### Added
 
 - **Caller-ack notification suppression (delivery v2 P3)** — foreground callers can acknowledge completed outcomes to suppress undelivered notifications; the `ackWindowMs` hold window is disabled by default and fails open on persistence or cancellation errors.
@@ -90,5 +92,6 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-subagent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-subagent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Newbluecake/pi-subagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Newbluecake/pi-subagent/releases/tag/v0.1.0
