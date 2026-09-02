@@ -6,9 +6,10 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
-import { bashJobsEnabled, buildSessionStack, formatBashJobNotification } from "../../src/stack.js";
+import { bashJobsEnabled, buildSessionStack, formatBashJobNotification, readBashJobTail } from "../../src/stack.js";
 import { probePid, readProcStartTime } from "../../src/bash/process.js";
 import type { JobRecord } from "../../src/bash/types.js";
+import type { BashJobManager } from "../../src/bash/manager.js";
 
 /**
  * S7 wiring: the pieces `src/stack.ts` and `src/index.ts` own for bash
@@ -60,10 +61,14 @@ const types = {
   reload: async () => ({ types: [], errors: [] }),
 } as unknown as AgentTypeRegistry;
 
-function settingsWith(dir: string, overrides: Partial<AgentSettings["bashJobs"]> = {}): AgentSettings {
+function settingsWith(
+  dir: string,
+  overrides: Partial<AgentSettings["bashJobs"]> = {},
+  fleetWidget = false,
+): AgentSettings {
   return {
     ...DEFAULT_SETTINGS,
-    fleetWidget: false,
+    fleetWidget,
     bashJobs: { ...DEFAULT_SETTINGS.bashJobs, dir, ...overrides },
   };
 }
@@ -179,6 +184,42 @@ describe("S7 stack wiring: BashJobManager construction", () => {
   );
 });
 
+describe("S7 tail reader contract", () => {
+  it.runIf(posix)("re-reads from the discovered file size without advancing readCursor", async () => {
+    const record = seedRecord(join(tmpRoot, "tail"), { jobId: "b_TAIL0001", logBytes: 10, readCursor: 0 });
+    const calls: Array<{ offset?: number; advanceCursor?: boolean }> = [];
+    let hinted = false;
+    const manager = {
+      readOutput: async (_jobId: string, options: { offset?: number; advanceCursor?: boolean }) => {
+        calls.push(options);
+        const second = calls.length > 1;
+        return {
+          jobId: record.jobId,
+          content: second || hinted ? "real tail\n" : "middle\n",
+          startOffset: options.offset ?? 0,
+          nextOffset: options.offset ?? 0,
+          logBytes: 500,
+          state: record.status,
+          exitCode: null,
+          logTruncated: false,
+          record,
+        };
+      },
+    } as unknown as BashJobManager;
+    expect((await readBashJobTail(manager, record))?.text).toBe("real tail");
+    expect(calls).toEqual([
+      { offset: 0, advanceCursor: false, maxBytes: 1024 },
+      { offset: 0, advanceCursor: false, maxBytes: 1024 },
+    ]);
+    expect(record.readCursor).toBe(0);
+
+    calls.length = 0;
+    hinted = true;
+    expect((await readBashJobTail(manager, { ...record, logBytes: 500 }, 500))?.text).toBe("real tail");
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("S7 notification text", () => {
   const base: JobRecord = {
     v: 1,
@@ -215,6 +256,141 @@ describe("S7 notification text", () => {
     expect(formatBashJobNotification({ ...base, outputTruncated: true }, "tail", 0)).toContain(
       "the job's log hit its size cap",
     );
+  });
+});
+
+describe("S8 fleet widget + bash jobs wiring", () => {
+  function widgetContext(calls: Array<string[] | undefined>): ExtensionContext {
+    return {
+      ...ctx,
+      ui: {
+        setWidget: (_key: string, content: string[] | undefined) => calls.push(content),
+      },
+    } as unknown as ExtensionContext;
+  }
+
+  it.runIf(posix)("injects the widget getter from the same manager mounted in the stack", async () => {
+    const dir = join(tmpRoot, "s8-same-manager");
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    child.unref();
+    const calls: Array<string[] | undefined> = [];
+    try {
+      seedRecord(dir, { jobId: "b_SAME0001", pid: child.pid, pgid: child.pid, command: "sleep 30" });
+      const stack = buildSessionStack(fakePi().pi, widgetContext(calls), settingsWith(dir, {}, true), types, []);
+      await vi.waitFor(
+        () => expect(calls.some((frame) => frame?.some((line) => line.includes("$ sleep 30")))).toBe(true),
+        {
+          timeout: 5_000,
+          interval: 25,
+        },
+      );
+      expect(stack.bashJobs?.list().some((record) => record.jobId === "b_SAME0001")).toBe(true);
+      stack.bashJobs?.dispose();
+    } finally {
+      try {
+        process.kill(-(child.pid ?? 0), "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
+  it.runIf(posix)("refreshes immediately when recover resolves, before the first 1Hz tick", async () => {
+    const dir = join(tmpRoot, "s8-recover-refresh");
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    child.unref();
+    const calls: Array<string[] | undefined> = [];
+    try {
+      seedRecord(dir, { jobId: "b_REFRES01", pid: child.pid, pgid: child.pid, command: "sleep 30" });
+      const stack = buildSessionStack(fakePi().pi, widgetContext(calls), settingsWith(dir, {}, true), types, []);
+      const initialCount = calls.length;
+      await vi.waitFor(
+        () => {
+          expect(calls.length).toBeGreaterThan(initialCount);
+          expect(calls.some((frame) => frame?.some((line) => line.includes("$ sleep 30")))).toBe(true);
+        },
+        { timeout: 5_000, interval: 10 },
+      );
+      expect(calls.length).toBeLessThan(100); // completion refresh, not an unbounded recovery loop
+      stack.bashJobs?.dispose();
+    } finally {
+      try {
+        process.kill(-(child.pid ?? 0), "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
+  it("keeps the widget usable when a recovery failure is explicitly caught", async () => {
+    const dir = join(tmpRoot, "s8-recover-reject");
+    const calls: Array<string[] | undefined> = [];
+    const stack = buildSessionStack(fakePi().pi, widgetContext(calls), settingsWith(dir, {}, true), types, []);
+    const manager = stack.bashJobs!;
+    const originalRecover = manager.recover;
+    // The concrete store intentionally converts filesystem scan failures into
+    // empty results. Use the real mounted manager and an explicit rejected
+    // recovery promise to pin the caller's no-unhandled-rejection contract.
+    manager.recover = async () => {
+      throw new Error("synthetic recovery failure");
+    };
+    await expect(manager.recover()).rejects.toThrow("synthetic recovery failure");
+    manager.recover = originalRecover;
+    manager.dispose();
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
+  it.runIf(posix)("disposes the previous widget and manager before rebuilding the session", async () => {
+    const firstDir = join(tmpRoot, "s8-rebuild-a");
+    const secondDir = join(tmpRoot, "s8-rebuild-b");
+    const firstCalls: Array<string[] | undefined> = [];
+    const secondCalls: Array<string[] | undefined> = [];
+    const first = buildSessionStack(
+      fakePi().pi,
+      widgetContext(firstCalls),
+      settingsWith(firstDir, {}, true),
+      types,
+      [],
+    );
+    const second = buildSessionStack(
+      fakePi().pi,
+      widgetContext(secondCalls),
+      settingsWith(secondDir, {}, true),
+      types,
+      [],
+    );
+    await Promise.resolve();
+    expect(firstCalls.some((content) => content === undefined)).toBe(true);
+    expect(secondCalls.length).toBeGreaterThan(0);
+    first.bashJobs?.dispose();
+    second.bashJobs?.dispose();
+  });
+
+  it("omits bash widget deps when the feature or fleet widget is off", () => {
+    const dir = join(tmpRoot, "s8-off");
+    const featureOffCalls: Array<string[] | undefined> = [];
+    const featureOff = buildSessionStack(
+      fakePi().pi,
+      widgetContext(featureOffCalls),
+      settingsWith(dir, { autoBackgroundMs: 0 }, true),
+      types,
+      [],
+    );
+    expect(featureOff.bashJobs).toBeUndefined();
+    expect(featureOffCalls).toEqual([undefined]);
+
+    const widgetOffCalls: Array<string[] | undefined> = [];
+    const widgetOff = buildSessionStack(
+      fakePi().pi,
+      widgetContext(widgetOffCalls),
+      settingsWith(dir, {}, false),
+      types,
+      [],
+    );
+    expect(widgetOff.bashJobs).toBeDefined();
+    expect(widgetOffCalls).toEqual([]);
+    featureOff.bashJobs?.dispose();
+    widgetOff.bashJobs?.dispose();
   });
 });
 

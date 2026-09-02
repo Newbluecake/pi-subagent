@@ -110,6 +110,11 @@ function tailOffset(size: number): number {
   return Math.max(0, size - BASH_JOB_TAIL_BYTES);
 }
 
+export interface BashJobTail {
+  readonly text: string | undefined;
+  readonly logBytes: number;
+}
+
 function lastLines(content: string, max: number): string | undefined {
   const lines = content.replace(/\n+$/, "").split("\n");
   const tail = lines.slice(Math.max(0, lines.length - max)).join("\n");
@@ -125,14 +130,21 @@ function lastLines(content: string, max: number): string | undefined {
  * or `exited_unknown` job's counter can lag behind the file, so the first read
  * (which reports the real size) is repeated from the true tail offset.
  */
-async function readBashJobTail(manager: BashJobManager, record: JobRecord): Promise<string | undefined> {
+export async function readBashJobTail(
+  manager: BashJobManager,
+  record: JobRecord,
+  sizeHint?: number,
+): Promise<BashJobTail | undefined> {
   try {
     const options = { advanceCursor: false, maxBytes: BASH_JOB_TAIL_BYTES } as const;
-    let read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(record.logBytes) });
-    if (read.logBytes > record.logBytes) {
+    // B1: record.logBytes may lag the adopted file, so the first bounded read
+    // discovers the real size and the second pass re-reads the actual tail.
+    const hintedSize = Math.max(record.logBytes, sizeHint ?? 0);
+    let read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(hintedSize) });
+    if (read.logBytes > hintedSize) {
       read = await manager.readOutput(record.jobId, { ...options, offset: tailOffset(read.logBytes) });
     }
-    return lastLines(read.content, BASH_JOB_TAIL_LINES);
+    return { text: lastLines(read.content, BASH_JOB_TAIL_LINES), logBytes: read.logBytes };
   } catch {
     return undefined;
   }
@@ -176,7 +188,7 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
       pi.sendMessage(
         {
           customType: BASH_JOB_NOTIFICATION_TYPE,
-          content: formatBashJobNotification(record, tail),
+          content: formatBashJobNotification(record, tail?.text),
           display: true,
           details: {
             kind: "bash-job",
@@ -508,6 +520,11 @@ export function buildSessionStack(
   });
   usageRef.current = usageBroadcaster;
   previousUsageBroadcaster = usageBroadcaster;
+  // D5: build the manager before the widget so its synchronous first frame can
+  // receive the manager-bound list/tail closures below.
+  const bashJobs = bashJobsEnabled(settings) ? buildBashJobManager(pi, ctx, settings) : undefined;
+  previousBashJobs = bashJobs;
+
   // X7b: always-on fleet widget above the editor. The controller self-probes
   // ctx.ui.setWidget and goes inert (no timer, no throw) in non-interactive
   // modes; settings.fleetWidget=false skips it entirely.
@@ -544,21 +561,30 @@ export function buildSessionStack(
       // === workflowId) are indented under their workflow instead of floating
       // as orphan ↳ rows.
       workflows: () => workflowActivity.list(),
+      ...(bashJobs
+        ? {
+            bashJobs: () => bashJobs.list(),
+            readBashTail: (record: JobRecord, sizeHint?: number) => readBashJobTail(bashJobs, record, sizeHint),
+          }
+        : {}),
     });
     widgetRef.current = widget;
     previousFleetWidget = widget;
   }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
-  const bashJobs = bashJobsEnabled(settings) ? buildBashJobManager(pi, ctx, settings) : undefined;
-  previousBashJobs = bashJobs;
   // §3.6: adopt still-running jobs and re-arm pending notices. Fire-and-forget
   // like notifier.reconcile() — a directory scan must never delay session start,
   // and a failure only means "no adoption this session", not a broken session.
   if (bashJobs) {
-    void bashJobs.recover().catch((error: unknown) => {
-      console.warn(`[pi-subagent] bash job recovery failed (jobs stay unadopted): ${String(error)}`);
-    });
+    void bashJobs
+      .recover()
+      .catch((error: unknown) => {
+        console.warn(`[pi-subagent] bash job recovery failed (jobs stay unadopted): ${String(error)}`);
+      })
+      // M2: recover populates the manager asynchronously; refresh now so
+      // recovered jobs appear without waiting for the next 1Hz frame.
+      .finally(() => widgetRef.current?.refresh());
   }
 
   // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —

@@ -8,6 +8,9 @@ import {
   FLEET_WIDGET_KEY,
   FleetWidgetController,
   formatWidgetCost,
+  formatLogSize,
+  bashJobHighlight,
+  tailLine,
   treeOrder,
   WIDGET_MAX_ROWS,
 } from "../../src/ui/fleet-widget.js";
@@ -449,6 +452,104 @@ describe("view-model: treeOrder", () => {
       ["c", 2],
       ["x", 0],
     ]);
+  });
+});
+
+describe("view-model: background bash rows", () => {
+  const bash = (overrides: Record<string, unknown> = {}) => ({
+    jobId: "b_TEST0001",
+    commandPreview: "npm run build",
+    status: "running" as const,
+    highlight: "none" as const,
+    elapsedMs: 12_000,
+    logBytes: 45 * 1024,
+    ...overrides,
+  });
+
+  it("formats sizes, statuses, and the final meaningful folded tail line", () => {
+    expect(formatLogSize(0)).toBe("0B");
+    expect(formatLogSize(1023)).toBe("1023B");
+    expect(formatLogSize(1024)).toBe("1.0KB");
+    expect(formatLogSize(1.5 * 1024 * 1024)).toBe("1.5MB");
+    expect(bashJobHighlight("running")).toBe("none");
+    expect(bashJobHighlight("completed")).toBe("none");
+    expect(bashJobHighlight("failed")).toBe("crit");
+    expect(bashJobHighlight("timed_out")).toBe("crit");
+    expect(bashJobHighlight("killed")).toBe("warn");
+    expect(bashJobHighlight("exited_unknown")).toBe("warn");
+    expect(bashJobHighlight("orphaned")).toBe("warn");
+    expect(tailLine("first\n  last  line \n\n")).toBe("last line");
+    expect(tailLine(" \n\t")).toBeUndefined();
+    expect(tailLine("输出\n完成")).toBe("完成");
+  });
+
+  it("renders running bash main/activity rows and bash-only visibility", () => {
+    const model = buildFleetViewModel([], OPTS);
+    const lines = buildFleetWidgetLines(model, { bashJobs: [bash({ logTail: "added 42 files" })] })!;
+    expect(lines).toEqual(["● 1 background bash", "  $ npm run build · running · 12s · 45KB", "  ╰ » added 42 files"]);
+  });
+
+  it("shares the main-row pool and counts hidden run/bash identities precisely", () => {
+    const runs = Array.from({ length: 3 }, (_, i) => snapshot({ runId: `run-${i}00000` }));
+    const lines = buildFleetWidgetLines(buildFleetViewModel(runs, OPTS), {
+      maxRows: 4,
+      bashJobs: [bash({ jobId: "b_1" }), bash({ jobId: "b_2" })],
+    })!;
+    expect(lines.filter((line) => line.includes("$ npm run build"))).toHaveLength(1);
+    expect(lines[0]).toContain("3 active Agents · 2 bash · +1 more");
+  });
+
+  it("uses independent bash terminal markers and expires terminal rows", () => {
+    const rows = [
+      bash({ status: "completed", highlight: "none", settledAgoMs: 1000 }),
+      bash({ jobId: "b_2", status: "failed", highlight: "crit", settledAgoMs: 1000 }),
+      bash({ jobId: "b_3", status: "killed", highlight: "warn", settledAgoMs: 1000 }),
+    ];
+    const lines = buildFleetWidgetLines(buildFleetViewModel([], OPTS), { bashJobs: rows });
+    expect(lines).toEqual([
+      "● 0 active Agents",
+      "✓ $ npm run build · completed · 12s · 45KB",
+      "✗ $ npm run build · failed · 12s · 45KB",
+      "! $ npm run build · killed · 12s · 45KB",
+    ]);
+    expect(
+      buildFleetWidgetLines(buildFleetViewModel([], OPTS), {
+        terminalLingerMs: 5000,
+        bashJobs: [bash({ settledAgoMs: 5001, status: "completed" })],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps linger rows inside the shared maxRows budget", () => {
+    const active = Array.from({ length: 4 }, (_, i) => snapshot({ runId: `active-${i}0000` }));
+    const terminalRuns = Array.from({ length: 2 }, (_, i) =>
+      snapshot({ runId: `done-${i}00000`, status: "failed", phase: "settled", updatedAt: NOW - 1000 }),
+    );
+    const terminalBash = [
+      bash({ jobId: "b_done1", status: "failed", highlight: "crit", settledAgoMs: 1000, logTail: "tail" }),
+      bash({ jobId: "b_done2", status: "failed", highlight: "crit", settledAgoMs: 1000, logTail: "tail" }),
+    ];
+    const lines = buildFleetWidgetLines(
+      buildFleetViewModel([...active, ...terminalRuns], { ...OPTS, recentTerminal: 3 }),
+      {
+        maxRows: 6,
+        bashJobs: terminalBash,
+      },
+    )!;
+    expect(lines.length).toBeLessThanOrEqual(7);
+  });
+
+  it("reports overflow in the bash-only fallback header", () => {
+    const lines = buildFleetWidgetLines(buildFleetViewModel([], OPTS), {
+      maxRows: 6,
+      bashJobs: Array.from({ length: 8 }, (_, i) => bash({ jobId: `b_${i}` })),
+    })!;
+    expect(lines[0]).toContain("8 background bash");
+    expect(lines[0]).toContain("+2 more");
+  });
+
+  it("keeps the no-run/no-bash regression hidden", () => {
+    expect(buildFleetWidgetLines(buildFleetViewModel([], OPTS))).toBeUndefined();
   });
 });
 

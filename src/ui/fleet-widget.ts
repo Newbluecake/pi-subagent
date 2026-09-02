@@ -1,6 +1,8 @@
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
+import type { JobRecord, JobStatus } from "../bash/types.js";
+import { isTerminalJobStatus, previewCommand } from "../bash/types.js";
 import type { QueryService } from "../service/query-service.js";
 import {
   buildFleetViewModel,
@@ -74,6 +76,43 @@ export function formatWidgetCost(costUsd: number): string {
   return `$${costUsd < 0.005 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`;
 }
 
+/** Widget row log size; bytes remain explicit below 1KB because tiny logs are common. */
+export function formatLogSize(bytes: number): string {
+  if (bytes < 1024) return `${Math.max(0, bytes)}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+/** Bash terminal severity mirrors the widget's run tones without treating user kills as failures. */
+export function bashJobHighlight(status: JobStatus): FleetHighlight {
+  if (status === "failed" || status === "timed_out") return "crit";
+  if (status === "killed" || status === "exited_unknown" || status === "orphaned") return "warn";
+  return "none";
+}
+
+/** Extract the last meaningful log line before folding its whitespace into one activity row. */
+export function tailLine(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim();
+    if (line.length > 0) return line.replace(/\s+/g, " ");
+  }
+  return undefined;
+}
+
+/** D1: controller-prepared bash data keeps the builder independent of manager state and clocks. */
+export interface BashJobViewInput {
+  jobId: string;
+  commandPreview: string;
+  status: JobStatus;
+  highlight: FleetHighlight;
+  elapsedMs: number;
+  logBytes: number;
+  logTail?: string;
+  settledAgoMs?: number;
+}
+
 export interface FleetWidgetRenderOptions {
   /** Line budget for run lines below the header (a run with live activity uses 2). Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
@@ -81,6 +120,8 @@ export interface FleetWidgetRenderOptions {
   terminalLingerMs?: number;
   /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. */
   workflows?: readonly WorkflowGroupInput[];
+  /** D1/M3: background bash jobs share the main-row budget with runs. */
+  bashJobs?: readonly BashJobViewInput[];
   /** Color injector, same tones as the panel (warn/crit/muted); default plain text. */
   color?: FleetColorize;
 }
@@ -183,14 +224,25 @@ function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): st
   return activity ? [main, `${pad}${activity}`] : [main];
 }
 
+function widgetBashRowMain(row: BashJobViewInput, color: FleetColorize): string {
+  const meta = `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · ${formatLogSize(row.logBytes)}`;
+  return row.highlight === "none" ? `  ${meta}` : color(row.highlight, `${WIDGET_MARK[row.highlight]} ${meta}`);
+}
+
+function widgetBashRowActivity(row: BashJobViewInput, color: FleetColorize): string | undefined {
+  return row.logTail === undefined ? undefined : `  ╰ ${color("muted", `» ${row.logTail}`)}`;
+}
+
+function widgetBashTerminalDetail(row: BashJobViewInput): string {
+  return `$ ${row.commandPreview} · ${row.status} · ${formatDuration(row.elapsedMs)} · ${formatLogSize(row.logBytes)}`;
+}
+
 /**
  * Build the agent-tree widget lines from the (shared) fleet view model.
  *
- * - Returns undefined when no runs are active → the controller hides the
- *   widget (terminal-only history is panel material, not widget material).
- * - Line 1 (header): `<bullet> N active Agents[ · $cost][ · +M more]` — the bullet
- *   is colored by the worst active highlight (rows arrive pre-sorted
- *   crit→warn→none from buildFleetViewModel).
+ * - Returns undefined when no runs or background bash jobs are visible.
+ * - Line 1 (header): `<bullet> N active Agents[ · M bash][ · $cost][ · +M more]` —
+ *   the bullet remains the worst active run highlight; bash does not affect it.
  * - Lines 2..: runs in tree order — mark (! warn / ✗ crit), depth indent,
  *   `↳` for nested rows. Each run takes 1–2 lines: the main row (label /
  *   type / model / phase / phase age / Σ total elapsed / cost) plus, when mid-tool or
@@ -211,13 +263,20 @@ export function buildFleetWidgetLines(
   const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
   const lingerMs = opts.terminalLingerMs ?? 5000;
   const workflows = (opts.workflows ?? []).slice(0, 3);
+  const bashJobs = opts.bashJobs ?? [];
   const activeRows = model.rows.filter((r) => !r.terminal);
+  const activeBash = bashJobs.filter((job) => !isTerminalJobStatus(job.status));
+  const recentBash = bashJobs.filter(
+    (job) => isTerminalJobStatus(job.status) && job.settledAgoMs !== undefined && job.settledAgoMs <= lingerMs,
+  );
+  const visibleBash = [...activeBash, ...recentBash];
   // M6: just-finished runs linger dimmed for a few seconds so a completion is
   // perceivable instead of vanishing between two ticks.
   const recentTerminal = model.rows.filter(
     (r) => r.terminal && r.settledAgoMs !== undefined && r.settledAgoMs <= lingerMs,
   );
-  if (model.activeCount === 0 && recentTerminal.length === 0 && workflows.length === 0) return undefined;
+  if (model.activeCount === 0 && recentTerminal.length === 0 && workflows.length === 0 && visibleBash.length === 0)
+    return undefined;
   const worst = activeRows[0]?.highlight ?? "none";
   // M9: workflow children (parentRunId === workflowId) are claimed by their
   // workflow's ⚙ group; everything else goes through the regular run tree.
@@ -234,7 +293,7 @@ export function buildFleetWidgetLines(
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
   // Ordered entries: workflow ⚙ group headers interleaved with their claimed
   // runs, then the general run forest. ⚙ headers don't consume the line budget.
-  type Entry = { header: string } | { row: FleetRow; indent: string };
+  type Entry = { header: string } | { row: FleetRow; indent: string } | { bash: BashJobViewInput };
   const entries: Entry[] = [];
   for (const wf of workflows) {
     entries.push({ header: color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`) });
@@ -244,6 +303,10 @@ export function buildFleetWidgetLines(
     const indent = depth > 0 ? `${"  ".repeat(depth - 1)}↳ ` : row.nested ? "↳ " : "";
     entries.push({ row, indent });
   }
+  // M3: bash main rows join the same pool as run identities. This deliberately
+  // lets bash be hidden only after the same maxRows worth of runs, preserving
+  // one simple budget and truthful "+N more" accounting.
+  for (const bash of activeBash) entries.push({ bash });
   // Fair line budget: deal every run its main row first, then hand the
   // leftover lines to activity continuations in display order. (Greedy
   // 2-lines-per-run allocation starved the LAST visible run of its tool
@@ -252,11 +315,17 @@ export function buildFleetWidgetLines(
   let shownRuns = 0;
   const rendered = entries.map((entry) => {
     if ("header" in entry) return { main: entry.header, activity: undefined as string | undefined, show: false };
-    if (budget <= 0) return undefined; // run hidden behind "+N more"
-    const [main, activity] = renderRunLines(entry.row, entry.indent, color);
+    if (budget <= 0) return undefined; // identity hidden behind "+N more"
+    const rendered =
+      "bash" in entry
+        ? { main: widgetBashRowMain(entry.bash, color), activity: widgetBashRowActivity(entry.bash, color) }
+        : (() => {
+            const [main, activity] = renderRunLines(entry.row, entry.indent, color);
+            return { main: main!, activity };
+          })();
     budget -= 1;
     shownRuns++;
-    return { main: main!, activity, show: false };
+    return { ...rendered, show: false };
   });
   for (const r of rendered) {
     if (budget <= 0) break;
@@ -271,15 +340,37 @@ export function buildFleetWidgetLines(
     lines.push(r.main);
     if (r.show && r.activity !== undefined) lines.push(r.activity);
   }
-  const hidden = model.activeCount - shownRuns;
+  // M4: only active identities contribute to hidden; workflow headers and
+  // terminal linger rows are transient and intentionally excluded.
+  const hidden = model.activeCount + activeBash.length - shownRuns;
   const header =
     `${color(worst, "●")} ${model.activeCount} active Agents` +
+    (activeBash.length > 0 ? ` · ${activeBash.length} bash` : "") +
     (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
-  lines.unshift(header);
-  for (const row of recentTerminal.slice(0, Math.max(0, budget))) {
+  lines.unshift(
+    model.activeCount === 0 && activeBash.length > 0
+      ? `${color("none", "●")} ${activeBash.length} background bash${hidden > 0 ? ` · +${hidden} more` : ""}`
+      : header,
+  );
+  // M6/F1: linger rows use the same remaining line budget as active rows;
+  // retaining completion visibility must never grow the widget beyond maxRows.
+  for (const row of recentTerminal) {
+    if (budget <= 0) break;
     const mark = row.status === "completed" ? "✓" : "✗";
     lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
+    budget -= 1;
+  }
+  for (const row of recentBash) {
+    if (budget <= 0) break;
+    const tone = row.highlight;
+    const mark = tone === "crit" ? "✗" : tone === "warn" ? "!" : "✓";
+    lines.push(color(tone === "none" ? "muted" : tone, `${mark} ${widgetBashTerminalDetail(row)}`));
+    budget -= 1;
+    if (row.logTail !== undefined && budget > 0) {
+      lines.push(color("muted", `  ╰ » ${row.logTail}`));
+      budget -= 1;
+    }
   }
   return lines;
 }
@@ -311,6 +402,13 @@ export interface FleetWidgetDeps {
   maxRows?: number;
   /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
   workflows?: () => readonly { workflowId: string; name: string; startedAt: number; currentPhaseId?: string }[];
+  /** D1: live in-memory bash job records; fs access remains in the stack adapter. */
+  bashJobs?: () => readonly JobRecord[];
+  /** D2: stack-bound two-pass tail reader, including the observed file size. */
+  readBashTail?: (
+    record: JobRecord,
+    sizeHint?: number,
+  ) => Promise<{ text: string | undefined; logBytes: number } | undefined>;
   typeOf?: (runId: RunId) => string | undefined;
   color?: FleetColorize;
 }
@@ -326,6 +424,10 @@ export class FleetWidgetController {
   private warnedRefreshFailure = false;
   /** H1 observer; merge into the session's SubagentExtensionPoints fan-out. */
   readonly lifecycle: SubagentExtensionPoints;
+  /** D2: cache is controller-owned because renderFrame must stay synchronous. */
+  private readonly bashTailCache = new Map<string, { text: string; observedSize: number; terminal: boolean }>();
+  private readonly bashTailInflight = new Set<string>();
+  private readonly tailFailures = new Map<string, Millis>();
 
   constructor(private readonly deps: FleetWidgetDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -390,8 +492,12 @@ export class FleetWidgetController {
 
   /** Unguarded refresh core — never call directly, always go through refresh(). */
   private renderFrame(): void {
+    const now = this.clock.now();
+    const bashRecords = this.deps.bashJobs?.() ?? [];
+    const bashViews = this.bashJobViews(bashRecords, now);
+    this.prefetchBashTails(bashRecords);
     const model = buildFleetViewModel(this.deps.query.list(), {
-      now: this.clock.now(),
+      now,
       recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
       maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
       ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
@@ -406,12 +512,80 @@ export class FleetWidgetController {
               workflowId: w.workflowId,
               name: w.name,
               ...(w.currentPhaseId === undefined ? {} : { phase: w.currentPhaseId }),
-              elapsedMs: Math.max(0, this.clock.now() - w.startedAt),
+              elapsedMs: Math.max(0, now - w.startedAt),
             })),
           }
         : {}),
+      ...(this.deps.bashJobs ? { bashJobs: bashViews } : {}),
     });
     this.push(lines);
+  }
+
+  private bashJobViews(records: readonly JobRecord[], now: number): BashJobViewInput[] {
+    const visible = records.filter((record) => record.backgroundedAt !== undefined);
+    const ids = new Set(visible.map((record) => record.jobId));
+    // Each session rebuild owns this cache; pruning every frame also handles
+    // retention sweeps without allowing job ids to accumulate indefinitely.
+    for (const id of this.bashTailCache.keys()) if (!ids.has(id)) this.bashTailCache.delete(id);
+    for (const id of this.bashTailInflight) if (!ids.has(id)) this.bashTailInflight.delete(id);
+    for (const id of this.tailFailures.keys()) if (!ids.has(id)) this.tailFailures.delete(id);
+    return visible.map((record) => {
+      const terminal = isTerminalJobStatus(record.status);
+      const cache = this.bashTailCache.get(record.jobId);
+      const elapsedMs = Math.max(0, (record.endedAt ?? now) - (record.spawnedAt ?? record.createdAt));
+      const view: BashJobViewInput = {
+        jobId: record.jobId,
+        commandPreview: previewCommand(record.command, 80),
+        status: record.status,
+        highlight: terminal ? bashJobHighlight(record.status) : "none",
+        elapsedMs,
+        logBytes: record.logBytes,
+        ...(cache?.text !== undefined && tailLine(cache.text) !== undefined ? { logTail: tailLine(cache.text)! } : {}),
+        ...(terminal && record.endedAt !== undefined ? { settledAgoMs: Math.max(0, now - record.endedAt) } : {}),
+      };
+      return view;
+    });
+  }
+
+  private prefetchBashTails(records: readonly JobRecord[]): void {
+    const readTail = this.deps.readBashTail;
+    if (!readTail || this.disposed) return;
+    for (const record of records) {
+      if (record.backgroundedAt === undefined || this.bashTailInflight.has(record.jobId)) continue;
+      const terminal = isTerminalJobStatus(record.status);
+      const cache = this.bashTailCache.get(record.jobId);
+      // Running jobs deliberately reread every tick: adopted records do not
+      // refresh logBytes during liveness polling, so record-only invalidation
+      // would freeze their activity forever. Terminal rows freeze after one read.
+      if (terminal && cache?.terminal) continue;
+      const failedAt = this.tailFailures.get(record.jobId);
+      if (failedAt !== undefined && this.clock.now() - failedAt < 5000) continue;
+      this.bashTailInflight.add(record.jobId);
+      const hint = Math.max(record.logBytes, cache?.observedSize ?? 0);
+      void readTail(record, hint)
+        .then((result) => {
+          const text = result?.text;
+          const fallback = text === undefined ? record.finalText : undefined;
+          const value = text ?? fallback;
+          const observedSize = result?.logBytes ?? hint;
+          if (value !== undefined) {
+            this.bashTailCache.set(record.jobId, { text: value, observedSize, terminal });
+          } else if (terminal) {
+            this.bashTailCache.set(record.jobId, { text: "", observedSize, terminal: true });
+          }
+          this.tailFailures.delete(record.jobId);
+        })
+        .catch(() => {
+          // Log retention races are expected; suppress them and back off so a
+          // long-lived missing log cannot generate one rejected read per tick.
+          this.tailFailures.set(record.jobId, this.clock.now());
+          if (terminal) {
+            const fallback = tailLine(record.finalText);
+            this.bashTailCache.set(record.jobId, { text: fallback ?? "", observedSize: hint, terminal: true });
+          }
+        })
+        .finally(() => this.bashTailInflight.delete(record.jobId));
+    }
   }
 
   private push(lines: string[] | undefined): void {
