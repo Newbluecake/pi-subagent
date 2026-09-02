@@ -13,7 +13,8 @@ import type {
   StopCause,
   SubagentExtensionPoints,
 } from "../core/types.js";
-import { deliveryKey, type Notifier } from "../delivery/notifier.js";
+import { deliveryKey } from "../core/delivery-key.js";
+import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
 import {
   BasicEffectInterpreter,
@@ -159,6 +160,8 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
   // payload, not the originating RunnerSpec — can still tell child runs
   // apart from top-level ones.
   const childRunIds = new Set<string>();
+  const schemaRunIds = new Set<string>();
+  const policyPendingRunIds = new Map<string, number>();
   let runtime!: RuntimeRunner;
   const effects = new BasicEffectInterpreter(
     {
@@ -174,7 +177,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // — otherwise every child of a busy parent would independently spam a
         // top-level completion notification (workflow design §8.2 CC2).
         if (childRunIds.has(e.payload.runId)) return;
-        deps.notifier.enqueue(e.payload);
+        const hold = schemaRunIds.has(e.payload.runId);
+        if (hold) policyPendingRunIds.set(e.payload.runId, e.payload.generation);
+        deps.notifier.enqueue(e.payload, { hold });
       },
       emit_lifecycle: (e) => {
         if (e.kind !== "emit_lifecycle") return;
@@ -246,11 +251,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     if (!childRunIds.has(runId)) {
       try {
         deps.notifier.enqueue({
-          key: deliveryKey(runId, outcome.diag.generation, outcome.status),
+          key: deliveryKey(runId, outcome.diag.generation),
           runId,
           generation: outcome.diag.generation,
           status: outcome.status,
           textPreview: "",
+          ...(outcome.diag.label === undefined ? {} : { label: outcome.diag.label }),
+          ...(outcome.error?.message === undefined ? {} : { failReason: outcome.error.message }),
           diag: {
             phase: outcome.diag.phase,
             status: outcome.status,
@@ -273,11 +280,13 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     async run(spec, callbacks) {
       if (callbacks) perRun.set(spec.runId, callbacks);
       if (spec.request.parentRunId !== undefined) childRunIds.add(spec.runId); // CC2
+      if (spec.request.schema !== undefined) schemaRunIds.add(spec.runId);
       // X10: captures the last StructuredOutput submission for this run, if
       // any. Populated (only) by the injected tool's onSubmit below; read
       // again, independently, after the run settles (host-side re-validation
       // — architecture §7.2 X10 "双重校验").
       const structured: { value?: unknown } = {};
+      let settled: RunOutcome | undefined;
       try {
         // CC4/CP2: re-check the absolute deadline cap as the first thing
         // inside this run's own execution, before any sessionSpec/customTools
@@ -393,12 +402,54 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         };
         let outcome = await runtime.run(req, spec.budget);
         // X10 host-side re-validation (second of the two mandatory checks).
-        if (spec.request.schema !== undefined)
+        if (spec.request.schema !== undefined) {
           outcome = applyStructuredOutputPolicy(outcome, spec.request.schema, structured.value);
+          settled = outcome;
+          try {
+            const snapshot = deps.store.get(spec.runId);
+            if (snapshot) deps.store.put({ ...snapshot, outcome, status: outcome.status, updatedAt: deps.clock.now() });
+          } catch (err) {
+            console.warn(
+              `[pi-subagent] post-policy snapshot persist failed for ${spec.runId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        } else settled = outcome;
         return outcome;
       } finally {
         perRun.delete(spec.runId);
         childRunIds.delete(spec.runId); // CC2
+        const generation = policyPendingRunIds.get(spec.runId);
+        if (generation !== undefined) {
+          policyPendingRunIds.delete(spec.runId);
+          deps.notifier.finalize(
+            spec.runId,
+            generation,
+            settled
+              ? {
+                  status: settled.status,
+                  textPreview:
+                    settled.structuredResult === undefined
+                      ? (settled.text ?? "")
+                      : JSON.stringify(settled.structuredResult),
+                  ...(settled.structuredResult === undefined
+                    ? {}
+                    : { structuredPreview: JSON.stringify(settled.structuredResult) }),
+                  ...((settled.error?.message ?? settled.timeoutReason)
+                    ? { failReason: settled.error?.message ?? settled.timeoutReason }
+                    : {}),
+                  ...(settled.diag.label === undefined ? {} : { label: settled.diag.label }),
+                  diag: {
+                    phase: "settled",
+                    status: settled.status,
+                    pendingTools: settled.diag.pendingTools,
+                    staleInputs: settled.diag.staleInputs,
+                    degraded: settled.diag.degraded.length,
+                  },
+                }
+              : { degradedReason: "policy-error" },
+          );
+        }
+        schemaRunIds.delete(spec.runId);
       }
     },
     abort(runId, cause) {

@@ -400,7 +400,7 @@ export function renderStatus(deps: StatusCommandDeps): string {
   );
   const delivery = deps.notifier.stats;
   lines.push(
-    `Delivery: pending=${delivery.pending} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned}`,
+    `Delivery: staged=${delivery.staged} pending=${delivery.pending} batched=${delivery.batched} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned}`,
   );
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
   return lines.join("\n");

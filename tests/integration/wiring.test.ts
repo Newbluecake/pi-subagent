@@ -133,7 +133,11 @@ describe("wiring: cross-layer smoke", () => {
     expect(stack.store.get(spawned.runId)?.status).toBe("completed");
 
     // G5b: the completion notification was actually handed to the sender.
-    expect(stack.sent.some((p) => p.runId === spawned.runId && p.status === "completed")).toBe(true);
+    const completion = stack.sent.find((p) => p.runId === spawned.runId && p.status === "completed");
+    expect(completion).toBeDefined();
+    expect(completion?.key).toMatch(/^r_[0-9A-HJKMNP-TV-Z]{8}:\d+$/);
+    expect(completion?.key.split(":")).toHaveLength(2);
+    expect(completion?.storageKey).toBe(completion?.key);
 
     // QueryService.wait() must resolve with the same outcome via the shared registry.
     const waited = await stack.queryService.wait(spawned.runId, { waitMs: 1000 });
@@ -142,6 +146,34 @@ describe("wiring: cross-layer smoke", () => {
 
     // Slot must be fully released after settlement.
     expect(stack.pool.stats.inUse).toBe(0);
+  });
+
+  it("schema-flip sends exactly one finalized failed stable-key notification", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: async () => undefined }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const stack = buildStack(clock, driver);
+    const spawned = await stack.spawnService.spawn({
+      type: "worker",
+      prompt: "validate",
+      schema: { type: "object", required: ["answer"], properties: { answer: { type: "number" } } },
+    });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await drain(clock, 30);
+    const snapshot = stack.registry.get(spawned.runId);
+    const notifications = stack.sent.filter((p) => p.runId === spawned.runId);
+    expect(snapshot?.outcome?.status).toBe("failed");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      key: `${spawned.runId}:1`,
+      status: "failed",
+      finalized: true,
+      failReason: snapshot?.outcome?.error?.message,
+    });
+    expect(notifications[0]!.key.split(":")).toHaveLength(2);
   });
 
   it("spawn hang -> deadline settles -> slot released -> notification still delivered", async () => {

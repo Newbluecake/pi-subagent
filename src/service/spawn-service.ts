@@ -71,6 +71,7 @@ export interface SpawnServiceDeps {
    * a config error (fail-closed, never silently inherited).
    */
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
+  runIdTaken?: (id: string) => boolean;
 }
 export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { snapshots(): readonly RunSnapshot[] } {
   const now = deps.now ?? (() => Date.now());
@@ -312,7 +313,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       let resolvedReq = req;
       let lockKeys: string[] = [];
-      const runId = newRunId((id) => records.has(id) || running.has(id) || tombstones.has(id));
+      const runId = newRunId(
+        (id) => records.has(id) || running.has(id) || tombstones.has(id) || deps.runIdTaken?.(id) === true,
+      );
       if (req.resumeFrom) {
         // Resolve once for the running hint, then resolve the owned session
         // file. Both calls are synchronous and this whole admission section

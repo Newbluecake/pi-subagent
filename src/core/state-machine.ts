@@ -1,4 +1,5 @@
 import { DEFAULT_BUDGET, dueAtFor } from "./deadline.js";
+import { deliveryKey } from "./delivery-key.js";
 import type {
   DeadlineBudget,
   EffectEnvelope,
@@ -290,11 +291,15 @@ function finish(
     {
       kind: "enqueue_delivery",
       payload: {
-        key: `${state.runId}:${state.generation}:${status}`,
+        key: deliveryKey(state.runId, state.generation),
         runId: state.runId,
         generation: state.generation,
         status,
         textPreview: d.text ?? "",
+        ...(d.label === undefined ? {} : { label: d.label }),
+        ...((d.error?.message ?? d.timeoutReason) === undefined
+          ? {}
+          : { failReason: d.error?.message ?? d.timeoutReason }),
         diag: {
           phase: "settled",
           status,

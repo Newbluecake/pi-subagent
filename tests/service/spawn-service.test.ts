@@ -34,6 +34,24 @@ function deps(runner: Runner) {
   };
 }
 describe("SpawnService", () => {
+  it("retries when runIdTaken rejects the first generated id", async () => {
+    let first: string | undefined;
+    const service = createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      runIdTaken: (id) => {
+        if (first === undefined) {
+          first = id;
+          return true;
+        }
+        return false;
+      },
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    if ("error" in started) throw new Error(started.error.message);
+    expect(first).toBeDefined();
+    expect(started.runId).not.toBe(first);
+  });
+
   it("does not create a timer for an unbounded wait", async () => {
     vi.useFakeTimers();
     try {

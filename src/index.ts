@@ -302,7 +302,10 @@ function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {
 }
 function forwardNotifier(holder: { current?: Stack }): Notifier {
   return {
-    enqueue: (p) => requireStack(holder).notifier.enqueue(p),
+    enqueue: (p, opts) => requireStack(holder).notifier.enqueue(p, opts),
+    finalize: (runId, generation, patch) => requireStack(holder).notifier.finalize(runId, generation, patch),
+    settleBatch: (keys, ok) => requireStack(holder).notifier.settleBatch(keys, ok),
+    peek: (key) => requireStack(holder).notifier.peek(key),
     consume: (key, by) => requireStack(holder).notifier.consume(key, by),
     reconcile: (persisted) => requireStack(holder).notifier.reconcile(persisted),
     verifyPersisted: (keys) => requireStack(holder).notifier.verifyPersisted(keys),

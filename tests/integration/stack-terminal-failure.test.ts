@@ -93,13 +93,13 @@ async function buildHarness() {
     reload: async () => ({ types: [], errors: [] }),
   } as unknown as AgentTypeRegistry;
   const { buildSessionStack } = await import("../../src/stack.js");
-  buildSessionStack(pi, ctx, { ...DEFAULT_SETTINGS, fleetWidget: false }, types, []);
-  return { sendMessage, notify: harness.spawnDeps!.notifyTerminalFailure! };
+  const stack = buildSessionStack(pi, ctx, { ...DEFAULT_SETTINGS, fleetWidget: false }, types, []);
+  return { sendMessage, notify: harness.spawnDeps!.notifyTerminalFailure!, stack };
 }
 
 function existing(state?: PersistedDelivery["state"]): PersistedDelivery {
   return {
-    key: "r_failure:1:completed",
+    key: "r_failure:1",
     runId: "r_failure",
     generation: 1,
     status: "completed",
@@ -144,8 +144,43 @@ describe("terminal failure notification deduplication", () => {
 
   it("sends when existing deliveries cannot be listed", async () => {
     harness.listError = new Error("outbox unavailable");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { sendMessage, notify } = await buildHarness();
     notify(outcome());
     expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage.mock.calls[0]![0].details.key).toBe("r_failure:1");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("runId uniqueness degrades"));
+    warn.mockRestore();
+  });
+
+  it("merges a staged F1 failure through finalize without enqueueing a second record", async () => {
+    harness.records.set(existing("staged").key, existing("staged"));
+    const { sendMessage, notify } = await buildHarness();
+    notify(outcome());
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(harness.records.get("r_failure:1")?.state).toBe("delivered");
+    expect(harness.records.get("r_failure:1")?.finalized).toBe(true);
+    expect(harness.records.size).toBe(1);
+    expect(sendMessage.mock.calls[0]![0].details.status).toBe("failed");
+  });
+
+  it("revives abandoned F1 deliveries and skips batched deliveries", async () => {
+    harness.records.set(existing("abandoned").key, existing("abandoned"));
+    const first = await buildHarness();
+    first.notify(outcome());
+    expect(first.sendMessage).toHaveBeenCalledOnce();
+
+    harness.records.clear();
+    harness.records.set(existing("batched").key, existing("batched"));
+    const second = await buildHarness();
+    second.notify(outcome());
+    expect(second.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("marks pre-finalize delivery text as degraded and points to result retrieval", async () => {
+    const { sendMessage, stack } = await buildHarness();
+    stack.notifier.enqueue({ ...existing("pending"), degradedReason: "pre-finalize", finalized: false });
+    expect(sendMessage.mock.calls[0]![0].content).toContain("pre-finalize snapshot");
+    expect(sendMessage.mock.calls[0]![0].content).toContain('get_subagent_result "r_failur"');
   });
 });

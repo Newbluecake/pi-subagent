@@ -6,7 +6,7 @@ import type { DeliveryPayload } from "../../src/core/types.js";
 import { MemoryOutboxStore } from "../../src/core/store.js";
 
 const payload: DeliveryPayload = {
-  key: "r:1:completed",
+  key: "r:1",
   runId: "r",
   generation: 1,
   status: "completed",
@@ -63,10 +63,10 @@ describe("Notifier", () => {
     notifier.enqueue(payload);
     expect(notifier.consume(payload.key)).toBe(true);
     expect(notifier.consume(payload.key)).toBe(false);
-    const stale = { ...payload, key: "old:1:completed", createdAt: 0, state: "dropped" as const };
+    const stale = { ...payload, key: "old:1", createdAt: 0, state: "dropped" as const };
     store.put(stale);
     const report = notifier.reconcile();
-    expect(report.suppressed).toContain("old:1:completed");
+    expect(report.suppressed).toContain("old:1");
     expect(sent).toContain(payload.key);
   });
 
@@ -74,21 +74,26 @@ describe("Notifier", () => {
     const clock = new FakeClock(100);
     const store = new FakeOutbox();
     const seen: Array<{ key: string; state: string }> = [];
+    const payloadKeys: string[] = [];
     const notifier = createNotifier({
       store,
       clock,
       reconcileTtlMs: 10,
       sender: () => undefined,
-      onDelivery: (p, state) => seen.push({ key: p.key, state }),
+      onDelivery: (p, state) => {
+        payloadKeys.push(p.key);
+        seen.push({ key: p.key, state });
+      },
     });
     notifier.enqueue(payload);
     expect(seen).toContainEqual({ key: payload.key, state: "delivered" });
     notifier.consume(payload.key);
     expect(seen).toContainEqual({ key: payload.key, state: "consumed" });
-    const stale = { ...payload, key: "old:1:completed", createdAt: 0, state: "dropped" as const };
+    const stale = { ...payload, key: "old:1", createdAt: 0, state: "dropped" as const };
     store.put(stale);
     notifier.reconcile();
-    expect(seen).toContainEqual({ key: "old:1:completed", state: "abandoned" });
+    expect(seen).toContainEqual({ key: "old:1", state: "abandoned" });
+    expect(payloadKeys).toEqual(seen.map((entry) => entry.key));
   });
 
   it("returns false and leaves the record retryable when consume persistence fails", () => {
@@ -199,11 +204,11 @@ describe("reconcile redelivery policy (duplicate-notification regression)", () =
     const store = new MemoryOutboxStore<PersistedDelivery>();
     const sent: string[] = [];
     const notifier = createNotifier({ store, clock, sender: (p) => sent.push(p.key), maxReconcileRounds: 5 });
-    const pending = { ...payload, key: "pending:1:completed", createdAt: 100, state: "pending" as const, attempts: 0 };
-    const dropped = { ...payload, key: "dropped:1:completed", createdAt: 100, state: "dropped" as const, attempts: 1 };
+    const pending = { ...payload, key: "pending:1", createdAt: 100, state: "pending" as const, attempts: 0 };
+    const dropped = { ...payload, key: "dropped:1", createdAt: 100, state: "dropped" as const, attempts: 1 };
     const consumed = {
       ...payload,
-      key: "consumed:1:completed",
+      key: "consumed:1",
       createdAt: 100,
       state: "consumed" as const,
       attempts: 1,
@@ -239,17 +244,143 @@ describe("reconcile redelivery policy (duplicate-notification regression)", () =
       createdAt: 0,
       reconcileRound: 0,
     };
-    notifier.enqueue({ ...base, key: "r1:1:completed", runId: "r1" });
+    notifier.enqueue({ ...base, key: "r1:1", runId: "r1" });
     clock.advance(10_000); // let attempts fire
-    expect(sent).toContain("r1:1:completed");
-    expect(store.list().find((r) => r.key === "r1:1:completed")?.state).toBe("delivered");
+    expect(sent).toContain("r1:1");
+    expect(store.list().find((r) => r.key === "r1:1")?.state).toBe("delivered");
 
     // Simulate a restart: fresh notifier over the same persisted store.
     const sent2: string[] = [];
     const notifier2 = createNotifier({ store, clock, sender: (p) => void sent2.push(p.key) });
-    store.put({ ...base, key: "r2:1:completed", runId: "r2", state: "pending", attempts: 0 });
+    store.put({ ...base, key: "r2:1", runId: "r2", state: "pending", attempts: 0 });
     notifier2.reconcile();
     clock.advance(10_000);
-    expect(sent2).toEqual(["r2:1:completed"]); // delivered r1 is NOT redelivered
+    expect(sent2).toEqual(["r2:1"]); // delivered r1 is NOT redelivered
+  });
+
+  it("holds schema delivery until finalize and sends the finalized payload", () => {
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({ store, sender: (p) => sent.push(p) });
+    notifier.enqueue({ ...payload, key: "r:2", runId: "r", generation: 2 }, { hold: true });
+    expect(sent).toHaveLength(0);
+    expect(notifier.stats.staged).toBe(1);
+    expect(notifier.finalize("r", 2, { status: "failed", failReason: "invalid", textPreview: "" })).toBe("sent");
+    expect(sent[0]).toMatchObject({ key: "r:2", status: "failed", failReason: "invalid", finalized: true });
+    expect(notifier.stats.staged).toBe(0);
+    expect(notifier.stats.delivered).toBe(1);
+  });
+
+  it("folds legacy delivered and pending records in favor of pending without rewriting the hidden record", () => {
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    store.put({ ...payload, key: "r:1:completed", state: "delivered", createdAt: 1 });
+    store.put({ ...payload, key: "r:1:failed", status: "failed", state: "pending", createdAt: 2, failReason: "boom" });
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({ store, clock: new FakeClock(100), sender: (p) => sent.push(p) });
+    const report = notifier.reconcile();
+    expect(report.redelivered).toEqual(["r:1"]);
+    expect(sent[0]).toMatchObject({ key: "r:1", status: "failed", failReason: "boom" });
+    expect(store.list().find((r) => r.key === "r:1:completed")?.state).toBe("delivered");
+  });
+
+  it("releases two staged records with pre-finalize markers and one audit per release", () => {
+    const clock = new FakeClock(10);
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const sent: PersistedDelivery[] = [];
+    const audits: string[] = [];
+    const notifier = createNotifier({
+      store,
+      clock,
+      sender: (p) => sent.push(p as PersistedDelivery),
+      audit: (e) => {
+        if (e.error) audits.push(e.error);
+      },
+    });
+    notifier.enqueue({ ...payload, key: "r:2", generation: 2, createdAt: 10 }, { hold: true });
+    notifier.enqueue({ ...payload, key: "r:3", generation: 3, createdAt: 10 }, { hold: true });
+    const report = notifier.reconcile();
+    expect(report.redelivered).toEqual(["r:2", "r:3"]);
+    expect(sent).toHaveLength(2);
+    expect(sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ degradedReason: "pre-finalize", finalized: false, reconcileRound: 1 }),
+      ]),
+    );
+    expect(audits.filter((entry) => entry === "pre-finalize release")).toHaveLength(2);
+    expect(store.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "r:2", degradedReason: "pre-finalize", finalized: false, reconcileRound: 1 }),
+        expect.objectContaining({ key: "r:3", degradedReason: "pre-finalize", finalized: false, reconcileRound: 1 }),
+      ]),
+    );
+  });
+
+  it("uses the physical storageKey for legacy consume, finalize, TTL abandon, and retry writes", () => {
+    const updates: string[] = [];
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const originalUpdate = store.update.bind(store);
+    store.update = (key, patch) => {
+      updates.push(key);
+      originalUpdate(key, patch);
+    };
+    store.put({ ...payload, key: "r:1:completed", state: "pending", createdAt: 100 });
+    const clock = new FakeClock(100);
+    const notifier = createNotifier({
+      store,
+      clock,
+      maxAttempts: 3,
+      sender: () => {
+        throw new Error("closed");
+      },
+    });
+    notifier.reconcile();
+    clock.advance(1000);
+    expect(updates).toContain("r:1:completed");
+
+    expect(notifier.consume("r:1")).toBe(true);
+    expect(updates).toContain("r:1:completed");
+
+    const staged = {
+      ...payload,
+      key: "r:2:completed",
+      runId: "r",
+      generation: 2,
+      state: "staged" as const,
+      createdAt: 100,
+    };
+    store.put(staged);
+    notifier.finalize("r", 2, { status: "completed", textPreview: "final" });
+    expect(updates).toContain("r:2:completed");
+
+    const stale = {
+      ...payload,
+      key: "r:3:completed",
+      runId: "r",
+      generation: 3,
+      state: "pending" as const,
+      createdAt: 0,
+    };
+    store.put(stale);
+    const ttlNotifier = createNotifier({
+      store,
+      clock: new FakeClock(100),
+      reconcileTtlMs: 10,
+      sender: () => undefined,
+    });
+    ttlNotifier.reconcile();
+    expect(updates).toContain("r:3:completed");
+    expect(updates.every((key) => key.includes(":"))).toBe(true);
+    expect(store.list().some((record) => record.key === "r:1")).toBe(false);
+  });
+
+  it("audits and excludes non-terminal legacy keys", () => {
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    store.put({ ...payload, key: "r_x:1:running", state: "pending" });
+    const audits: string[] = [];
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({ store, sender: (p) => sent.push(p), audit: (e) => audits.push(e.error ?? "") });
+    expect(notifier.reconcile().redelivered).toEqual([]);
+    expect(sent).toHaveLength(0);
+    expect(audits).toContain("illegal legacy key");
   });
 });

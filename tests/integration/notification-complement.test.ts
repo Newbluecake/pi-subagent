@@ -28,7 +28,7 @@ function buildStackForSender() {
 
 function payload(textPreview: string): DeliveryPayload {
   return {
-    key: `r_123456:1:completed:${textPreview.length}`,
+    key: "r_123456:1",
     runId: "r_123456789",
     generation: 1,
     status: "completed",

@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
-import type { AgentTypeConfig } from "../../src/core/types.js";
+import type { AgentTypeConfig, DeliveryPayload, RunSnapshot } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
@@ -44,15 +44,18 @@ function handle(overrides: Partial<SessionHandle> = {}): SessionHandle {
 }
 const notifier = {
   enqueue: () => undefined,
+  finalize: () => "missing" as const,
+  settleBatch: () => undefined,
+  peek: () => undefined,
   consume: () => false,
   reconcile: () => ({ redelivered: [], suppressed: [], abandoned: [] }),
   verifyPersisted: () => ({ missing: [] }),
-  stats: { pending: 0, delivered: 0, consumed: 0, dropped: 0, abandoned: 0 },
+  stats: { staged: 0, pending: 0, batched: 0, delivered: 0, consumed: 0, dropped: 0, abandoned: 0 },
   degraded: [],
 };
 function buildAdapter(clock: FakeClock, overrides: Partial<RuntimeAdapterDeps> & { driver: SessionDriver }) {
   const pool = new SingleSlotPool(clock, 1);
-  const store = new MemoryRunStore();
+  const store = overrides.store ?? new MemoryRunStore();
   const reaper = new EscalatingReaper(clock);
   const watchdog = new EventWatchdog({
     clock,
@@ -173,6 +176,121 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
       {},
     );
     expect(calledWith).toEqual({ type: "worker", parentRunId: "r1", slotless: true });
+  });
+});
+
+describe("service/runtime-adapter: delivery v2 policy finalization", () => {
+  function captureNotifier() {
+    const enqueued: DeliveryPayload[] = [];
+    const finalized: Array<{ runId: string; generation: number; patch: Partial<DeliveryPayload> }> = [];
+    const captured = {
+      ...notifier,
+      enqueue: (payload: DeliveryPayload) => enqueued.push(payload),
+      finalize: (runId: string, generation: number, patch: Partial<DeliveryPayload>) => {
+        finalized.push({ runId, generation, patch });
+        return "sent" as const;
+      },
+    };
+    return { captured, enqueued, finalized };
+  }
+
+  it("schema validation failure sends one stable-key notification with the failed reason", async () => {
+    const clock = new FakeClock();
+    const capture = captureNotifier();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: async () => undefined }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: capture.captured });
+    const outcome = await runner.run(
+      spec(
+        { name: "worker", description: "x", systemPrompt: "", promptMode: "append" },
+        { schema: { type: "object", required: ["answer"], properties: { answer: { type: "number" } } } },
+      ),
+    );
+    expect(capture.enqueued).toHaveLength(1);
+    expect(capture.finalized).toHaveLength(1);
+    expect(capture.finalized[0]!.patch).toMatchObject({ status: "failed", failReason: outcome.error?.message });
+    expect(capture.enqueued[0]!.key).toBe("r1:1");
+    expect(capture.enqueued[0]!.key.split(":")).toHaveLength(2);
+  });
+
+  it("persists structured preview and finalizes with the post-policy outcome", async () => {
+    const clock = new FakeClock();
+    const capture = captureNotifier();
+    const schema = { type: "object", properties: { answer: { type: "number" } }, required: ["answer"] };
+    const driver: SessionDriver = {
+      create: async (s: SessionSpec) => {
+        const tool = (s.customTools as Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }>).find(
+          (t) => t.name === "StructuredOutput",
+        );
+        return handle({
+          prompt: async () => {
+            await tool!.execute("tc", { answer: 42 }, undefined, undefined, {});
+          },
+        });
+      },
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const store = new MemoryRunStore();
+    const runner = buildAdapter(clock, { driver, notifier: capture.captured, store });
+    const outcome = await runner.run(
+      spec({ name: "worker", description: "x", systemPrompt: "", promptMode: "append" }, { schema }),
+    );
+    expect(store.get("r1")?.outcome?.status).toBe(outcome.status);
+    expect(capture.finalized[0]!.patch.structuredPreview).toBe(JSON.stringify({ answer: 42 }));
+  });
+
+  it("still finalizes with failed reason when post-policy snapshot persistence fails", async () => {
+    const clock = new FakeClock();
+    const capture = captureNotifier();
+    class FailingPostPolicyStore extends MemoryRunStore {
+      override put(snapshot: RunSnapshot): void {
+        if (snapshot.outcome?.error?.kind === "schema") throw new Error("post-policy disk full");
+        super.put(snapshot);
+      }
+    }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: async () => undefined }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: capture.captured, store: new FailingPostPolicyStore() });
+    const outcome = await runner.run(
+      spec(
+        { name: "worker", description: "x", systemPrompt: "", promptMode: "append" },
+        { schema: { type: "object" } },
+      ),
+    );
+    expect(outcome.status).toBe("failed");
+    expect(capture.finalized).toHaveLength(1);
+    expect(capture.finalized[0]!.patch).toMatchObject({ status: "failed", failReason: outcome.error?.message });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("post-policy snapshot persist failed"));
+    warn.mockRestore();
+  });
+
+  it("does not finalize schema config-failure paths that never staged a delivery", async () => {
+    const clock = new FakeClock();
+    const capture = captureNotifier();
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const runner = buildAdapter(clock, { driver, notifier: capture.captured });
+    const outcome = await runner.run(
+      spec(
+        { name: "worker", description: "x", systemPrompt: "", promptMode: "append" },
+        { schema: { type: "object" }, deadlineAt: 0 },
+      ),
+    );
+    expect(outcome.status).toBe("failed");
+    expect(capture.finalized).toHaveLength(0);
+    expect(capture.enqueued[0]).not.toHaveProperty("finalized");
+    expect(capture.enqueued[0]).not.toHaveProperty("degradedReason");
   });
 });
 

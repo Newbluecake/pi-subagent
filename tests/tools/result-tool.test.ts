@@ -61,18 +61,18 @@ describe("result consumption", () => {
     await getTool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
     const waitTool = createResultTool({ query: queryForSnapshot(snap), notifier });
     await waitTool.execute("tc2", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
-    expect(calls).toEqual(["r1:1:completed", "r1:1:completed"]);
+    expect(calls).toEqual(["r1:1", "r1:1"]);
   });
 
-  it("only uses completed fallback for schema-flipped failures", async () => {
+  it("uses the stable key for schema-flipped failures", async () => {
     const snap = completedSnapshot();
     snap.status = "failed";
     snap.outcome = { ...snap.outcome!, status: "failed", error: { kind: "schema", message: "invalid" } };
     const calls: string[] = [];
-    const notifier = { consume: (key: string) => (calls.push(key), key.endsWith(":completed")) };
+    const notifier = { consume: (key: string) => (calls.push(key), true) };
     const tool = createResultTool({ query: queryForSnapshot(snap), notifier });
     await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
-    expect(calls).toEqual(["r1:1:failed", "r1:1:completed"]);
+    expect(calls).toEqual(["r1:1"]);
   });
 
   it.each([
@@ -89,7 +89,7 @@ describe("result consumption", () => {
       notifier: { consume: (key: string) => (calls.push(key), false) },
     });
     await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
-    expect(calls).toEqual([`r1:1:${status}`]);
+    expect(calls).toEqual(["r1:1"]);
   });
 
   it("does not consume while a snapshot has no outcome", async () => {

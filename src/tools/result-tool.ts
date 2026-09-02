@@ -51,13 +51,9 @@ export function createResultTool(deps: {
   const tryConsume = (runId: string, generation: number, outcome: RunOutcome) => {
     if (!deps.notifier) return;
     try {
-      const hit = deps.notifier.consume(deliveryKey(runId, generation, outcome.status), {
+      deps.notifier.consume(deliveryKey(runId, generation), {
         extensionOwner: "get_subagent_result",
       });
-      if (!hit && outcome.status === "failed" && outcome.error?.kind === "schema")
-        deps.notifier.consume(deliveryKey(runId, generation, "completed"), {
-          extensionOwner: "get_subagent_result",
-        });
     } catch {
       // Defensive boundary for future notifier implementations.
     }

@@ -54,8 +54,8 @@ describe("PiOutboxStore persistence rollback", () => {
     expect(notifier.consume(record().key)).toBe(false);
     expect(store.list()[0].state).toBe("pending");
     const report = notifier.reconcile();
-    expect(report.redelivered).toContain(record().key);
-    expect(sent).toContain(record().key);
+    expect(report.redelivered).toContain("r:1");
+    expect(sent).toContain("r:1");
   });
 
   it("does not retain a put that appendEntry rejected", () => {

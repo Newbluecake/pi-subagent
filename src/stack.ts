@@ -13,6 +13,7 @@ import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
 import { createNotifier, deliveryKey, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import { parseDeliveryKey } from "./core/delivery-key.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
@@ -127,6 +128,17 @@ export function buildSessionStack(
   const outbox = readBack
     ? createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager })
     : new MemoryOutboxStore<PersistedDelivery>();
+  let taken = new Set<string>();
+  try {
+    taken = new Set(
+      outbox
+        .list()
+        .map((r) => parseDeliveryKey(r.key)?.runId)
+        .filter((id): id is string => id !== undefined),
+    );
+  } catch {
+    console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
+  }
   const notifier = createNotifier({
     store: outbox,
     clock: systemClock,
@@ -145,15 +157,20 @@ export function buildSessionStack(
       const snapshot = store.get(payload.runId);
       const outcome = snapshot?.outcome;
       const stats = outcome ? formatOutcomeSummary(outcome) : undefined;
-      const label = snapshot?.diag.label;
+      const label = payload.label ?? snapshot?.diag.label;
       // Non-completed runs: textPreview is usually empty — surface the actual
       // failure reason instead (observed in the wild: a config-failed run's
       // notification said nothing beyond "failed", the reason required a
       // manual get_subagent_result round-trip).
       const failReason =
-        payload.status !== "completed"
+        payload.failReason ??
+        (payload.status !== "completed"
           ? (outcome?.error?.message ?? outcome?.timeoutReason ?? snapshot?.diag.error?.message)
-          : undefined;
+          : undefined);
+      const degradedTail =
+        payload.degradedReason === "pre-finalize"
+          ? ' (pre-finalize snapshot; run get_subagent_result "' + payload.runId.slice(0, 8) + '" to confirm)'
+          : "";
       const tail = failReason ?? (payload.textPreview || undefined);
       // Human-facing head: label + #shortId (matches the tree rows). The full
       // runId stays available in `details` and in the original spawn tool
@@ -174,6 +191,7 @@ export function buildSessionStack(
             `Subagent ${who} ${payload.status}` +
             (stats ? ` — ${stats}` : "") +
             (tail ? `: ${tail.slice(0, 200)}` : "") +
+            degradedTail +
             hint,
           display: true,
           details: payload,
@@ -209,6 +227,7 @@ export function buildSessionStack(
     runner,
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
+    runIdTaken: (id) => taken.has(id),
     // Fuzzy model hints (frontmatter `model: sonnet`, Agent tool
     // `model: "kimi-k3"`) resolve against pi's available models —
     // getAvailable() already filters to authenticated/usable entries, so a
@@ -222,23 +241,22 @@ export function buildSessionStack(
     onOutcomeConsumed: (outcome) => {
       try {
         const by = { extensionOwner: "spawnAndWait" };
-        if (
-          !notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation, outcome.status), by) &&
-          outcome.status === "failed" &&
-          outcome.error?.kind === "schema"
-        )
-          notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation, "completed"), by);
+        notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation), by);
       } catch {
         // Consumption is best effort only.
       }
     },
     notifyTerminalFailure: (outcome) => {
       const payload = {
-        key: deliveryKey(outcome.runId, outcome.diag.generation, outcome.status),
+        key: deliveryKey(outcome.runId, outcome.diag.generation),
         runId: outcome.runId,
         generation: outcome.diag.generation,
         status: outcome.status,
         textPreview: outcome.text ?? "",
+        ...(outcome.diag.label === undefined ? {} : { label: outcome.diag.label }),
+        ...((outcome.error?.message ?? outcome.timeoutReason)
+          ? { failReason: outcome.error?.message ?? outcome.timeoutReason }
+          : {}),
         diag: {
           phase: outcome.diag.phase,
           status: outcome.status,
@@ -249,15 +267,18 @@ export function buildSessionStack(
         createdAt: outcome.diag.createdAt,
         reconcileRound: 0,
       } satisfies DeliveryPayload;
-      const prefix = `${outcome.runId}:${outcome.diag.generation}:`;
-      let existing: PersistedDelivery | undefined;
+      let existing: ReturnType<Notifier["peek"]>;
       try {
-        existing = outbox.list().find((record) => record.key.startsWith(prefix));
+        existing = notifier.peek(payload.key);
       } catch {
-        // Fail open: uncertainty must not suppress a terminal failure.
+        existing = undefined;
       }
-      const state = existing?.state ?? "pending";
-      if (existing && state !== "dropped" && state !== "abandoned") return;
+      if (existing === "delivered" || existing === "consumed" || existing === "pending" || existing === "batched")
+        return;
+      if (existing === "staged") {
+        notifier.finalize(outcome.runId, outcome.diag.generation, payload);
+        return;
+      }
       notifier.enqueue(payload);
     },
     onSnapshot: (snapshot) => {

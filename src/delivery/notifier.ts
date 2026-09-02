@@ -1,9 +1,11 @@
 import type { Clock } from "../core/clock.js";
 import type { OutboxStore as CoreOutboxStore } from "../core/store.js";
-import type { DeliveryPayload, RunOutcome } from "../core/types.js";
+import type { DeliveryPayload } from "../core/types.js";
+import { canonicalizeDeliveryKey, deliveryKey, type DeliveryKey } from "../core/delivery-key.js";
 
-export type DeliveryKey = string;
-export type DeliveryState = "pending" | "delivered" | "consumed" | "dropped" | "abandoned";
+export { canonicalizeDeliveryKey, deliveryKey } from "../core/delivery-key.js";
+export type { DeliveryKey } from "../core/delivery-key.js";
+export type DeliveryState = "staged" | "pending" | "batched" | "delivered" | "consumed" | "dropped" | "abandoned";
 export interface ConsumerIdentity {
   parentRunId?: string;
   extensionOwner?: string;
@@ -11,15 +13,13 @@ export interface ConsumerIdentity {
 export interface PersistedDelivery extends DeliveryPayload {
   state?: DeliveryState;
   attempts?: number;
+  storageKey?: string;
 }
 export interface ReconcileReport {
   redelivered: DeliveryKey[];
   suppressed: DeliveryKey[];
   abandoned: DeliveryKey[];
 }
-// Canonical put/update/list outbox contract now lives in core/store.ts (single
-// source of truth); re-exported under the historical name so existing
-// importers (tests, adapters) keep working unchanged.
 export type OutboxStore = CoreOutboxStore<PersistedDelivery>;
 export interface MessageSender {
   sendMessage(payload: DeliveryPayload): void;
@@ -34,25 +34,25 @@ export interface NotifierOptions {
   maxReconcileRounds?: number;
   maxBatch?: number;
   audit?: (entry: { key: DeliveryKey; state: DeliveryState; error?: string }) => void;
-  /** H4 (architecture §7.1): delivery bypass observer. Fired for every state transition (delivered/pending-retry/dropped/consumed/abandoned) with the full payload; must never throw into the notifier's own retry loop. */
   onDelivery?: (p: DeliveryPayload, state: DeliveryState) => void;
 }
 export interface Notifier {
-  enqueue(payload: DeliveryPayload): void;
+  enqueue(payload: DeliveryPayload, opts?: { hold?: boolean }): void;
+  finalize(runId: string, generation: number, patch: Partial<DeliveryPayload>): "sent" | "updated" | "late" | "missing";
+  settleBatch(keys: readonly DeliveryKey[], ok: boolean): void;
+  peek(key: DeliveryKey): DeliveryState | undefined;
   consume(key: DeliveryKey, by?: ConsumerIdentity): boolean;
   reconcile(persisted?: readonly PersistedDelivery[]): ReconcileReport;
   verifyPersisted(keys: readonly DeliveryKey[]): { missing: DeliveryKey[] };
   readonly stats: Record<DeliveryState, number>;
   readonly degraded: ReadonlyArray<{ key: DeliveryKey; reason: string; at: number }>;
 }
-export function deliveryKey(runId: string, generation: number, status: RunOutcome["status"]): DeliveryKey {
-  return `${runId}:${generation}:${status}`;
-}
+
 export function createNotifier(options: NotifierOptions): Notifier {
   const clock = options.clock ?? {
     now: () => Date.now(),
-    setTimer: (ms: number, fn: () => void) => ({ id: setTimeout(fn, ms) as unknown as number }),
-    clearTimer: (h: { id: number }) => clearTimeout(h.id),
+    setTimer: (ms, fn) => ({ id: setTimeout(fn, ms) as unknown as number }),
+    clearTimer: (h) => clearTimeout(h.id),
   };
   const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
   const backoffMs = Math.max(0, options.backoffMs ?? 1_000);
@@ -60,143 +60,270 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const maxRounds = Math.max(0, options.maxReconcileRounds ?? 3);
   const maxBatch = Math.max(1, options.maxBatch ?? 10);
   const state = new Map<DeliveryKey, PersistedDelivery>();
-  const degraded: Array<{ key: DeliveryKey; reason: string; at: number }> = [];
-  const sender = options.sender;
-  let send: (payload: DeliveryPayload) => void;
-  if (typeof sender === "function") send = sender;
-  else send = (payload) => sender.sendMessage(payload);
-  const audit = (key: DeliveryKey, value: DeliveryState, error?: string) => {
-    options.audit?.({ key, state: value, ...(error ? { error } : {}) });
-  };
-  const notifyExt = (payload: DeliveryPayload, s: DeliveryState) => {
+  const degraded: Array<{ key: string; reason: string; at: number }> = [];
+  const send: (p: DeliveryPayload) => void =
+    typeof options.sender === "function" ? options.sender : (p) => (options.sender as MessageSender).sendMessage(p);
+  const audit = (key: string, s: DeliveryState, error?: string) =>
+    options.audit?.({ key, state: s, ...(error ? { error } : {}) });
+  const notify = (p: PersistedDelivery, s: DeliveryState) => {
     try {
-      options.onDelivery?.(payload, s);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[pi-subagent] extension hook onDelivery threw (ignored): ${message}`);
+      options.onDelivery?.(p, s);
+    } catch (e) {
+      console.warn(
+        `[pi-subagent] extension hook onDelivery threw (ignored): ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   };
-  const persist = (record: PersistedDelivery) => {
+  const fail = (key: string, reason: string) => {
+    degraded.push({ key, reason, at: clock.now() });
+  };
+  const writeBack = (record: PersistedDelivery, patch: Partial<PersistedDelivery>) =>
+    options.store.update(record.storageKey ?? record.key, patch);
+  const normalize = (raw: PersistedDelivery): PersistedDelivery | undefined => {
+    const key = canonicalizeDeliveryKey(raw.key);
+    if (raw.key.split(":").length === 3 && key === raw.key) {
+      audit(raw.key, "pending", "illegal legacy key");
+      return undefined;
+    }
+    return { ...raw, key, storageKey: raw.storageKey ?? raw.key, state: raw.state ?? "pending" };
+  };
+  const fold = (items: readonly PersistedDelivery[]) => {
+    const groups = new Map<string, PersistedDelivery[]>();
+    for (const raw of items) {
+      const r = normalize(raw);
+      if (!r) continue;
+      const a = groups.get(r.key) ?? [];
+      a.push(r);
+      groups.set(r.key, a);
+    }
+    const result = new Map<string, PersistedDelivery>();
+    for (const [key, records] of groups) {
+      const pending = records.filter((r) => ["staged", "pending", "batched", "dropped"].includes(r.state ?? "pending"));
+      const candidates = pending.length ? pending : records;
+      candidates.sort((a, b) => b.createdAt - a.createdAt || (b.attempts ?? 0) - (a.attempts ?? 0));
+      result.set(key, candidates[0]!);
+    }
+    return result;
+  };
+  const load = () => {
+    try {
+      return fold(options.store.list());
+    } catch (e) {
+      console.warn(
+        `[pi-subagent] outbox list failed; delivery lookup degraded: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return new Map<DeliveryKey, PersistedDelivery>();
+    }
+  };
+  const persistPut = (record: PersistedDelivery) => {
     state.set(record.key, record);
     try {
       options.store.put(record);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      degraded.push({ key: record.key, reason: `outbox put failed: ${message}`, at: clock.now() });
-      audit(record.key, "pending", message);
+    } catch (e) {
+      fail(record.key, `outbox put failed: ${e instanceof Error ? e.message : String(e)}`);
+      audit(record.key, "pending", String(e));
     }
+  };
+  const settleDelivered = (record: PersistedDelivery, round: number) => {
+    const next = {
+      ...record,
+      state: "delivered" as const,
+      attempts: (record.attempts ?? 0) + 1,
+      reconcileRound: round,
+    };
+    state.set(next.key, next);
+    try {
+      writeBack(record, { state: next.state, attempts: next.attempts, reconcileRound: round });
+    } catch (e) {
+      fail(next.key, `outbox update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    audit(next.key, "delivered");
+    notify(next, "delivered");
+  };
+  const settleFailed = (record: PersistedDelivery, round: number, error: unknown) => {
+    const attempts = (record.attempts ?? 0) + 1;
+    const nextState: DeliveryState = attempts >= maxAttempts ? "dropped" : "pending";
+    const next = { ...record, state: nextState, attempts, reconcileRound: round };
+    state.set(next.key, next);
+    try {
+      writeBack(record, { state: nextState, attempts, reconcileRound: round });
+    } catch (e) {
+      fail(next.key, `outbox update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    audit(next.key, nextState, msg);
+    notify(next, nextState);
+    if (nextState === "pending") clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => attempt(next, round));
   };
   const attempt = (record: PersistedDelivery, round: number) => {
     if (state.get(record.key)?.state === "consumed") return;
     try {
       send(record);
-      const next = {
-        ...record,
-        state: "delivered" as const,
-        attempts: (record.attempts ?? 0) + 1,
-        reconcileRound: round,
-      };
-      state.set(record.key, next);
-      try {
-        options.store.update(record.key, { state: next.state, attempts: next.attempts, reconcileRound: round });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        degraded.push({ key: record.key, reason: `outbox update failed: ${message}`, at: clock.now() });
-      }
-      audit(record.key, "delivered");
-      notifyExt(next, "delivered");
-    } catch (error) {
-      const attempts = (record.attempts ?? 0) + 1;
-      const nextState: DeliveryState = attempts >= maxAttempts ? "dropped" : "pending";
-      const next = { ...record, state: nextState, attempts, reconcileRound: round };
-      state.set(record.key, next);
-      try {
-        options.store.update(record.key, { state: nextState, attempts, reconcileRound: round });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        degraded.push({ key: record.key, reason: `outbox update failed: ${message}`, at: clock.now() });
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      audit(record.key, nextState, message);
-      notifyExt(next, nextState);
-      if (nextState === "pending")
-        clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => attempt(next, round));
+      settleDelivered(record, round);
+    } catch (e) {
+      settleFailed(record, round, e);
     }
   };
+  const releaseStale = (record: PersistedDelivery, round: number) => {
+    const next = {
+      ...record,
+      state: "pending" as const,
+      finalized: false,
+      degradedReason: "pre-finalize" as const,
+      reconcileRound: round + 1,
+    };
+    try {
+      writeBack(record, {
+        state: next.state,
+        finalized: false,
+        degradedReason: next.degradedReason,
+        reconcileRound: next.reconcileRound,
+      });
+    } catch (e) {
+      fail(next.key, `outbox update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    state.set(next.key, next);
+    audit(next.key, "pending", "pre-finalize release");
+    notify(next, "pending");
+    attempt(next, next.reconcileRound);
+  };
   return {
-    enqueue(payload) {
-      const existing = state.get(payload.key);
-      if (existing && existing.state !== "dropped" && existing.state !== "abandoned") return;
-      const record: PersistedDelivery = { ...payload, state: "pending", attempts: 0 };
-      persist(record);
-      attempt(record, payload.reconcileRound);
+    enqueue(payload, opts) {
+      const normalized = { ...payload, key: canonicalizeDeliveryKey(payload.key) };
+      const current = state.get(normalized.key) ?? load().get(normalized.key);
+      if (current && !["dropped", "abandoned"].includes(current.state ?? "pending")) return;
+      const record: PersistedDelivery = {
+        ...normalized,
+        state: opts?.hold ? "staged" : "pending",
+        attempts: 0,
+        storageKey: current?.storageKey ?? normalized.key,
+      };
+      if (current && ["dropped", "abandoned"].includes(current.state ?? "pending")) {
+        try {
+          writeBack(current, { ...normalized, state: record.state!, attempts: 0 });
+        } catch (e) {
+          fail(record.key, `revive persist failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        state.set(record.key, record);
+      } else persistPut(record);
+      notify(record, record.state!);
+      if (!opts?.hold) attempt(record, normalized.reconcileRound);
     },
-    /**
-     * Marks a delivered outcome consumed after durable persistence succeeds.
-     * This intentionally closes the only proactive redelivery path; a later
-     * loss of the caller's result relies on explicit snapshot lookup, whose
-     * append-entry persistence is best effort. The deliberate tradeoff is
-     avoiding duplicate notifications after a consumer has retrieved it.
-     */
-    consume(key) {
-      const record = state.get(key) ?? options.store.list().find((x) => x.key === key);
-      if (!record || record.state === "consumed" || record.state === "abandoned") return false;
+    finalize(runId, generation, patch) {
+      const key = deliveryKey(runId, generation);
+      const record = state.get(key) ?? load().get(key);
+      if (!record) return "missing";
+      const current = record.state ?? "pending";
+      if (current === "staged") {
+        const { degradedReason: _oldDegraded, ...withoutDegraded } = record;
+        const next = { ...withoutDegraded, ...patch, state: "pending" as const, finalized: true };
+        try {
+          writeBack(record, {
+            ...patch,
+            state: next.state,
+            finalized: true,
+            degradedReason: undefined,
+          } as unknown as Partial<PersistedDelivery>);
+        } catch (e) {
+          fail(key, `finalize persist failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        state.set(key, next);
+        notify(next, "pending");
+        attempt(next, next.reconcileRound);
+        return "sent";
+      }
       try {
-        options.store.update(key, { state: "consumed" });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        degraded.push({ key, reason: `consume persist failed: ${message}`, at: clock.now() });
+        writeBack(record, patch);
+      } catch (e) {
+        fail(key, `finalize persist failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      state.set(key, { ...record, ...patch });
+      return "late";
+    },
+    settleBatch(keys, ok) {
+      for (const rawKey of keys) {
+        const key = canonicalizeDeliveryKey(rawKey);
+        const record = state.get(key) ?? load().get(key);
+        if (!record) continue;
+        if (ok) settleDelivered(record, record.reconcileRound ?? 0);
+        else settleFailed(record, record.reconcileRound ?? 0, new Error("delivery batch failed"));
+      }
+    },
+    peek(key) {
+      return (state.get(canonicalizeDeliveryKey(key)) ?? load().get(canonicalizeDeliveryKey(key)))?.state;
+    },
+    consume(key) {
+      const k = canonicalizeDeliveryKey(key);
+      const record = state.get(k) ?? load().get(k);
+      if (!record || ["consumed", "abandoned"].includes(record.state ?? "pending")) return false;
+      try {
+        writeBack(record, { state: "consumed" });
+      } catch (e) {
+        fail(k, `consume persist failed: ${e instanceof Error ? e.message : String(e)}`);
         return false;
       }
-      state.set(key, { ...record, state: "consumed" });
-      audit(key, "consumed");
-      notifyExt(record, "consumed");
+      const next = { ...record, state: "consumed" as const };
+      state.set(k, next);
+      audit(k, "consumed");
+      notify(next, "consumed");
       return true;
     },
     reconcile(persisted = options.store.list()) {
       const report: ReconcileReport = { redelivered: [], suppressed: [], abandoned: [] };
-      // Only genuinely-undelivered records are redelivered: "delivered" means
-      // sendMessage already handed the notification to pi with display:true —
-      // redelivering those on every restart duplicates notifications (seen in
-      // the wild: stale completions re-notified after each relaunch). G5b's
-      // at-least-once covers pending/dropped (never handed over); consumed and
-      // abandoned are terminal for delivery.
-      const candidates = persisted
-        .filter((p) => p.state !== "consumed" && p.state !== "abandoned" && p.state !== "delivered")
-        .filter((p) => !state.has(p.key) || state.get(p.key)?.state !== "consumed");
+      const folded = fold(persisted);
       const now = clock.now();
-      const eligible = candidates.filter((p) => {
-        if (now - p.createdAt > ttl) {
-          options.store.update(p.key, { state: "abandoned" });
-          audit(p.key, "abandoned", "reconcile ttl exceeded");
-          notifyExt(p, "abandoned");
-          report.suppressed.push(p.key);
-          return false;
+      for (const record of folded.values()) {
+        const s = record.state ?? "pending";
+        if (["consumed", "abandoned", "delivered"].includes(s)) continue;
+        if (now - record.createdAt > ttl) {
+          try {
+            writeBack(record, { state: "abandoned" });
+          } catch (e) {
+            fail(record.key, `abandon persist failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          state.set(record.key, { ...record, state: "abandoned" });
+          audit(record.key, "abandoned", "reconcile ttl exceeded");
+          notify(record, "abandoned");
+          report.suppressed.push(record.key);
+          continue;
         }
-        if ((p.reconcileRound ?? 0) >= maxRounds) {
-          options.store.update(p.key, { state: "abandoned" });
-          audit(p.key, "abandoned", "reconcile rounds exceeded");
-          notifyExt(p, "abandoned");
-          report.abandoned.push(p.key);
-          return false;
+        if ((record.reconcileRound ?? 0) >= maxRounds) {
+          try {
+            writeBack(record, { state: "abandoned" });
+          } catch (e) {
+            fail(record.key, `abandon persist failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          state.set(record.key, { ...record, state: "abandoned" });
+          audit(record.key, "abandoned", "reconcile rounds exceeded");
+          notify(record, "abandoned");
+          report.abandoned.push(record.key);
+          continue;
         }
-        return true;
-      });
-      eligible.slice(0, maxBatch).forEach((p) => {
-        state.set(p.key, p);
-        attempt(p, (p.reconcileRound ?? 0) + 1);
-        report.redelivered.push(p.key);
-      });
-      if (eligible.length > maxBatch)
-        audit(`summary:${now}`, "delivered", `${eligible.length - maxBatch} deliveries summarized`);
+        if (report.redelivered.length >= maxBatch) continue;
+        if (s === "staged") releaseStale(record, record.reconcileRound ?? 0);
+        else {
+          const next = { ...record, state: "pending" as const };
+          state.set(record.key, next);
+          attempt(next, (record.reconcileRound ?? 0) + 1);
+        }
+        report.redelivered.push(record.key);
+      }
       return report;
     },
     verifyPersisted(keys) {
-      const present = new Set(options.store.list().map((x) => x.key));
-      return { missing: keys.filter((key) => !present.has(key)) };
+      const present = fold(options.store.list());
+      return { missing: keys.filter((k) => !present.has(canonicalizeDeliveryKey(k))) };
     },
     get stats() {
-      const result: Record<DeliveryState, number> = { pending: 0, delivered: 0, consumed: 0, dropped: 0, abandoned: 0 };
+      const result: Record<DeliveryState, number> = {
+        staged: 0,
+        pending: 0,
+        batched: 0,
+        delivered: 0,
+        consumed: 0,
+        dropped: 0,
+        abandoned: 0,
+      };
       for (const r of state.values()) result[r.state ?? "pending"]++;
       return result;
     },

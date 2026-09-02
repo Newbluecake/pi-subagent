@@ -313,6 +313,11 @@ export interface DeliveryPayload {
   diag: DiagSummary;
   createdAt: Millis;
   reconcileRound: number;
+  finalized?: boolean;
+  degradedReason?: "pre-finalize" | "policy-error";
+  structuredPreview?: string;
+  failReason?: string;
+  label?: string;
 }
 export interface RunSnapshot {
   runId: RunId;
