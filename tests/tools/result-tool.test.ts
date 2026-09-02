@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createResultTool } from "../../src/tools/result-tool.js";
 import type { QueryService } from "../../src/service/query-service.js";
 import type { RunSnapshot, UsageDelta } from "../../src/core/types.js";
@@ -195,7 +195,10 @@ describe("pi usage accounting: tool-result usage attach + first-terminal dedupe"
     )) as WithUsage;
     expect(first.usage).toBeDefined();
     expect(second.usage).toBeUndefined();
-    expect(requested).toEqual(["r1", "r1"]);
+    // Count-agnostic: the wait path's live-progress push may query.get() extra
+    // times; the invariant is that every lookup uses the *canonical* id.
+    expect(requested.length).toBeGreaterThanOrEqual(2);
+    expect(requested.every((id) => id === "r1")).toBe(true);
   });
 
   it("does not attach usage while the run is still active", async () => {
@@ -206,5 +209,86 @@ describe("pi usage accounting: tool-result usage attach + first-terminal dedupe"
     const tool = createResultTool({ query: q });
     const result = (await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never)) as WithUsage;
     expect(result.usage).toBeUndefined();
+  });
+});
+
+describe("TUI visibility: renderCall + wait-path partial updates", () => {
+  // Bare-minimum Theme stand-in (same convention as agent-tool.test.ts).
+  const theme = { fg: (_color: string, t: string) => t, bold: (t: string) => t };
+  const ctx = (lastComponent?: unknown) => ({ lastComponent, state: {} });
+  const idleQuery = (): QueryService => ({
+    get: () => undefined,
+    list: () => [],
+    wait: async () => ({ ok: false, reason: "unknown_run" }),
+    waitAll: async () => ({ settled: [], pending: [] }),
+    steer: async () => undefined,
+    stop: async () => false,
+  });
+
+  it("renders the awaited run_id and wait budget instead of a bare tool name", () => {
+    const tool = createResultTool({ query: idleQuery() });
+    const comp = tool.renderCall!({ run_id: "r1", wait: true, wait_ms: 60_000 }, theme as never, ctx() as never);
+    const out = (comp as Text).render(120).join("\n");
+    expect(out).toContain("Get Subagent Result: r1");
+    expect(out).toContain("wait (budget: 1m00s)");
+  });
+
+  it("renders a plain poll without a wait line and tolerates partial streaming args", () => {
+    const tool = createResultTool({ query: idleQuery() });
+    const polled = (tool.renderCall!({ run_id: "r2" }, theme as never, ctx() as never) as Text).render(120).join("\n");
+    expect(polled).toContain("Get Subagent Result: r2");
+    expect(polled).not.toContain("wait (budget");
+    const streaming = (tool.renderCall!({}, theme as never, ctx() as never) as Text).render(120).join("\n");
+    expect(streaming).toContain("Get Subagent Result:");
+  });
+
+  it("streams a waiting header (elapsed/budget) plus the run's progress lines while wait blocks", async () => {
+    const running = completedSnapshot();
+    running.status = "running";
+    running.phase = "streaming";
+    delete (running as { outcome?: unknown }).outcome;
+    const q: QueryService = {
+      ...idleQuery(),
+      get: () => running,
+      wait: async () => ({ ok: true, outcome: completedSnapshot().outcome! }),
+    };
+    const tool = createResultTool({ query: q });
+    const updates: string[] = [];
+    const onUpdate = (u: { content: Array<{ type: string; text?: string }> }) => {
+      updates.push(u.content.map((c) => c.text ?? "").join("\n"));
+    };
+    await tool.execute("tc1", { run_id: "r1", wait: true, wait_ms: 5_000 }, undefined, onUpdate as never, {} as never);
+    expect(updates.length).toBeGreaterThan(0);
+    expect(updates[0]).toContain("waiting for r1");
+    expect(updates[0]).toContain("/ 5s");
+    // buildProgressLines header for the awaited run rides along.
+    expect(updates[0]).toContain("turn 2");
+  });
+
+  it("does not stream partial updates without an onUpdate channel (non-interactive parity)", async () => {
+    const q: QueryService = { ...idleQuery(), wait: async () => ({ ok: true, outcome: completedSnapshot().outcome! }) };
+    const tool = createResultTool({ query: q });
+    const result = await tool.execute("tc1", { run_id: "r1", wait: true }, undefined, undefined as never, {} as never);
+    expect((result.content[0] as { text: string }).text).toContain("done");
+  });
+
+  it("clears the progress interval even when query.wait throws synchronously", async () => {
+    vi.useFakeTimers();
+    try {
+      const q: QueryService = {
+        ...idleQuery(),
+        get: () => undefined,
+        wait: (() => {
+          throw new Error("boom");
+        }) as never,
+      };
+      const tool = createResultTool({ query: q });
+      await expect(
+        tool.execute("tc1", { run_id: "r1", wait: true }, undefined, (() => undefined) as never, {} as never),
+      ).rejects.toThrow("boom");
+      expect(vi.getTimerCount()).toBe(0); // no leaked 1Hz interval
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

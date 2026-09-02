@@ -1,7 +1,9 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
+import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { toPiToolUsage } from "./usage.js";
 
@@ -21,7 +23,9 @@ export const ResultToolParams = Type.Object({
   ),
   wait_ms: Type.Optional(
     Type.Number({
-      description: "Maximum time to wait in milliseconds when wait is true. Defaults to a generous but bounded value.",
+      description:
+        "Maximum time to wait in milliseconds when wait is true. Defaults to the awaited run's remaining " +
+        "time budget plus a short settlement grace, so a default wait normally outlives the run itself.",
     }),
   ),
 });
@@ -49,9 +53,23 @@ export function createResultTool(deps: {
       "Set wait: true to block until the run finishes, up to wait_ms.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
+    /**
+     * Without a renderCall the TUI shows a bare "get_subagent_result ⠦" while
+     * a wait blocks — no hint of *which* run is being awaited or under what
+     * budget. Mirror the Agent tool: surface the key arguments on the card.
+     */
+    renderCall(args, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const title = theme.fg("toolTitle", theme.bold(`Get Subagent Result: ${args?.run_id ?? "…"}`));
+      const meta = args?.wait
+        ? `wait (budget: ${args.wait_ms !== undefined ? formatDuration(args.wait_ms) : "default"})`
+        : undefined;
+      text.setText(meta ? `${title}\n${theme.fg("muted", meta)}` : title);
+      return text;
+    },
     // §2.7: the pi harness may invoke execute() with signal === undefined; the
     // wait path below tolerates that (QueryService.wait's opts.signal is optional).
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, onUpdate) {
       const resolved = deps.resolveRun?.(params.run_id);
       if (resolved && !resolved.ok) throw new Error(resolved.error);
       const runId = resolved?.ok ? resolved.runId : params.run_id;
@@ -77,17 +95,49 @@ export function createResultTool(deps: {
           },
         };
       }
-      const waited = await deps.query.wait(runId, {
-        ...(params.wait_ms === undefined ? {} : { waitMs: params.wait_ms }),
-        ...(signal ? { signal } : {}),
-      });
+      // Live visibility while the (bounded) wait blocks: same 1 Hz partial-
+      // update side channel as the Agent tool's foreground path — header with
+      // elapsed/budget plus the awaited run's own progress snapshot. Purely a
+      // read-only display concern; the wait semantics are unchanged.
+      const startedAt = Date.now();
+      const push = () => {
+        if (!onUpdate) return;
+        const now = Date.now();
+        const budget = params.wait_ms !== undefined ? formatDuration(params.wait_ms) : "default budget";
+        const snap = deps.query.get(runId);
+        const lines = [
+          `⏳ waiting for ${runId} · ${formatDuration(now - startedAt)} / ${budget}`,
+          ...(snap && !snap.outcome ? buildProgressLines(snap, now) : []),
+        ];
+        onUpdate({
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: { runId, progress: lines },
+        });
+      };
+      const timer = onUpdate ? setInterval(push, 1000) : undefined;
+      (timer as { unref?: () => void } | undefined)?.unref?.();
+      push();
+      // try/finally rather than .finally(): a synchronous throw from a
+      // non-async QueryService stub would otherwise skip cleanup entirely
+      // (the rejection would surface before the .finally chain existed).
+      let waited;
+      try {
+        waited = await deps.query.wait(runId, {
+          ...(params.wait_ms === undefined ? {} : { waitMs: params.wait_ms }),
+          ...(signal ? { signal } : {}),
+        });
+      } finally {
+        if (timer) clearInterval(timer);
+      }
       if (!waited.ok) {
         const reason =
           waited.reason === "unknown_run"
             ? `unknown run_id: ${params.run_id}`
             : waited.reason === "aborted"
               ? "wait was aborted"
-              : `wait timed out after ${params.wait_ms ?? "the default budget"}ms`;
+              : params.wait_ms !== undefined
+                ? `wait timed out after ${params.wait_ms}ms`
+                : "wait timed out after the default budget (the run's remaining deadline + grace)";
         throw new Error(reason);
       }
       return {

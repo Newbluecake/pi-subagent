@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
@@ -29,6 +30,15 @@ export function createSteerTool(deps: {
     description: "Send a follow-up instruction to a currently running subagent started with the Agent tool.",
     promptSnippet: "steer_subagent(run_id, text) - send a follow-up instruction to a running subagent",
     parameters: SteerToolParams,
+    /** Same rationale as get_subagent_result's renderCall: show *which* run is being steered and a preview of the instruction, not a bare tool name. */
+    renderCall(args, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const title = theme.fg("toolTitle", theme.bold(`Steer Subagent: ${args?.run_id ?? "…"}`));
+      const preview = args?.text?.replace(/\s+/g, " ").trim();
+      const clipped = preview && preview.length > 80 ? `${preview.slice(0, 79)}…` : preview;
+      text.setText(clipped ? `${title}\n${theme.fg("muted", clipped)}` : title);
+      return text;
+    },
     async execute(_toolCallId, params) {
       const resolved = deps.resolveRun?.(params.run_id);
       if (resolved && !resolved.ok) throw new Error(resolved.error);

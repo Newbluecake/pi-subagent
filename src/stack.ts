@@ -229,7 +229,15 @@ export function buildSessionStack(
     },
   });
   spawnRef.current = spawn;
-  const query = createQueryService({ registry: createLiveRunRegistry(spawn, store), runner, clock: systemClock });
+  // Static fallback for the dynamic per-run wait default (only reached when a
+  // snapshot has no deadlineAt yet): the configured run budget + abort grace +
+  // settlement headroom, so it tracks `/agent settings` budget changes.
+  const query = createQueryService({
+    registry: createLiveRunRegistry(spawn, store),
+    runner,
+    clock: systemClock,
+    defaultWaitMs: settings.budget.totalMs + settings.budget.abortGraceMs + 30_000,
+  });
   // M9: created early — the fleet widget below lists in-flight workflows.
   const workflowActivity = createWorkflowActivityRegistry();
   // M-E: live usage broadcaster (channel "subagent:usage", 1Hz while active).

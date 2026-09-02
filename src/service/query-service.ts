@@ -25,6 +25,13 @@ export interface QueryServiceDeps {
 }
 const terminal = (status: RunStatus) =>
   status === "completed" || status === "failed" || status === "timed_out" || status === "aborted";
+/**
+ * Grace added on top of the awaited run's own deadline when deriving the
+ * *default* wait budget: the run settles at deadlineAt, then needs abort
+ * grace + reap + bookkeeping before its outcome lands in the registry. A
+ * default wait should outlive that settlement, not race it.
+ */
+export const WAIT_SETTLEMENT_GRACE_MS = 30_000;
 export function createQueryService(deps: QueryServiceDeps): QueryService {
   const clock = deps.clock ?? {
     now: () => Date.now(),
@@ -38,7 +45,17 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       const snapshot = deps.registry.get(id);
       if (!snapshot) return { ok: false, reason: "unknown_run" };
       if (snapshot.outcome && terminal(snapshot.status)) return { ok: true, outcome: snapshot.outcome };
-      const waitMs = opts.waitMs ?? deps.defaultWaitMs ?? 1_800_000;
+      // Default wait budget, in precedence order: explicit opts.waitMs →
+      // dynamic "the awaited run's remaining lifetime + settlement grace"
+      // (deadlineAt is absolute, set at enqueue — core/types.ts ①) → host
+      // static default → hardcoded 30min. The dynamic default means a bare
+      // wait normally settles WITH the run instead of timing out earlier
+      // (e.g. a 2h timeout_ms run awaited under a 30min static default).
+      const remaining =
+        snapshot.deadlines.deadlineAt !== undefined
+          ? Math.max(0, snapshot.deadlines.deadlineAt - clock.now()) + WAIT_SETTLEMENT_GRACE_MS
+          : undefined;
+      const waitMs = opts.waitMs ?? remaining ?? deps.defaultWaitMs ?? 1_800_000;
       const waiter = new Promise<RunOutcome>((resolve) => {
         const poll = () => {
           const current = deps.registry.get(id);
