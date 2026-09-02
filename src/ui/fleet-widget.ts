@@ -418,7 +418,15 @@ export class FleetWidgetController {
       // M-C fix: setWidget lines are plain strings — a long label + tool trail
       // would wrap and grow the widget by extra lines. Truncate to the live
       // terminal width (ANSI-safe), falling back to a conservative 120 cols.
-      const width = Math.max(20, (process.stdout?.columns ?? 120) - 1);
+      //
+      // Flicker fix: pi renders each widget string as `new Text(line, /*paddingX*/ 1, 0)`,
+      // so the wrap threshold is terminal columns − 2 (1 col of padding each
+      // side), NOT columns − 1. Truncating to columns − 1 left every max-width
+      // line exactly 1 col past the threshold: it wrapped onto a dangling
+      // second line, and as live durations/trails changed width each 1Hz tick
+      // the wrap toggled on/off → widget height oscillated → every line below
+      // (editor, footer) reflowed every second — the "agent tree flicker".
+      const width = Math.max(20, (process.stdout?.columns ?? 120) - 2);
       const truncated = lines?.map((line) => truncateToWidth(line, width));
       this.setWidget!(FLEET_WIDGET_KEY, truncated, { placement: "aboveEditor" });
     } catch {
