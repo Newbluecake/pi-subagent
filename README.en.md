@@ -14,7 +14,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
 - **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
-- **Foreground auto-backgrounding** — after `foregroundAutoBackgroundMs` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
+- **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
@@ -68,20 +68,24 @@ Retries get their own backoff phase and don't trip the idle timer; parallel tool
 
 User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, never throws).
 
+`/agent settings` opens an **interactive settings editor** (overlay: ↑↓ to move, Enter to edit/toggle, Space to flip booleans, `r` to reset to the default, Esc to close; every accepted change is persisted immediately). The text forms stay available for scripting: `/agent settings list` / `set <key> <value>` / `reset <key>`, plus `/agent budget` as a `budget.*`-scoped alias.
+
+**Every duration is configured in whole seconds** (keys end in `S`). Legacy millisecond keys (`*Ms`) are migrated on first load: values divisible by 1000 are converted, written back and WARNed about; anything else is dropped in favour of the default (the loader never throws).
+
 ```jsonc
 {
   "concurrencyLimit": 6,
   "fleetWidget": true, // the agent tree above the editor
   "maxNestedDepth": 2, // subagent spawning subagents
-  "foregroundAutoBackgroundMs": 600000, // foreground auto-background threshold; 0 disables
+  "foregroundAutoBackgroundS": 600, // foreground auto-background threshold; 0 disables
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {
-    "idleMs": 240000, // model-turn silence before timeout
-    "toolMs": 600000, // single tool call cap
-    "totalMs": 1800000, // whole-run cap
-    // … queueWaitMs, startupMs, bindMs, firstEventMs, compactionMs,
-    //   abortGraceMs, steerMs, reapMs, startupRetries, retrySlackMs
+    "idleS": 240, // model-turn silence before timeout
+    "toolS": 600, // single tool call cap
+    "totalS": 1800, // whole-run cap
+    // … queueWaitS, startupS, bindS, firstEventS, compactionS,
+    //   abortGraceS, steerS, reapS, startupRetries, retrySlackS
   },
 }
 ```

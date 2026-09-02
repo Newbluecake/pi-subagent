@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
+import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
 
 /**
  * CC3 (workflow design §3.2/§8.2): forward-declared budget shape for the
@@ -54,7 +55,6 @@ export interface WorkflowSettings {
 export interface AgentSettings {
   concurrencyLimit: number;
   budget: DeadlineBudget;
-  startupMs?: number;
   deliveryAttempts: number;
   deliveryBackoffMs: number;
   /** Foreground Agent calls auto-background after this duration; 0 disables. */
@@ -108,9 +108,51 @@ export function mergeSettings(base: Partial<AgentSettings> = {}, config?: AgentT
     budget: mergeBudget(DEFAULT_SETTINGS.budget, base.budget, config?.budgetOverride),
   };
 }
+/**
+ * Every dotted path in `AgentSettings` that holds a **duration**, named in the
+ * internal millisecond form. The settings *file* stores each of these under
+ * `secondsKeyOf(path)` (`budget.idleMs` → `budget.idleS`) as integer seconds;
+ * see `config/time-units.ts` for the boundary rules.
+ *
+ * Derived from the two budget defaults so a new timeout field cannot be added
+ * without also being unit-converted (the only hand-written entries are the
+ * flat ones). `budget.startupRetries` is a retry *count*, not a duration, and
+ * is excluded by the `Ms` suffix test.
+ */
+export const TIME_SETTING_MS_PATHS: readonly string[] = [
+  ...Object.keys(DEFAULT_BUDGET)
+    .filter((k) => k.endsWith("Ms"))
+    .map((k) => `budget.${k}`),
+  "deliveryBackoffMs",
+  "foregroundAutoBackgroundMs",
+  "reconcileTtlMs",
+  "coalesceWindowMs",
+  "ackWindowMs",
+  "worktree.gitTimeoutMs",
+  "workflow.replayTtlMs",
+  ...Object.keys(DEFAULT_WORKFLOW_BUDGET)
+    .filter((k) => k.endsWith("Ms"))
+    .map((k) => `workflow.budget.${k}`),
+];
+
+const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
+
+/** True for the *storage/display* key of a duration field (`budget.idleS`, `ackWindowS`, …). */
+export function isTimeSettingKey(secondsKey: string): boolean {
+  return TIME_SETTING_SECONDS_PATHS.has(secondsKey);
+}
+
+/**
+ * Parse a settings-file object into the internal (millisecond) `AgentSettings`.
+ *
+ * Time fields arrive as integer seconds under `*S` keys and are converted to
+ * milliseconds up front by `normalizeTimeUnits`, so every field validator
+ * below still reasons in milliseconds. Legacy `*Ms` keys are tolerated
+ * silently here; `loadSettingsFromFile` is the one that WARNs and rewrites.
+ */
 export function loadSettings(source: unknown): AgentSettings {
   if (source === null || typeof source !== "object") return { ...DEFAULT_SETTINGS, budget: { ...DEFAULT_BUDGET } };
-  const value = source as Record<string, unknown>;
+  const value = normalizeTimeUnits(source as Record<string, unknown>, TIME_SETTING_MS_PATHS);
   const budget =
     value.budget && typeof value.budget === "object" ? (value.budget as Partial<DeadlineBudget>) : undefined;
   return mergeSettings({
@@ -210,17 +252,50 @@ export function defaultSettingsPath(): string {
 /**
  * Load user settings from a JSON file. Missing file → defaults; malformed
  * file → WARN + defaults. Never throws.
+ *
+ * This is also the single migration point for the millisecond → second storage
+ * rename (requirement 2): it is the only place that holds the raw JSON, the
+ * file path, write access and a console at the same time. Legacy `*Ms` keys
+ * are rewritten to integer-second `*S` keys, the user is told what happened,
+ * and the file is written back so the migration runs once. A failed write-back
+ * is only a WARN — the in-memory settings are already migrated.
  */
 export function loadSettingsFromFile(path: string = defaultSettingsPath()): AgentSettings {
   try {
     if (!existsSync(path)) return loadSettings(undefined);
-    return loadSettings(JSON.parse(readFileSync(path, "utf8")));
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return loadSettings(parsed);
+    return loadSettings(migrateSettingsFileTimeUnits(parsed as Record<string, unknown>, path));
   } catch (error) {
     console.warn(
       `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
     );
     return loadSettings(undefined);
   }
+}
+
+/**
+ * Rewrite legacy millisecond keys in a just-read settings file to the new
+ * integer-second keys, WARN about every conversion/drop, and persist the
+ * result. Returns the migrated object (used even when the write fails).
+ * Never throws — same field-level tolerance as the rest of the loader.
+ */
+function migrateSettingsFileTimeUnits(raw: Record<string, unknown>, path: string): Record<string, unknown> {
+  const migration = migrateTimeUnitsToSeconds(raw, TIME_SETTING_MS_PATHS);
+  if (!migration.changed) return raw;
+  if (migration.converted.length)
+    console.warn(
+      `[pi-subagent] ${path}: time settings are now stored in seconds; migrated ${migration.converted.length} key(s): ${migration.converted.join(", ")}`,
+    );
+  for (const warning of migration.warnings) console.warn(`[pi-subagent] ${path}: ${warning}`);
+  try {
+    writeFileSync(path, JSON.stringify(migration.value, null, 2) + "\n", "utf8");
+  } catch (error) {
+    console.warn(
+      `[pi-subagent] failed to write the migrated ${path}: ${error instanceof Error ? error.message : String(error)}; the migration will be retried next time.`,
+    );
+  }
+  return migration.value;
 }
 
 /**

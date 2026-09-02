@@ -1,25 +1,28 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import type { DeadlineBudget, RunSnapshot, UsageDelta } from "../core/types.js";
-import { DEFAULT_BUDGET } from "../core/deadline.js";
-import { DEFAULT_SETTINGS, type AgentSettings } from "../config/settings.js";
+import type { RunSnapshot, UsageDelta } from "../core/types.js";
+import {
+  SETTING_SPECS,
+  currentOf,
+  defaultOf,
+  formatSettingValue,
+  isKnownSettingKey,
+  isOverridden,
+  parseSettingValue,
+  resetSetting,
+  settingKeys,
+  writeSetting,
+  type SettingsStore,
+} from "../config/setting-specs.js";
 import type { OrphanRegistry } from "../runtime/reaper.js";
 import type { Notifier } from "../delivery/notifier.js";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
 import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
+import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 
-export interface SettingsCommandDeps {
-  /** Live AgentSettings object — mutated in place. `budget.*` values are
-   *  read at spawn time (spawn-service mergeBudget), so they apply to new
-   *  runs immediately; all other settings are captured at activate/session
-   *  build and take effect after `/reload`. */
-  current: AgentSettings;
-  /** Persist one override to the settings file (undefined = remove). Returns an error message or undefined. */
-  persist: (dottedKey: string, value: unknown) => string | undefined;
-  /** Settings file path, shown in messages. */
-  path: string;
-}
+/** Live settings object + persistence port (see config/setting-specs.ts). */
+export type SettingsCommandDeps = SettingsStore;
 
 export interface StatusCommandDeps {
   query: QueryService;
@@ -43,24 +46,23 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent settings [set <key> <value>|reset <key>]` views/tunes extension settings (budget.* applies to new runs immediately, the rest after /reload). The live agent tree is pinned above the editor while runs are active.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent settings` opens an interactive settings editor (`settings list` / `set <key> <value>` / `reset <key>` stay available for scripts; budget.* applies to new runs immediately, the rest after /reload). Durations are configured in seconds. The live agent tree is pinned above the editor while runs are active.",
     getArgumentCompletions: (argumentPrefix: string) => {
       const settingsAction = argumentPrefix.trimStart().match(/^(settings|budget)\s+(set|reset)\s+(\S*)$/);
       if (settingsAction) {
         const [, scope, action, partial = ""] = settingsAction;
-        return Object.keys(SETTING_SPECS)
-          .filter((k) => (scope === "budget" ? k.startsWith("budget.") : true))
+        return settingKeys(scope === "budget")
           .filter((k) => k.startsWith(scope === "budget" ? `budget.${partial}` : partial))
           .map((k) => ({
             value: scope === "budget" ? `budget ${action} ${k.slice("budget.".length)}` : `settings ${action} ${k}`,
             label: k,
-            description: `default ${formatSettingValue(defaultOf(k))}`,
+            description: `default ${formatSettingValue(defaultOf(SETTING_SPECS[k]!))}`,
           }));
       }
       return [
         { value: "status", label: "status", description: "Text diagnostics (default)" },
         { value: "costs", label: "costs", description: "Per-run cost breakdown" },
-        { value: "settings", label: "settings", description: "View/tune extension settings (set/reset)" },
+        { value: "settings", label: "settings", description: "Interactive settings editor (or set/reset/list)" },
         { value: "budget", label: "budget", description: "Alias: settings scoped to budget.*" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim()));
     },
@@ -83,6 +85,14 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
         // `/agent budget k...` is a scoped alias: keys are budget.* leaves.
         const rest = tokens.slice(1);
         if (sub === "budget" && rest[0] && rest[0] !== "list" && rest[1]) rest[1] = `budget.${rest[1]}`;
+        // No arguments in an interactive session → the overlay editor. Every
+        // other form (and every non-TUI mode) keeps the text behaviour, so
+        // scripts and `pi -p` are unaffected — the capability probe is
+        // synchronous so those paths never even yield a microtask.
+        if (rest.length === 0 && deps.settings && canOpenSettingsEditor(ctx)) {
+          const opened = await openSettingsEditor(ctx, deps.settings, { budgetOnly: sub === "budget" });
+          if (opened) return;
+        }
         ctx.ui.notify(handleSettings(deps.settings, rest, sub === "budget"), "info");
         return;
       }
@@ -97,157 +107,49 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
   };
 }
 
-type SettingSpec =
-  | { kind: "number"; min?: number; integer?: boolean }
-  | { kind: "boolean" }
-  | { kind: "enum"; values: readonly string[] }
-  | { kind: "string" };
-
-const MS: SettingSpec = { kind: "number", min: 0 };
-const COUNT: SettingSpec = { kind: "number", min: 0, integer: true };
-const BOOL: SettingSpec = { kind: "boolean" };
-
-/**
- * The settable surface of `/agent settings`. Order = listing order.
- * `budget.*` keys double as run-timeout knobs; everything else is captured
- * at activate/session build, so it only takes effect after `/reload`.
- * Deliberately excluded: workflow.budget (nested object, no flat syntax).
- */
-const SETTING_SPECS: Record<string, SettingSpec> = {
-  ...Object.fromEntries(
-    (Object.keys(DEFAULT_BUDGET) as (keyof DeadlineBudget)[]).map((k) => [
-      `budget.${k}`,
-      k === "startupRetries" ? COUNT : MS,
-    ]),
-  ),
-  concurrencyLimit: COUNT,
-  maxNestedDepth: COUNT,
-  rememberAgents: BOOL,
-  fleetWidget: BOOL,
-  deliveryAttempts: { kind: "number", min: 1, integer: true },
-  deliveryBackoffMs: MS,
-  reconcileTtlMs: MS,
-  foregroundAutoBackgroundMs: MS,
-  maxReconcileRounds: COUNT,
-  maxReconcileBatch: { kind: "number", min: 1, integer: true },
-  coalesceWindowMs: MS,
-  coalesceMaxBatch: { kind: "number", min: 1, integer: true },
-  ackWindowMs: MS,
-  "worktree.enabled": BOOL,
-  "worktree.gitTimeoutMs": MS,
-  "workflow.enabled": BOOL,
-  "workflow.replayTtlMs": MS,
-  "workflow.replayScope": { kind: "enum", values: ["chain", "content"] },
-  "workflow.runawayPolicy": { kind: "enum", values: ["diagnose_only", "terminate_on_stall"] },
-  "workflow.journalDir": { kind: "string" },
-};
-
-function getPath(root: unknown, dottedKey: string): unknown {
-  let node = root;
-  for (const segment of dottedKey.split(".")) {
-    if (node === null || typeof node !== "object") return undefined;
-    node = (node as Record<string, unknown>)[segment];
-  }
-  return node;
-}
-
-function setPath(root: Record<string, unknown>, dottedKey: string, value: unknown): void {
-  const segments = dottedKey.split(".");
-  let node = root;
-  for (const segment of segments.slice(0, -1)) node = node[segment] as Record<string, unknown>;
-  const leaf = segments[segments.length - 1]!;
-  if (value === undefined) delete node[leaf];
-  else node[leaf] = value;
-}
-
-function defaultOf(dottedKey: string): unknown {
-  return getPath(DEFAULT_SETTINGS, dottedKey);
-}
-
-function formatSettingValue(value: unknown): string {
-  return value === undefined ? "(unset)" : String(value);
-}
-
-function parseSettingValue(
-  spec: SettingSpec,
-  raw: string,
-): { ok: true; value: unknown } | { ok: false; error: string } {
-  switch (spec.kind) {
-    case "number": {
-      const value = Number(raw);
-      if (!Number.isFinite(value) || value < (spec.min ?? 0) || (spec.integer && !Number.isInteger(value)))
-        return {
-          ok: false,
-          error: `expected a ${spec.integer ? "integer" : "number"} >= ${spec.min ?? 0}`,
-        };
-      return { ok: true, value };
-    }
-    case "boolean": {
-      const v = raw.toLowerCase();
-      if (["true", "1", "yes", "on"].includes(v)) return { ok: true, value: true };
-      if (["false", "0", "no", "off"].includes(v)) return { ok: true, value: false };
-      return { ok: false, error: "expected true/false" };
-    }
-    case "enum":
-      return spec.values.includes(raw)
-        ? { ok: true, value: raw }
-        : { ok: false, error: `expected one of: ${spec.values.join(", ")}` };
-    case "string":
-      return raw ? { ok: true, value: raw } : { ok: false, error: "expected a non-empty string" };
-  }
-}
-
-function renderSettings(deps: SettingsCommandDeps, budgetOnly: boolean): string {
-  const keys = Object.keys(SETTING_SPECS).filter((k) => !budgetOnly || k.startsWith("budget."));
+function renderSettings(store: SettingsStore, budgetOnly: boolean): string {
+  const keys = settingKeys(budgetOnly);
   const width = Math.max(...keys.map((k) => k.length));
   const lines = keys.map((k) => {
-    const cur = getPath(deps.current, k);
-    const def = defaultOf(k);
-    const mark = cur !== def ? ` (default ${formatSettingValue(def)})` : "";
-    return `  ${k.padEnd(width)}  ${formatSettingValue(cur)}${mark}`;
+    const spec = SETTING_SPECS[k]!;
+    const mark = isOverridden(store.current, spec) ? ` (default ${formatSettingValue(defaultOf(spec))})` : "";
+    return `  ${k.padEnd(width)}  ${formatSettingValue(currentOf(store.current, spec))}${mark}`;
   });
   const usage = budgetOnly
-    ? "`/agent budget set <key> <value>` / `reset <key>` (budget.* keys). Applies to new runs immediately; in-flight runs keep the budget armed at their start. 0 disables a phase timeout (budget.totalMs: 0 = no overall cap)."
-    : "`/agent settings set <key> <value>` / `reset <key>`. budget.* applies to new runs immediately; every other key is persisted but takes effect after /reload. All changes persist to the settings file.";
-  return [`Extension settings — ${deps.path}:`, ...lines, "", usage].join("\n");
+    ? "`/agent budget` opens the interactive editor; `/agent budget set <key> <value>` / `reset <key>` (budget.* keys) stay scriptable. Durations are seconds. Applies to new runs immediately; in-flight runs keep the budget armed at their start. 0 disables a phase timeout (budget.totalS: 0 = no overall cap)."
+    : "`/agent settings` opens the interactive editor; `set <key> <value>` / `reset <key>` / `list` stay scriptable. Durations are seconds (keys end in `S`). budget.* applies to new runs immediately; every other key is persisted but takes effect after /reload. All changes persist to the settings file.";
+  return [`Extension settings — ${store.path}:`, ...lines, "", usage].join("\n");
 }
 
-function handleSettings(deps: SettingsCommandDeps | undefined, args: string[], budgetOnly: boolean): string {
-  if (!deps) return "Settings command unavailable: the extension host did not wire settings persistence.";
+function handleSettings(store: SettingsStore | undefined, args: string[], budgetOnly: boolean): string {
+  if (!store) return "Settings command unavailable: the extension host did not wire settings persistence.";
   const [action, key, ...restRaw] = args;
   const command = budgetOnly ? "budget" : "settings";
-  if (!action || action === "list") return renderSettings(deps, budgetOnly);
+  if (!action || action === "list") return renderSettings(store, budgetOnly);
   if (action !== "set" && action !== "reset")
-    return `Unknown ${command} action "${action}". Usage: /agent ${command} [set <key> <value>|reset <key>]`;
-  if (!key || !Object.hasOwn(SETTING_SPECS, key) || (budgetOnly && !key.startsWith("budget.")))
+    return `Unknown ${command} action "${action}". Usage: /agent ${command} [set <key> <value>|reset <key>|list]`;
+  if (!key || !isKnownSettingKey(key, budgetOnly))
     return (
       `Unknown ${command} key "${key ?? ""}". Valid keys: ` +
-      Object.keys(SETTING_SPECS)
-        .filter((k) => !budgetOnly || k.startsWith("budget."))
+      settingKeys(budgetOnly)
         .map((k) => (budgetOnly ? k.slice("budget.".length) : k))
         .join(", ")
     );
   const spec = SETTING_SPECS[key]!;
-  const live = key.startsWith("budget.");
-  const effect = live ? "applies to new runs immediately" : "takes effect after /reload";
   if (action === "reset") {
-    const def = defaultOf(key);
-    setPath(deps.current as unknown as Record<string, unknown>, key, def);
-    const err = deps.persist(key, undefined);
+    const result = resetSetting(store, key);
     return (
-      `${key} reset to default ${formatSettingValue(def)} (${effect}). ` +
-      (err ? `Persist failed: ${err}` : `Persisted to ${deps.path}.`)
+      `${key} reset to default ${result.next} (${result.effect}). ` +
+      (result.persistError ? `Persist failed: ${result.persistError}` : `Persisted to ${store.path}.`)
     );
   }
   const raw = restRaw.join(" ");
   const parsed = parseSettingValue(spec, raw);
   if (!parsed.ok) return `Invalid value "${raw}" for ${key}: ${parsed.error}.`;
-  const prev = getPath(deps.current, key);
-  setPath(deps.current as unknown as Record<string, unknown>, key, parsed.value);
-  const err = deps.persist(key, parsed.value);
+  const result = writeSetting(store, key, parsed);
   return (
-    `${key}: ${formatSettingValue(prev)} → ${formatSettingValue(parsed.value)} (${effect}). ` +
-    (err ? `Persist failed: ${err}` : `Persisted to ${deps.path}.`)
+    `${key}: ${result.previous} → ${result.next} (${result.effect}). ` +
+    (result.persistError ? `Persist failed: ${result.persistError}` : `Persisted to ${store.path}.`)
   );
 }
 

@@ -249,40 +249,54 @@ describe("/agent settings subcommand", () => {
   function run(d: unknown, args: string): string {
     const cmd = createStatusCommand(d as never);
     let seen = "";
-    void cmd.handler(args, { ui: { notify: (m: string) => (seen = m) } } as never);
+    void cmd.handler(args, { mode: "print", ui: { notify: (m: string) => (seen = m) } } as never);
     return seen;
   }
 
-  it("lists all settings and marks overrides", () => {
+  it("lists all settings in seconds and marks overrides", () => {
     const { d, current } = settingsDeps();
-    current.budget.idleMs = 600000;
+    current.budget.idleMs = 600_000;
     const out = run(d, "settings");
-    expect(out).toContain("budget.idleMs");
-    expect(out).toContain("600000 (default 240000)");
+    expect(out).toContain("budget.idleS");
+    expect(out).not.toContain("budget.idleMs");
+    expect(out).toContain("600 (default 240)");
     expect(out).toContain("concurrencyLimit");
     expect(out).toContain("worktree.enabled");
     expect(out).toContain("workflow.runawayPolicy");
+    // workflow.budget.* is now editable and shows its effective default
+    expect(out).toContain("workflow.budget.gateS");
+    expect(out).toContain("Durations are seconds");
   });
 
   it("18: exposes both coalescing settings through the whitelist and validates values", () => {
     const { d, current } = settingsDeps();
     const listing = run(d, "settings");
-    expect(listing).toContain("coalesceWindowMs");
+    expect(listing).toContain("coalesceWindowS");
     expect(listing).toContain("coalesceMaxBatch");
-    expect(listing).toContain("ackWindowMs");
-    expect(run(d, "settings set coalesceWindowMs 500")).toContain("coalesceWindowMs");
-    expect(current.coalesceWindowMs).toBe(500);
+    expect(listing).toContain("ackWindowS");
+    expect(run(d, "settings set coalesceWindowS 2")).toContain("coalesceWindowS");
+    expect(current.coalesceWindowMs).toBe(2_000);
+    // the 5000ms ceiling is a 5-second ceiling in the input domain
+    expect(run(d, "settings set coalesceWindowS 6")).toContain("between 0 and 5 seconds");
+    expect(current.coalesceWindowMs).toBe(2_000);
     expect(run(d, "settings set coalesceMaxBatch 0")).toContain("Invalid value");
     expect(current.coalesceMaxBatch).toBe(DEFAULT_SETTINGS.coalesceMaxBatch);
   });
 
-  it("budget.* set mutates live settings, persists, and reports immediate effect", () => {
+  it("budget.* set takes seconds, mutates live ms settings, persists seconds, and reports immediate effect", () => {
     const { d, persisted, current } = settingsDeps();
-    const out = run(d, "settings set budget.idleMs 600000");
-    expect(current.budget.idleMs).toBe(600000);
-    expect(persisted).toEqual([["budget.idleMs", 600000]]);
-    expect(out).toContain("240000 → 600000");
+    const out = run(d, "settings set budget.idleS 600");
+    expect(current.budget.idleMs).toBe(600_000);
+    expect(persisted).toEqual([["budget.idleS", 600]]);
+    expect(out).toContain("240 → 600");
     expect(out).toContain("applies to new runs immediately");
+  });
+
+  it("rejects fractional seconds for duration keys", () => {
+    const { d, persisted, current } = settingsDeps();
+    expect(run(d, "settings set budget.idleS 1.5")).toContain("expected an integer >= 0 seconds");
+    expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
+    expect(persisted).toEqual([]);
   });
 
   it("non-budget set persists but reports /reload", () => {
@@ -293,30 +307,37 @@ describe("/agent settings subcommand", () => {
     expect(out).toContain("takes effect after /reload");
   });
 
-  it("supports nested booleans, enums, and strings", () => {
-    const { d, current } = settingsDeps();
+  it("supports nested booleans, enums, strings, and nested workflow budgets", () => {
+    const { d, persisted, current } = settingsDeps();
     run(d, "settings set worktree.enabled on");
     expect(current.worktree.enabled).toBe(true);
+    run(d, "settings set worktree.gitTimeoutS 45");
+    expect(current.worktree.gitTimeoutMs).toBe(45_000);
     run(d, "settings set workflow.replayScope content");
     expect(current.workflow.replayScope).toBe("content");
     expect(run(d, "settings set workflow.replayScope bogus")).toContain("expected one of: chain, content");
     run(d, "settings set workflow.journalDir /tmp/journal");
     expect(current.workflow.journalDir).toBe("/tmp/journal");
+    run(d, "settings set workflow.budget.gateS 120");
+    expect(current.workflow.budget.gateMs).toBe(120_000);
+    expect(persisted).toContainEqual(["workflow.budget.gateS", 120]);
   });
 
   it("reset restores the default and removes the override", () => {
     const { d, persisted, current } = settingsDeps();
-    current.budget.idleMs = 600000;
-    const out = run(d, "settings reset budget.idleMs");
+    current.budget.idleMs = 600_000;
+    const out = run(d, "settings reset budget.idleS");
     expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
-    expect(persisted).toEqual([["budget.idleMs", undefined]]);
-    expect(out).toContain("reset to default");
+    expect(persisted).toEqual([["budget.idleS", undefined]]);
+    expect(out).toContain("reset to default 240");
   });
 
   it("rejects unknown keys and bad values without touching state", () => {
     const { d, persisted, current } = settingsDeps();
     expect(run(d, "settings set nope 1")).toContain("Unknown settings key");
-    expect(run(d, "settings set budget.idleMs -5")).toContain("Invalid value");
+    // the old millisecond key names are gone from the CLI surface
+    expect(run(d, "settings set budget.idleMs 600000")).toContain("Unknown settings key");
+    expect(run(d, "settings set budget.idleS -5")).toContain("Invalid value");
     expect(run(d, "settings set budget.startupRetries 1.5")).toContain("Invalid value");
     expect(run(d, "settings set fleetWidget maybe")).toContain("expected true/false");
     expect(run(d, "settings frobnicate")).toContain("Unknown settings action");
@@ -327,22 +348,109 @@ describe("/agent settings subcommand", () => {
   it("reports persist failures but keeps the in-memory change", () => {
     const { d, current } = settingsDeps();
     d.settings.persist = () => "disk full";
-    const out = run(d, "settings set budget.idleMs 1");
-    expect(current.budget.idleMs).toBe(1);
+    const out = run(d, "settings set budget.idleS 1");
+    expect(current.budget.idleMs).toBe(1_000);
     expect(out).toContain("Persist failed: disk full");
   });
 
   it("/agent budget alias scopes keys to budget.*", () => {
     const { d, persisted, current } = settingsDeps();
-    const out = run(d, "budget set idleMs 600000");
-    expect(current.budget.idleMs).toBe(600000);
-    expect(persisted).toEqual([["budget.idleMs", 600000]]);
+    const out = run(d, "budget set idleS 600");
+    expect(current.budget.idleMs).toBe(600_000);
+    expect(persisted).toEqual([["budget.idleS", 600]]);
     expect(out).toContain("applies to new runs immediately");
     // alias 下非 budget key 被拒绝
     expect(run(d, "budget set fleetWidget false")).toContain("Unknown budget key");
     // 列出时只显示 budget 行
     const list = run(d, "budget");
-    expect(list).toContain("budget.idleMs");
+    expect(list).toContain("budget.idleS");
     expect(list).not.toContain("fleetWidget");
+  });
+
+  it("tab completion offers second-valued keys with their second defaults", () => {
+    const cmd = createStatusCommand(settingsDeps().d as never);
+    const items = cmd.getArgumentCompletions?.("settings set budget.idle", 0) as
+      Array<{ value: string; label: string; description: string }> | undefined;
+    expect(items?.map((i) => i.label)).toEqual(["budget.idleS"]);
+    expect(items?.[0]?.description).toBe("default 240");
+  });
+});
+
+/**
+ * Requirement 1: `/agent settings` with no arguments opens the interactive
+ * overlay editor in TUI mode, and degrades to the text listing everywhere
+ * else (print/rpc/json, or a pi without `ui.custom`).
+ */
+describe("/agent settings interactive editor wiring", () => {
+  function editorDeps() {
+    const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    return {
+      ...deps([]),
+      settings: { current, persist: () => undefined, path: "/tmp/test-pi-subagent.json" },
+    };
+  }
+
+  it("opens the overlay editor in TUI mode and notifies nothing", async () => {
+    const notified: string[] = [];
+    let factory: unknown;
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify: (m: string) => notified.push(m),
+        custom: async (f: unknown) => {
+          factory = f;
+          return undefined;
+        },
+      },
+    };
+    await createStatusCommand(editorDeps() as never).handler("settings", ctx as never);
+    expect(typeof factory).toBe("function");
+    expect(notified).toEqual([]);
+  });
+
+  it("keeps the text listing for `settings list`, even in TUI mode", async () => {
+    const notified: string[] = [];
+    let opened = false;
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify: (m: string) => notified.push(m),
+        custom: async () => {
+          opened = true;
+        },
+      },
+    };
+    await createStatusCommand(editorDeps() as never).handler("settings list", ctx as never);
+    expect(opened).toBe(false);
+    expect(notified[0]).toContain("Extension settings");
+  });
+
+  it("falls back to the text listing outside TUI mode (print/rpc) and without ui.custom", async () => {
+    const notified: string[] = [];
+    const print = { mode: "print", ui: { notify: (m: string) => notified.push(m), custom: async () => undefined } };
+    await createStatusCommand(editorDeps() as never).handler("settings", print as never);
+    expect(notified[0]).toContain("Extension settings");
+    const old = { mode: "tui", ui: { notify: (m: string) => notified.push(m) } };
+    await createStatusCommand(editorDeps() as never).handler("settings", old as never);
+    expect(notified[1]).toContain("Extension settings");
+  });
+
+  it("`/agent budget` with no arguments opens the editor scoped to budget.*", async () => {
+    let budgetOnly: boolean | undefined;
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify: () => undefined,
+        custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: () => void) => unknown) => {
+          const component = factory({ requestRender: () => undefined }, undefined, undefined, () => undefined) as {
+            render(width: number): string[];
+          };
+          budgetOnly = component.render(80).join("\n").includes("Run budget");
+          return undefined;
+        },
+      },
+    };
+    await createStatusCommand(editorDeps() as never).handler("budget", ctx as never);
+    expect(budgetOnly).toBe(true);
   });
 });

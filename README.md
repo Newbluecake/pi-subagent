@@ -14,7 +14,7 @@
 - **`get_subagent_result`** —— 默认非阻塞轮询;`wait: true` + `wait_ms` 为有界阻塞。
 - **`steer_subagent`** —— 向运行中的子 agent 发送追加指令。
 - **`abort_subagent`** —— 停止运行中的子 agent（包括自动转后台的 run）；对终态 run 幂等返回。
-- **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundMs`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
+- **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundS`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
 - **Agent tree 组件** —— run 活跃期间常驻编辑器上方(见下文)。
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
@@ -68,21 +68,25 @@ queue_wait → resolve_config → session_create → extension_bind
 
 用户配置:`~/.pi/agent/pi-subagent.json`(文件缺失/格式错误 → 用默认值,绝不抛错)。
 
+`/agent settings` 直接打开**交互式设置编辑器**(overlay:↑↓ 选择、回车编辑/切换、空格切换布尔、`r` 重置默认、Esc 关闭,改动即时落盘);脚本场景仍可用 `/agent settings list` / `set <key> <value>` / `reset <key>`,`/agent budget` 是限定到 `budget.*` 的别名。
+
+**所有时间字段都以整数秒配置**(键名以 `S` 结尾)。旧版的毫秒键(`*Ms`)在首次加载时自动迁移:能整除 1000 的换算成秒并写回文件 + WARN,不能整除的丢弃并回退默认值(绝不抛错)。
+
 ```jsonc
 {
   "concurrencyLimit": 6,
   "fleetWidget": true, // 编辑器上方的 agent tree
   "maxNestedDepth": 2, // 子 agent 再 spawn 子 agent 的深度上限
-  "foregroundAutoBackgroundMs": 600000, // 前台调用自动转后台；0 关闭
+  "foregroundAutoBackgroundS": 600, // 前台调用自动转后台；0 关闭
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {
-    "idleMs": 240000, // 模型 turn 静默（无任何 delta/事件）多久算超时
-    "modelTurnMs": 900000, // 单轮模型调用硬上限（即使仍在产出）
-    "toolMs": 600000, // 单次工具调用上限
-    "totalMs": 1800000, // 整个 run 的上限
-    // … queueWaitMs, startupMs, bindMs, firstEventMs, compactionMs,
-    //   abortGraceMs, steerMs, reapMs, startupRetries, retrySlackMs
+    "idleS": 240, // 模型 turn 静默（无任何 delta/事件）多久算超时
+    "modelTurnS": 900, // 单轮模型调用硬上限（即使仍在产出）
+    "toolS": 600, // 单次工具调用上限
+    "totalS": 1800, // 整个 run 的上限
+    // … queueWaitS, startupS, bindS, firstEventS, compactionS,
+    //   abortGraceS, steerS, reapS, startupRetries, retrySlackS
   },
 }
 ```

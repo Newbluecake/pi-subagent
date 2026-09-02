@@ -26,20 +26,22 @@ describe("agent config", () => {
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);
   });
   it("18: validates coalescing and ack window settings, including non-finite values", () => {
-    expect(loadSettings({ coalesceWindowMs: Number.NaN }).coalesceWindowMs).toBe(0);
-    expect(loadSettings({ coalesceWindowMs: Number.POSITIVE_INFINITY }).coalesceWindowMs).toBe(0);
-    expect(loadSettings({ coalesceWindowMs: "500" }).coalesceWindowMs).toBe(0);
-    expect(loadSettings({ coalesceWindowMs: 99_999 }).coalesceWindowMs).toBe(5_000);
-    expect(loadSettings({ coalesceWindowMs: -5 }).coalesceWindowMs).toBe(0);
+    // File keys are integer seconds (`*S`); internal AgentSettings stays in ms.
+    expect(loadSettings({ coalesceWindowS: Number.NaN }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowS: Number.POSITIVE_INFINITY }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowS: "5" }).coalesceWindowMs).toBe(0);
+    expect(loadSettings({ coalesceWindowS: 2 }).coalesceWindowMs).toBe(2_000);
+    expect(loadSettings({ coalesceWindowS: 99 }).coalesceWindowMs).toBe(5_000); // 5s ceiling
+    expect(loadSettings({ coalesceWindowS: -5 }).coalesceWindowMs).toBe(0);
     expect(loadSettings({ coalesceMaxBatch: Number.NaN }).coalesceMaxBatch).toBe(8);
     expect(loadSettings({ coalesceMaxBatch: Number.NEGATIVE_INFINITY }).coalesceMaxBatch).toBe(8);
     expect(loadSettings({ coalesceMaxBatch: "2" }).coalesceMaxBatch).toBe(8);
     expect(loadSettings({ coalesceMaxBatch: 0 }).coalesceMaxBatch).toBe(1);
     expect(loadSettings({ coalesceMaxBatch: 2.7 }).coalesceMaxBatch).toBe(2);
-    expect(loadSettings({ ackWindowMs: Number.NaN }).ackWindowMs).toBe(0);
-    expect(loadSettings({ ackWindowMs: Number.POSITIVE_INFINITY }).ackWindowMs).toBe(0);
-    expect(loadSettings({ ackWindowMs: 99_999 }).ackWindowMs).toBe(5_000);
-    expect(loadSettings({ ackWindowMs: -5 }).ackWindowMs).toBe(0);
+    expect(loadSettings({ ackWindowS: Number.NaN }).ackWindowMs).toBe(0);
+    expect(loadSettings({ ackWindowS: Number.POSITIVE_INFINITY }).ackWindowMs).toBe(0);
+    expect(loadSettings({ ackWindowS: 99 }).ackWindowMs).toBe(5_000);
+    expect(loadSettings({ ackWindowS: -5 }).ackWindowMs).toBe(0);
   });
   it("parses frontmatter model: strict pairs into model, fuzzy values into modelHint", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-subagent-hint-"));
@@ -111,9 +113,9 @@ describe("CC3: workflow settings", () => {
     const settings = loadSettings({
       workflow: {
         enabled: true,
-        budget: { workflowTotalMs: 1_800_000, scriptSliceMs: 1_000, bogusKey: 999 },
+        budget: { workflowTotalS: 1_800, scriptSliceS: 1, bogusKey: 999 },
         journalDir: "/tmp/wf-journal",
-        replayTtlMs: 0,
+        replayTtlS: 0,
         replayScope: "content",
         runawayPolicy: "terminate_on_stall",
       },
@@ -130,7 +132,7 @@ describe("CC3: workflow settings", () => {
 
   it("falls back field-by-field on malformed values, without throwing", () => {
     const settings = loadSettings({
-      workflow: { enabled: "yes", replayScope: "bogus", runawayPolicy: "bogus", replayTtlMs: -5, budget: "nope" },
+      workflow: { enabled: "yes", replayScope: "bogus", runawayPolicy: "bogus", replayTtlS: -5, budget: "nope" },
     });
     expect(settings.workflow).toEqual(DEFAULT_SETTINGS.workflow);
   });
