@@ -269,6 +269,7 @@ describe("/agent settings subcommand", () => {
     const listing = run(d, "settings");
     expect(listing).toContain("coalesceWindowMs");
     expect(listing).toContain("coalesceMaxBatch");
+    expect(listing).toContain("ackWindowMs");
     expect(run(d, "settings set coalesceWindowMs 500")).toContain("coalesceWindowMs");
     expect(current.coalesceWindowMs).toBe(500);
     expect(run(d, "settings set coalesceMaxBatch 0")).toContain("Invalid value");

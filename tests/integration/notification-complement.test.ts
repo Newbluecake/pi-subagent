@@ -3,6 +3,10 @@ import { buildSessionStack } from "../../src/stack.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
+import { FakeClock } from "../../src/core/clock.js";
+import { MemoryOutboxStore } from "../../src/core/store.js";
+import { createCoalescer, isCoalescible } from "../../src/delivery/coalescer.js";
+import { createNotifier, type PersistedDelivery } from "../../src/delivery/notifier.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function buildStackForSender(
@@ -96,5 +100,110 @@ describe("notification sender output guidance", () => {
     expect(seen.filter((state) => state === "batched")).toHaveLength(3);
     expect(seen.filter((state) => state === "delivered")).toHaveLength(3);
     expect(sendMessage.mock.calls[0]![1]).toEqual({ triggerTurn: true });
+  });
+
+  it("11+16: ackWindow suppresses a claimed foreground result and sends an unacknowledged one after timeout", () => {
+    const clock = new FakeClock();
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const sent: DeliveryPayload[] = [];
+    const claimed = new Set(["foreground"]);
+    let notifier!: ReturnType<typeof createNotifier>;
+    const ackHold = createCoalescer({
+      clock,
+      windowMs: 200,
+      maxBatch: 8,
+      send: (items) => sent.push(...items),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    const isAckHoldable = (item: DeliveryPayload) => isCoalescible(item) && claimed.has(item.runId);
+    notifier = createNotifier({
+      store,
+      clock,
+      cancelBuffered: (key) => ackHold.cancel(key),
+      sender: {
+        willBuffer: isAckHoldable,
+        sendMessage: (item) => (isAckHoldable(item) ? ackHold.submit(item) : (sent.push(item), "sent")),
+      },
+    });
+    const foreground = { ...payload("foreground"), key: "foreground:1", runId: "foreground" };
+    notifier.enqueue(foreground);
+    expect(store.list()[0]?.state).toBe("batched");
+    expect(notifier.ack("foreground", 1)).toBe(true);
+    clock.advance(200);
+    expect(sent).toHaveLength(0);
+    expect(store.list()[0]?.state).toBe("consumed");
+    expect(notifier.ackedSuppressions).toBe(1);
+
+    claimed.add("foreground-late");
+    const unacknowledged = { ...payload("foreground-late"), key: "foreground-late:1", runId: "foreground-late" };
+    notifier.enqueue(unacknowledged);
+    expect(sent).toHaveLength(0);
+    clock.advance(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.key).toBe("foreground-late:1");
+  });
+
+  it("12: a background completed result bypasses ackHold and sends immediately", () => {
+    const clock = new FakeClock();
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const sent: DeliveryPayload[] = [];
+    let notifier!: ReturnType<typeof createNotifier>;
+    const ackHold = createCoalescer({
+      clock,
+      windowMs: 200,
+      maxBatch: 8,
+      send: (items) => sent.push(...items),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    notifier = createNotifier({
+      store,
+      clock,
+      cancelBuffered: (key) => ackHold.cancel(key),
+      sender: { willBuffer: () => false, sendMessage: (item) => (sent.push(item), "sent") },
+    });
+    notifier.enqueue({ ...payload("background-now"), key: "background-now:1", runId: "background-now" });
+    expect(sent).toHaveLength(1);
+    expect(clock.pendingTimers).toBe(0);
+  });
+
+  it("14: when both windows are enabled the main coalescer wins and ack cancels both", () => {
+    const clock = new FakeClock();
+    const store = new MemoryOutboxStore<PersistedDelivery>();
+    const claimed = new Set(["dual"]);
+    const sent: DeliveryPayload[][] = [];
+    let notifier!: ReturnType<typeof createNotifier>;
+    const main = createCoalescer({
+      clock,
+      windowMs: 200,
+      maxBatch: 8,
+      send: (items) => sent.push([...items]),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    const ackHold = createCoalescer({
+      clock,
+      windowMs: 200,
+      maxBatch: 8,
+      send: (items) => sent.push([...items]),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    const holdable = (item: DeliveryPayload) => isCoalescible(item) && claimed.has(item.runId);
+    notifier = createNotifier({
+      store,
+      clock,
+      cancelBuffered: (key) => {
+        main.cancel(key);
+        ackHold.cancel(key);
+      },
+      sender: {
+        willBuffer: (item) => isCoalescible(item),
+        sendMessage: (item) =>
+          isCoalescible(item) ? main.submit(item) : holdable(item) ? ackHold.submit(item) : (sent.push([item]), "sent"),
+      },
+    });
+    notifier.enqueue({ ...payload("dual"), key: "dual:1", runId: "dual" });
+    expect(notifier.ack("dual", 1)).toBe(true);
+    clock.advance(200);
+    expect(sent).toHaveLength(0);
+    expect(notifier.ackedSuppressions).toBe(1);
   });
 });

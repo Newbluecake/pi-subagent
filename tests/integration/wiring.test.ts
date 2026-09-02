@@ -3,7 +3,17 @@ import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryOutboxStore, MemoryRunStore } from "../../src/core/store.js";
 import type { AgentTypeConfig, DriverEvent } from "../../src/core/types.js";
-import { createNotifier, type PersistedDelivery } from "../../src/delivery/notifier.js";
+import {
+  createNotifier as createNotifierImpl,
+  type NotifierOptions,
+  type PersistedDelivery,
+} from "../../src/delivery/notifier.js";
+
+function createNotifier(
+  options: Omit<NotifierOptions, "cancelBuffered"> & Partial<Pick<NotifierOptions, "cancelBuffered">>,
+) {
+  return createNotifierImpl({ ...options, cancelBuffered: options.cancelBuffered ?? (() => undefined) });
+}
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";

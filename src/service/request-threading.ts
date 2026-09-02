@@ -39,6 +39,7 @@ const NOT_THREADED = [
   "modelHintOverride", // resolved to a {provider,id} pair at spawn admission, then merged like modelOverride
   "thinkingOverride", // merged with type.thinkingLevel into sessionSpec.thinkingLevel by the runtime adapter
   "budgetOverride", // already merged into RunnerSpec.budget
+  "expectAck", // consumed by spawn-service for the caller-ack hold registry
   "isolation", // consumed by the X1 worktree extension via H2, not threaded
   "schema", // consumed by the adapter to inject the StructuredOutput tool
 ] as const;

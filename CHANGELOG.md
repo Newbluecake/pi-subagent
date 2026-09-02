@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Caller-ack notification suppression (delivery v2 P3)** — foreground callers can acknowledge completed outcomes to suppress undelivered notifications; the `ackWindowMs` hold window is disabled by default and fails open on persistence or cancellation errors.
 - **`abort_subagent` tool** — stop a running subagent by run id, unique prefix, or Agent label; terminal runs return an idempotent already-finished result.
 - **Foreground auto-backgrounding** — foreground Agent calls now return after 10 minutes by default when the run is still active; the run is not stopped and can be collected with `get_subagent_result`.
 - **Fuzzy model hints** (parity with upstream @tintinweb/pi-subagents) — agent

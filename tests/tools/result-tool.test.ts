@@ -55,7 +55,7 @@ function completedSnapshot(): RunSnapshot {
 describe("result consumption", () => {
   it("consumes completed outcomes on get and wait with their generation", async () => {
     const calls: string[] = [];
-    const notifier = { consume: (key: string) => (calls.push(key), true) };
+    const notifier = { ack: (runId: string, generation: number) => (calls.push(`${runId}:${generation}`), true) };
     const snap = completedSnapshot();
     const getTool = createResultTool({ query: queryForSnapshot(snap), notifier });
     await getTool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
@@ -69,7 +69,7 @@ describe("result consumption", () => {
     snap.status = "failed";
     snap.outcome = { ...snap.outcome!, status: "failed", error: { kind: "schema", message: "invalid" } };
     const calls: string[] = [];
-    const notifier = { consume: (key: string) => (calls.push(key), true) };
+    const notifier = { ack: (runId: string, generation: number) => (calls.push(`${runId}:${generation}`), true) };
     const tool = createResultTool({ query: queryForSnapshot(snap), notifier });
     await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
     expect(calls).toEqual(["r1:1"]);
@@ -86,7 +86,7 @@ describe("result consumption", () => {
     const calls: string[] = [];
     const tool = createResultTool({
       query: queryForSnapshot(snap),
-      notifier: { consume: (key: string) => (calls.push(key), false) },
+      notifier: { ack: (runId: string, generation: number) => (calls.push(`${runId}:${generation}`), false) },
     });
     await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
     expect(calls).toEqual(["r1:1"]);
@@ -96,10 +96,10 @@ describe("result consumption", () => {
     const snap = completedSnapshot();
     snap.status = "running";
     snap.outcome = undefined;
-    const consume = vi.fn(() => false);
-    const tool = createResultTool({ query: queryForSnapshot(snap), notifier: { consume } });
+    const ack = vi.fn(() => false);
+    const tool = createResultTool({ query: queryForSnapshot(snap), notifier: { ack } });
     await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
-    expect(consume).not.toHaveBeenCalled();
+    expect(ack).not.toHaveBeenCalled();
   });
 
   it("returns normally when no notifier is provided", async () => {

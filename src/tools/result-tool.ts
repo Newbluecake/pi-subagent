@@ -36,7 +36,7 @@ export type ResultToolParams = Static<typeof ResultToolParams>;
 export function createResultTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
-  notifier?: Pick<Notifier, "consume">;
+  notifier?: Pick<Notifier, "ack">;
 }): ToolDefinition<typeof ResultToolParams> {
   // pi usage accounting dedupe: a background run's spend is attached to the
   // FIRST tool result that reports its terminal outcome — get_subagent_result
@@ -48,10 +48,10 @@ export function createResultTool(deps: {
     usageReported.add(runId);
     return { usage: toPiToolUsage(usage) };
   };
-  const tryConsume = (runId: string, generation: number, outcome: RunOutcome) => {
+  const tryAck = (runId: string, generation: number, outcome: RunOutcome) => {
     if (!deps.notifier) return;
     try {
-      deps.notifier.consume(deliveryKey(runId, generation), {
+      deps.notifier.ack(runId, generation, {
         extensionOwner: "get_subagent_result",
       });
     } catch {
@@ -95,7 +95,7 @@ export function createResultTool(deps: {
               `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
               ...buildProgressLines(snapshot, Date.now()),
             ].join("\n");
-        if (snapshot.outcome) tryConsume(runId, snapshot.generation, snapshot.outcome);
+        if (snapshot.outcome) tryAck(runId, snapshot.generation, snapshot.outcome);
         return {
           content: [{ type: "text" as const, text }],
           ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
@@ -154,7 +154,7 @@ export function createResultTool(deps: {
                 : "wait timed out after the default budget (the run's remaining deadline + grace)";
         throw new Error(reason);
       }
-      tryConsume(runId, waited.outcome.diag.generation, waited.outcome);
+      tryAck(runId, waited.outcome.diag.generation, waited.outcome);
       return {
         content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
         ...usageOnce(runId, waited.outcome.usage),

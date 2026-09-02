@@ -42,6 +42,7 @@ let previousFleetWidget: FleetWidgetController | undefined;
 /** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
 let previousCoalescer: Coalescer | undefined;
+let previousAckHold: Coalescer | undefined;
 
 export interface WorkflowSupport {
   readonly enabled: boolean;
@@ -92,6 +93,8 @@ export function buildSessionStack(
   previousUsageBroadcaster = undefined;
   previousCoalescer?.dispose();
   previousCoalescer = undefined;
+  previousAckHold?.dispose();
+  previousAckHold = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -144,6 +147,7 @@ export function buildSessionStack(
   } catch {
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
+  const spawnRef: { current?: SpawnService } = {};
   const sendFormatted = (items: readonly DeliveryPayload[]) => {
     const stats = Object.fromEntries(
       items.flatMap((item) => {
@@ -199,6 +203,18 @@ export function buildSessionStack(
           onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
         })
       : undefined;
+  const isAckHoldable = (payload: DeliveryPayload) =>
+    isCoalescible(payload) && spawnRef.current?.expectsAck(payload.runId) === true;
+  const ackHold =
+    settings.ackWindowMs > 0
+      ? createCoalescer({
+          clock: systemClock,
+          windowMs: settings.ackWindowMs,
+          maxBatch: settings.coalesceMaxBatch,
+          send: (items) => items.forEach((item) => sendFormatted([item])),
+          onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+        })
+      : undefined;
   notifier = createNotifier({
     store: outbox,
     clock: systemClock,
@@ -208,17 +224,23 @@ export function buildSessionStack(
     maxReconcileRounds: settings.maxReconcileRounds,
     maxBatch: settings.maxReconcileBatch,
     ...(merged.onDelivery ? { onDelivery: merged.onDelivery } : {}),
+    cancelBuffered: (key) => {
+      coalescer?.cancel(key);
+      ackHold?.cancel(key);
+    },
     sender: {
-      willBuffer: (payload) => coalescer !== undefined && isCoalescible(payload),
+      willBuffer: (payload) =>
+        (coalescer !== undefined && isCoalescible(payload)) || (ackHold !== undefined && isAckHoldable(payload)),
       sendMessage: (payload) => {
         if (coalescer && isCoalescible(payload)) return coalescer.submit(payload);
+        if (ackHold && isAckHoldable(payload)) return ackHold.submit(payload);
         sendFormatted([payload]);
       },
     },
   });
   previousCoalescer = coalescer;
+  previousAckHold = ackHold;
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
-  const spawnRef: { current?: SpawnService } = {};
   // M-D: runIds whose "subagent:started" event has already been emitted (once per run).
   const announcedStarts = new Set<string>();
   const runner = createRuntimeRunnerAdapter({
@@ -255,12 +277,11 @@ export function buildSessionStack(
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
     onLabel: (label, target) => mentionRef.current?.register(label, target),
-    onOutcomeConsumed: (outcome) => {
+    onOutcomeAcked: (outcome) => {
       try {
-        const by = { extensionOwner: "spawnAndWait" };
-        notifier.consume(deliveryKey(outcome.runId, outcome.diag.generation), by);
+        notifier.ack(outcome.runId, outcome.diag.generation, { extensionOwner: "spawnAndWait" });
       } catch {
-        // Consumption is best effort only.
+        // Best effort only.
       }
     },
     notifyTerminalFailure: (outcome) => {

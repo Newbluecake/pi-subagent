@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
-import { createNotifier } from "../../src/delivery/notifier.js";
+import { createNotifier as createNotifierImpl, type NotifierOptions } from "../../src/delivery/notifier.js";
 import { createCoalescer, isCoalescible } from "../../src/delivery/coalescer.js";
 import type { PersistedDelivery, OutboxStore } from "../../src/delivery/notifier.js";
 import type { DeliveryPayload } from "../../src/core/types.js";
 import { MemoryOutboxStore } from "../../src/core/store.js";
+
+function createNotifier(
+  options: Omit<NotifierOptions, "cancelBuffered"> & Partial<Pick<NotifierOptions, "cancelBuffered">>,
+) {
+  return createNotifierImpl({ ...options, cancelBuffered: options.cancelBuffered ?? (() => undefined) });
+}
 
 const payload: DeliveryPayload = {
   key: "r:1",
@@ -236,6 +242,7 @@ describe("reconcile redelivery policy (duplicate-notification regression)", () =
       sender: (p) => {
         sent.push(p.key);
       },
+      cancelBuffered: () => undefined,
     });
     const base = {
       generation: 1,
@@ -252,7 +259,12 @@ describe("reconcile redelivery policy (duplicate-notification regression)", () =
 
     // Simulate a restart: fresh notifier over the same persisted store.
     const sent2: string[] = [];
-    const notifier2 = createNotifier({ store, clock, sender: (p) => void sent2.push(p.key) });
+    const notifier2 = createNotifier({
+      store,
+      clock,
+      sender: (p) => void sent2.push(p.key),
+      cancelBuffered: () => undefined,
+    });
     store.put({ ...base, key: "r2:1", runId: "r2", state: "pending", attempts: 0 });
     notifier2.reconcile();
     clock.advance(10_000);
@@ -540,5 +552,134 @@ describe("P2 notifier/coalescer integration", () => {
     expect(notifier.reconcile().redelivered).toHaveLength(3);
     expect(sent.map((item) => item.reconcileRound)).toEqual([1, 1, 1]);
     expect([...store.records.values()].every((item) => item.state === "delivered")).toBe(true);
+  });
+});
+
+describe("P3 ack matrix", () => {
+  function p(key: string, extra: Partial<PersistedDelivery> = {}): PersistedDelivery {
+    return { ...payload, key, runId: key.split(":")[0]!, ...extra };
+  }
+  function setup(extra: { send?: (items: readonly DeliveryPayload[]) => void; cancel?: (key: string) => void } = {}) {
+    const clock = new FakeClock();
+    const store = new FakeOutbox();
+    let notifier!: ReturnType<typeof createNotifier>;
+    const coalescer = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 8,
+      send: extra.send ?? (() => undefined),
+      onSettled: (keys, ok) => notifier.settleBatch(keys, ok),
+    });
+    notifier = createNotifier({
+      store,
+      clock,
+      sender: {
+        willBuffer: isCoalescible,
+        sendMessage: (item) => (isCoalescible(item) ? coalescer.submit(item) : (extra.send?.([item]), "sent")),
+      },
+      cancelBuffered: (key) => {
+        if (extra.cancel) extra.cancel(key);
+        else coalescer.cancel(key);
+      },
+      backoffMs: 10,
+    });
+    return { clock, store, notifier, coalescer };
+  }
+
+  it("1: acknowledges batched delivery and suppresses its window flush", () => {
+    const { clock, store, notifier } = setup();
+    notifier.enqueue(p("ack-batched:1"));
+    expect(notifier.ack("ack-batched", 1)).toBe(true);
+    clock.advance(100);
+    expect(store.records.get("ack-batched:1")?.state).toBe("consumed");
+    expect(notifier.ackedSuppressions).toBe(1);
+  });
+  it("2: acknowledges pending backoff and lets the timer self-heal", () => {
+    const sent: string[] = [];
+    const { clock, store, notifier } = setup({ send: (items) => sent.push(...items.map((x) => x.key)) });
+    notifier.enqueue(p("ack-retry:1"));
+    store.records.get("ack-retry:1")!.attempts = 1;
+    store.records.get("ack-retry:1")!.state = "pending";
+    expect(notifier.ack("ack-retry", 1)).toBe(true);
+    clock.advance(1000);
+    expect(sent).toHaveLength(0);
+  });
+  it("3: acknowledges after immediate send without withdrawing it", () => {
+    const sent: string[] = [];
+    const { store, notifier } = setup({ send: (items) => sent.push(...items.map((x) => x.key)) });
+    store.put(p("ack-late:1", { state: "pending" }));
+    notifier.reconcile();
+    expect(sent).toEqual(["ack-late:1"]);
+    expect(notifier.ack("ack-late", 1)).toBe(true);
+    expect(notifier.ackedSuppressions).toBe(0);
+  });
+  it("4: acked staged delivery finalizes late without sending", () => {
+    const { store, notifier } = setup();
+    notifier.enqueue(p("ack-staged:1"), { hold: true });
+    expect(notifier.ack("ack-staged", 1)).toBe(true);
+    expect(notifier.finalize("ack-staged", 1, { status: "completed", textPreview: "late" })).toBe("late");
+    expect(store.records.get("ack-staged:1")?.state).toBe("consumed");
+  });
+  it("5: rejects dropped, abandoned and missing acknowledgements", () => {
+    const { store, notifier } = setup();
+    store.put(p("dropped:1", { state: "dropped" }));
+    store.put(p("abandoned:1", { state: "abandoned" }));
+    expect(notifier.ack("dropped", 1)).toBe(false);
+    expect(notifier.ack("abandoned", 1)).toBe(false);
+    expect(notifier.ack("missing", 1)).toBe(false);
+  });
+  it("6: update failure leaves buffered record to flush fail-open", () => {
+    const { clock, store, notifier } = setup();
+    const original = store.update.bind(store);
+    store.update = (key, patch) => {
+      if (patch.state === "consumed") throw new Error("disk full");
+      original(key, patch);
+    };
+    notifier.enqueue(p("ack-update-fail:1"));
+    expect(notifier.ack("ack-update-fail", 1)).toBe(false);
+    clock.advance(100);
+    expect(store.records.get("ack-update-fail:1")?.state).toBe("delivered");
+  });
+  it("7: cancel failure keeps the consumed record fail-open and terminal", () => {
+    const { clock, store, notifier } = setup({
+      cancel: () => {
+        throw new Error("cancel failed");
+      },
+    });
+    notifier.enqueue(p("ack-cancel-fail:1"));
+    expect(notifier.ack("ack-cancel-fail", 1)).toBe(true);
+    clock.advance(100);
+    expect(store.records.get("ack-cancel-fail:1")?.state).toBe("delivered");
+    const restarted = createNotifier({ store, clock, sender: () => undefined, cancelBuffered: () => undefined });
+    expect(restarted.reconcile().redelivered).toEqual([]);
+  });
+  it("8: acked records do not replay while unacked batched records do", () => {
+    const { store, notifier } = setup();
+    notifier.enqueue(p("acked:1"));
+    notifier.ack("acked", 1);
+    const unackedStore = new FakeOutbox();
+    unackedStore.put(p("unacked:1", { state: "batched" }));
+    const ackedRestart = createNotifier({ store, sender: () => undefined, cancelBuffered: () => undefined });
+    expect(ackedRestart.reconcile().redelivered).toEqual([]);
+    const sent: string[] = [];
+    const restarted = createNotifier({
+      store: unackedStore,
+      clock: new FakeClock(),
+      sender: (item) => sent.push(item.key),
+      cancelBuffered: () => undefined,
+    });
+    expect(restarted.reconcile().redelivered).toEqual(["unacked:1"]);
+    expect(sent).toEqual(["unacked:1"]);
+  });
+  it("9: requires cancelBuffered at construction", () => {
+    expect(() => createNotifierImpl({ store: new FakeOutbox(), sender: () => undefined } as NotifierOptions)).toThrow(
+      "cancelBuffered is required",
+    );
+  });
+  it("10: background delivery without an ack is still delivered", () => {
+    const sent: string[] = [];
+    const { notifier } = setup({ send: (items) => sent.push(...items.map((x) => x.key)) });
+    notifier.enqueue(p("background:1", { status: "failed" }));
+    expect(sent).toEqual(["background:1"]);
   });
 });

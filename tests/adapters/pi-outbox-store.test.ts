@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { createPiOutboxStore } from "../../src/adapters/pi-outbox-store.js";
 import { FakeClock } from "../../src/core/clock.js";
-import { createNotifier, type PersistedDelivery } from "../../src/delivery/notifier.js";
+import {
+  createNotifier as createNotifierImpl,
+  type NotifierOptions,
+  type PersistedDelivery,
+} from "../../src/delivery/notifier.js";
+
+function createNotifier(
+  options: Omit<NotifierOptions, "cancelBuffered"> & Partial<Pick<NotifierOptions, "cancelBuffered">>,
+) {
+  return createNotifierImpl({ ...options, cancelBuffered: options.cancelBuffered ?? (() => undefined) });
+}
 
 const record = (key = "r:1:completed"): PersistedDelivery => ({
   key,

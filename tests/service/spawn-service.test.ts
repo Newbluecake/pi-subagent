@@ -191,12 +191,12 @@ describe("SpawnService", () => {
     });
     expect(called).toBe(false);
   });
-  it("calls onOutcomeConsumed after spawnAndWait resolves", async () => {
+  it("calls onOutcomeAcked after spawnAndWait resolves", async () => {
     const seen: RunOutcome[] = [];
     const runner: Runner = {
       run: async (spec) => ({ ...outcome, runId: spec.runId }),
     };
-    const result = await createSpawnService({ ...deps(runner), onOutcomeConsumed: (o) => seen.push(o) }).spawnAndWait({
+    const result = await createSpawnService({ ...deps(runner), onOutcomeAcked: (o) => seen.push(o) }).spawnAndWait({
       type: "worker",
       prompt: "x",
     });
@@ -349,6 +349,64 @@ describe("SpawnService: CC4 CP1 (deadlineAt admission check)", () => {
       error: { kind: "config", message: "deadlineAt already expired", retryable: false },
     });
     expect(called).toBe(false);
+  });
+
+  it("P3: expectAck is visible before synchronous runner start and cleared after finish", async () => {
+    let service!: ReturnType<typeof createSpawnService>;
+    let observed = "";
+    const runner: Runner = {
+      run: (spec) => {
+        observed = service.expectsAck(spec.runId) ? "claimed" : "missing";
+        return Promise.resolve({ ...outcome, runId: spec.runId });
+      },
+    };
+    service = createSpawnService(deps(runner));
+    const started = await service.spawn({ type: "worker", prompt: "x", expectAck: true });
+    if ("error" in started) throw new Error(started.error.message);
+    expect(observed).toBe("claimed");
+    expect(service.expectsAck(started.runId)).toBe(false);
+  });
+
+  it("P3: waitOutcome acknowledges fast and waiter settlements but not pending", async () => {
+    const fastAcked: RunOutcome[] = [];
+    const fast = createSpawnService({
+      ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }),
+      onOutcomeAcked: (value) => fastAcked.push(value),
+    });
+    const fastStarted = await fast.spawn({ type: "worker", prompt: "x" });
+    if ("error" in fastStarted) throw new Error(fastStarted.error.message);
+    await fast.waitOutcome(fastStarted.runId);
+    expect(fastAcked).toHaveLength(1);
+
+    let finish!: (value: RunOutcome) => void;
+    const waiterAcked: RunOutcome[] = [];
+    const waiter = createSpawnService({
+      ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+      onOutcomeAcked: (value) => waiterAcked.push(value),
+    });
+    const waiterStarted = await waiter.spawn({ type: "worker", prompt: "x" });
+    if ("error" in waiterStarted) throw new Error(waiterStarted.error.message);
+    const waiting = waiter.waitOutcome(waiterStarted.runId);
+    finish({ ...outcome, runId: waiterStarted.runId });
+    await waiting;
+    expect(waiterAcked).toHaveLength(1);
+
+    vi.useFakeTimers();
+    try {
+      const pendingService = createSpawnService({
+        ...deps({ run: () => new Promise<RunOutcome>(() => undefined) }),
+        onOutcomeAcked: () => {
+          throw new Error("must not ack pending");
+        },
+      });
+      const pendingStarted = await pendingService.spawn({ type: "worker", prompt: "x" });
+      if ("error" in pendingStarted) throw new Error(pendingStarted.error.message);
+      const pending = pendingService.waitOutcome(pendingStarted.runId, 10);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toEqual({ kind: "pending" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("CP1-c: a rejected expired-deadline spawn leaves the label index untouched", async () => {

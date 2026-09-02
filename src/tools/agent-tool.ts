@@ -293,7 +293,7 @@ export function createAgentTool(deps: {
           };
           let spawned: { runId: RunId } | { error: ErrorInfo };
           try {
-            spawned = await deps.spawn.spawn({ ...baseRequest, signal: relay.signal });
+            spawned = await deps.spawn.spawn({ ...baseRequest, expectAck: true, signal: relay.signal });
           } catch (error) {
             stopForwarding();
             throw error;

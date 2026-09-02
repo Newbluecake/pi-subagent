@@ -28,6 +28,7 @@ export interface MessageSender {
 export interface NotifierOptions {
   store: OutboxStore;
   sender: MessageSender | ((payload: DeliveryPayload) => SendResult | void);
+  cancelBuffered: (key: DeliveryKey) => void;
   clock?: Clock;
   maxAttempts?: number;
   backoffMs?: number;
@@ -41,15 +42,19 @@ export interface Notifier {
   enqueue(payload: DeliveryPayload, opts?: { hold?: boolean }): void;
   finalize(runId: string, generation: number, patch: Partial<DeliveryPayload>): "sent" | "updated" | "late" | "missing";
   settleBatch(keys: readonly DeliveryKey[], ok: boolean): void;
+  ack(runId: string, generation: number, by?: ConsumerIdentity): boolean;
   peek(key: DeliveryKey): DeliveryState | undefined;
   consume(key: DeliveryKey, by?: ConsumerIdentity): boolean;
   reconcile(persisted?: readonly PersistedDelivery[]): ReconcileReport;
   verifyPersisted(keys: readonly DeliveryKey[]): { missing: DeliveryKey[] };
   readonly stats: Record<DeliveryState, number>;
   readonly degraded: ReadonlyArray<{ key: DeliveryKey; reason: string; at: number }>;
+  readonly ackedSuppressions: number;
 }
 
 export function createNotifier(options: NotifierOptions): Notifier {
+  if (typeof options.cancelBuffered !== "function")
+    throw new Error("createNotifier: cancelBuffered is required (delivery v2 P3)");
   const clock = options.clock ?? {
     now: () => Date.now(),
     setTimer: (ms, fn) => ({ id: setTimeout(fn, ms) as unknown as number }),
@@ -62,6 +67,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const maxBatch = Math.max(1, options.maxBatch ?? 10);
   const state = new Map<DeliveryKey, PersistedDelivery>();
   const degraded: Array<{ key: string; reason: string; at: number }> = [];
+  let suppressed = 0;
   const send: (p: DeliveryPayload) => SendResult | void =
     typeof options.sender === "function" ? options.sender : (p) => (options.sender as MessageSender).sendMessage(p);
   const willBuffer = (p: DeliveryPayload) =>
@@ -271,6 +277,31 @@ export function createNotifier(options: NotifierOptions): Notifier {
         else settleFailed(record, record.reconcileRound ?? 0, new Error("delivery batch failed"));
       }
     },
+    ack(runId, generation, by) {
+      const key = deliveryKey(runId, generation);
+      const record = state.get(key) ?? load().get(key);
+      const current = record?.state ?? "pending";
+      if (!record || ["consumed", "abandoned", "dropped"].includes(current)) return false;
+      try {
+        writeBack(record, { state: "consumed" });
+      } catch (e) {
+        fail(key, `ack persist failed: ${e instanceof Error ? e.message : String(e)}`);
+        return false;
+      }
+      state.set(key, { ...record, state: "consumed" });
+      let cancelled = true;
+      try {
+        options.cancelBuffered(key);
+      } catch (e) {
+        cancelled = false;
+        fail(key, `cancelBuffered failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (cancelled && ["staged", "pending", "batched"].includes(current)) suppressed++;
+      audit(key, "consumed", "acked");
+      notify({ ...record, state: "consumed" }, "consumed");
+      void by;
+      return true;
+    },
     peek(key) {
       return (state.get(canonicalizeDeliveryKey(key)) ?? load().get(canonicalizeDeliveryKey(key)))?.state;
     },
@@ -350,5 +381,8 @@ export function createNotifier(options: NotifierOptions): Notifier {
       return result;
     },
     degraded,
+    get ackedSuppressions() {
+      return suppressed;
+    },
   };
 }

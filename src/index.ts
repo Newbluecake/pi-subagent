@@ -237,6 +237,7 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
     waitAll: (opts) => requireStack(holder).spawn.waitAll(opts),
     waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
+    expectsAck: (runId) => requireStack(holder).spawn.expectsAck(runId),
     markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
     // CC1: forwarded for parity with the rest of SpawnService; no caller yet
     // (the workflow orchestrator that will use this lands in M3.1+).
@@ -305,6 +306,7 @@ function forwardNotifier(holder: { current?: Stack }): Notifier {
     enqueue: (p, opts) => requireStack(holder).notifier.enqueue(p, opts),
     finalize: (runId, generation, patch) => requireStack(holder).notifier.finalize(runId, generation, patch),
     settleBatch: (keys, ok) => requireStack(holder).notifier.settleBatch(keys, ok),
+    ack: (runId, generation, by) => requireStack(holder).notifier.ack(runId, generation, by),
     peek: (key) => requireStack(holder).notifier.peek(key),
     consume: (key, by) => requireStack(holder).notifier.consume(key, by),
     reconcile: (persisted) => requireStack(holder).notifier.reconcile(persisted),
@@ -314,6 +316,9 @@ function forwardNotifier(holder: { current?: Stack }): Notifier {
     },
     get degraded() {
       return requireStack(holder).notifier.degraded;
+    },
+    get ackedSuppressions() {
+      return requireStack(holder).notifier.ackedSuppressions;
     },
   };
 }

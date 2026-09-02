@@ -132,6 +132,7 @@ const SETTING_SPECS: Record<string, SettingSpec> = {
   maxReconcileBatch: { kind: "number", min: 1, integer: true },
   coalesceWindowMs: MS,
   coalesceMaxBatch: { kind: "number", min: 1, integer: true },
+  ackWindowMs: MS,
   "worktree.enabled": BOOL,
   "worktree.gitTimeoutMs": MS,
   "workflow.enabled": BOOL,
@@ -402,7 +403,7 @@ export function renderStatus(deps: StatusCommandDeps): string {
   );
   const delivery = deps.notifier.stats;
   lines.push(
-    `Delivery: staged=${delivery.staged} pending=${delivery.pending} batched=${delivery.batched} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned}`,
+    `Delivery: staged=${delivery.staged} pending=${delivery.pending} batched=${delivery.batched} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned} acked=${deps.notifier.ackedSuppressions}`,
   );
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
   return lines.join("\n");

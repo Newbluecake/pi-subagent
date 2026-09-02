@@ -139,6 +139,8 @@ export interface SpawnRequest {
   budgetOverride?: Partial<DeadlineBudget>;
   slotless?: boolean;
   parentRunId?: RunId;
+  /** Caller will synchronously acknowledge the terminal outcome. */
+  expectAck?: boolean;
   /** Request an isolated git worktree for this run. */
   isolation?: "worktree";
   signal?: AbortSignal;

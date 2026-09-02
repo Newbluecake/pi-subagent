@@ -29,6 +29,7 @@ export interface SpawnService {
   spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
+  expectsAck(runId: RunId): boolean;
   markAutoBackgrounded(runId: RunId): void;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
@@ -57,7 +58,7 @@ export interface SpawnServiceDeps {
   budget?: Partial<DeadlineBudget>;
   onSnapshot?: (snapshot: RunSnapshot) => void;
   onLifecycle?: LifecycleSink;
-  onOutcomeConsumed?: (outcome: RunOutcome) => void;
+  onOutcomeAcked?: (outcome: RunOutcome) => void;
   notifyTerminalFailure?: (outcome: RunOutcome) => void;
   /** X6 bridge: fired when a label is first registered (mention registry feed). */
   onLabel?: (label: string, target: SpawnLabelTarget) => void;
@@ -81,6 +82,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
   const autoBackgroundedAt = new Map<RunId, number>();
   const running = new Set<RunId>();
+  const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
   const labels = new Map<string, SpawnLabelTarget>();
   const tombstones = deps.tombstones ?? new TombstoneStore(30 * 60 * 1000, now);
@@ -108,6 +110,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const finish = (outcome: RunOutcome) => {
     outcomes.set(outcome.runId, outcome);
     running.delete(outcome.runId);
+    claimedRunIds.delete(outcome.runId);
     nesting.delete(outcome.runId);
     const parent = parentOf.get(outcome.runId);
     if (parent !== undefined) {
@@ -358,6 +361,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
       }
       nesting.set(runId, { depth, ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}) });
+      if (req.expectAck) claimedRunIds.add(runId);
       if (req.parentRunId) {
         parentOf.set(runId, req.parentRunId);
         const siblings = childrenOf.get(req.parentRunId) ?? new Set<RunId>();
@@ -368,7 +372,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       return { runId };
     },
     async spawnAndWait(req) {
-      const started = await service.spawn(req);
+      const started = await service.spawn({ ...req, expectAck: true });
       if ("error" in started) throw new Error(started.error.message);
       const result = await new Promise<RunOutcome>((resolve) => {
         const done = outcomes.get(started.runId);
@@ -380,15 +384,25 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         }
       });
       try {
-        deps.onOutcomeConsumed?.(result);
+        deps.onOutcomeAcked?.(result);
       } catch {
         // Best effort only; consumption must not alter the returned outcome.
       }
       return result;
     },
     async waitOutcome(runId, waitMs) {
+      const ack = (outcome: RunOutcome) => {
+        try {
+          deps.onOutcomeAcked?.(outcome);
+        } catch {
+          // Best effort only; acknowledgement must not alter wait semantics.
+        }
+      };
       const done = outcomes.get(runId);
-      if (done) return { kind: "settled", outcome: done };
+      if (done) {
+        ack(done);
+        return { kind: "settled", outcome: done };
+      }
       return new Promise<BoundedWaitResult>((resolve) => {
         let settledFlag = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -396,6 +410,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         const waiter = (outcome: RunOutcome) => {
           if (settledFlag) return;
           cleanup();
+          ack(outcome);
           resolve({ kind: "settled", outcome });
         };
         const cleanup = () => {
@@ -412,11 +427,15 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             if (settledFlag) return;
             cleanup();
             const late = outcomes.get(runId);
+            if (late) ack(late);
             resolve(late ? { kind: "settled", outcome: late } : { kind: "pending" });
           }, waitMs);
           (timer as { unref?: () => void }).unref?.();
         }
       });
+    },
+    expectsAck(runId) {
+      return claimedRunIds.has(runId);
     },
     markAutoBackgrounded(runId) {
       if (!running.has(runId)) return;

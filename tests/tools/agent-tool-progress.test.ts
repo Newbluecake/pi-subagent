@@ -118,8 +118,10 @@ describe("M-B/M-D: formatOutcomeSummary", () => {
 
 describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () => {
   function ports(snap: RunSnapshot, settled: RunOutcome) {
+    let request: Parameters<NestedSpawnPort["spawn"]>[0] | undefined;
     const spawn: NestedSpawnPort = {
-      async spawn() {
+      async spawn(req) {
+        request = req;
         return { runId: settled.runId };
       },
       async spawnAndWait() {
@@ -134,7 +136,14 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
       getSnapshot: () => snap,
       waitOutcome: async () => ({ kind: "settled" as const, outcome: await gate }),
     };
-    return { spawn, progress, release };
+    return {
+      spawn,
+      progress,
+      release,
+      get request() {
+        return request;
+      },
+    };
   }
 
   it("streams partial updates while waiting, then returns the enriched final result", async () => {
@@ -147,7 +156,8 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
         }),
       });
       const final = completed();
-      const { spawn, progress, release } = ports(snap, final);
+      const testPorts = ports(snap, final);
+      const { spawn, progress, release } = testPorts;
       const tool = createAgentTool({ spawn, progress });
       const updates: AgentToolDetails[] = [];
       const onUpdate = (u: { details?: unknown }) => updates.push((u.details ?? {}) as AgentToolDetails);
@@ -165,6 +175,7 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
       expect(updates[0]!.progress![1]).toContain("▸ bash ls");
       release(final);
       const result = await pending;
+      expect(testPorts.request?.expectAck).toBe(true);
       const details = result.details as AgentToolDetails;
       expect(details.summary).toBe(formatOutcomeSummary(final));
       expect(details.model).toBe("copilot-completion/kimi-k3");
