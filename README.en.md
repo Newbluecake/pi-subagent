@@ -63,7 +63,7 @@ The `bash_job` tool manages those jobs (`job_id` accepts a unique prefix):
 | `output` | Incremental output since your last read (`offset` re-reads); never consumes the job |
 | `wait`   | Bounded block (default 30s, hard cap 120s); returns the current status on timeout   |
 | `kill`   | Terminate the whole process group (SIGTERM → grace → SIGKILL); idempotent           |
-| `list`   | Every known job (id · state · command preview · age)                                |
+| `list`   | Known jobs (id · state · command preview · age); backgrounded jobs only             |
 
 Settings (durations are whole seconds, like everywhere else):
 

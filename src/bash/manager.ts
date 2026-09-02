@@ -51,6 +51,12 @@ import {
 export const DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_MAX_BACKGROUND_JOBS = 8;
 export const DEFAULT_NOTIFY_POLL_MS = 2_000;
+/**
+ * Grace before a foreground-completed job's files are dropped. Not zero: the
+ * auto-background threshold can fire in the same tick the process exits, and
+ * `markBackgrounded` must still find a record to stamp.
+ */
+export const DEFAULT_DISCARD_GRACE_MS = 5_000;
 /** Cap on one `readOutput` increment; the cursor makes the rest reachable. */
 export const DEFAULT_MAX_READ_BYTES = 1024 * 1024;
 /** Candidate list cap in resolution errors (matches `resolve-target.ts`). */
@@ -79,6 +85,8 @@ export interface BashJobManagerOptions {
   maxBackgroundJobs?: number;
   /** Notification / adopted-liveness poll cadence. */
   pollMs?: Millis;
+  /** Grace before foreground-completed job records are discarded (0 = at the next tick). */
+  discardGraceMs?: Millis;
   /** SIGTERM → SIGKILL window handed to `killJobTree`. */
   killGraceMs?: Millis;
   maxReadBytes?: number;
@@ -194,6 +202,17 @@ export function shouldNotifyJob(record: JobRecord): boolean {
   return needsCompletionNotice(record) && record.backgroundedAt !== undefined && record.status !== "orphaned";
 }
 
+/**
+ * A job that settled while still in the foreground never became a `job_id` the
+ * model can use: the tool call itself returned (or threw) its full result, so
+ * the record and log are litter. Keeping them would bloat `bash_job list` with
+ * every `echo`, hold each command's output on disk for `retentionMs`, and
+ * leave hundreds of files behind in a busy session.
+ */
+export function shouldDiscardJob(record: JobRecord): boolean {
+  return isTerminalJobStatus(record.status) && record.backgroundedAt === undefined;
+}
+
 interface LocalHandle {
   readonly spawned: SpawnedJob;
   readonly stream: WriteStream;
@@ -225,6 +244,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   const maxBackgroundJobs = normalizePositive(options.maxBackgroundJobs, DEFAULT_MAX_BACKGROUND_JOBS);
   const maxReadBytes = normalizePositive(options.maxReadBytes, DEFAULT_MAX_READ_BYTES);
   const pollMs = normalizePositive(options.pollMs, DEFAULT_NOTIFY_POLL_MS);
+  // Unlike the other knobs, 0 is meaningful here ("discard on the next tick").
+  const discardGraceMs =
+    options.discardGraceMs !== undefined && Number.isFinite(options.discardGraceMs) && options.discardGraceMs >= 0
+      ? Math.trunc(options.discardGraceMs)
+      : DEFAULT_DISCARD_GRACE_MS;
   const killGraceMs = options.killGraceMs;
   const notify = options.notify;
 
@@ -320,6 +344,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     for (const entry of entries.values()) {
       if (!isTerminalJobStatus(entry.record.status)) return true;
       if (notify !== undefined && shouldNotifyJob(entry.record)) return true;
+      if (shouldDiscardJob(entry.record)) return true;
     }
     return false;
   }
@@ -338,6 +363,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     try {
       for (const entry of [...entries.values()]) await probeAdopted(entry);
       for (const entry of [...entries.values()]) await deliverNotice(entry.record);
+      for (const entry of [...entries.values()]) await discardForeground(entry.record);
     } finally {
       ticking = false;
       ensurePolling();
@@ -378,6 +404,25 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     await applyPatch(record.jobId, (current) =>
       current.notifiedAt === undefined ? { ...current, notifiedAt: at } : undefined,
     );
+  }
+
+  /**
+   * Drops a foreground-completed job (see `shouldDiscardJob`) once it is older
+   * than `discardGraceMs`. The record is re-read first: a job backgrounded
+   * between ticks must survive, and after a `/reload` the disk is the
+   * authority. Never touches a process — these jobs are already terminal.
+   */
+  async function discardForeground(record: JobRecord): Promise<void> {
+    if (disposed || !shouldDiscardJob(record)) return;
+    if (clock.now() - (record.endedAt ?? record.createdAt) < discardGraceMs) return;
+    const fresh = await store.load(record.jobId);
+    if (fresh && !shouldDiscardJob(fresh)) {
+      putRecord(fresh);
+      return;
+    }
+    await store.remove(record.jobId);
+    entries.delete(record.jobId);
+    localJobs.delete(record.jobId);
   }
 
   // ── log tee with a hard cap (§3.4) ───────────────────────────────────────

@@ -622,9 +622,13 @@ describe("bash job manager: waitExit", () => {
     await job.exit;
     expect((await waiting)?.status).toBe("completed");
     // The waiter's own timer is cleared eagerly; the notification poll retires
-    // itself on its next tick once there is nothing left to do.
+    // itself once there is nothing left to do — including the pending discard
+    // of this foreground job's record (default 5s grace).
     h.clock.advance(2_000);
     await settle();
+    expect(h.clock.pendingTimers).toBe(1);
+    h.clock.advance(5_000);
+    await waitFor(() => h.manager.get(job.jobId) === undefined, "record discarded");
     expect(h.clock.pendingTimers).toBe(0);
   });
 
@@ -861,5 +865,78 @@ describe("transition guards", () => {
     expect(transitionJob(stored as JobRecord, "killed", { at: 9_000 }).ok).toBe(false);
     await h.manager.kill(job.jobId);
     expect((await h.store.load(job.jobId))?.status).toBe("completed");
+  });
+});
+
+describe("foreground record discard", () => {
+  it("drops the record and log of a job that never reached the model", async () => {
+    const h = await harness({ pollMs: 1_000, discardGraceMs: 5_000 });
+    const job = await h.manager.create({ command: "echo hi", cwd: "/repo" });
+    h.port.last().stdout.write("hi\n");
+    h.port.last().exit({ exitCode: 0 });
+    await job.exit;
+
+    // Inside the grace the record is still fully readable.
+    h.clock.advance(1_000);
+    await settle();
+    expect(h.manager.get(job.jobId)?.status).toBe("completed");
+    expect((await h.manager.readOutput(job.jobId)).content).toBe("hi\n");
+
+    h.clock.advance(5_000);
+    await waitFor(() => h.manager.get(job.jobId) === undefined, "record discarded");
+    expect(h.manager.list()).toHaveLength(0);
+    expect(await h.store.load(job.jobId)).toBeUndefined();
+    expect(
+      await readFile(h.store.logPath(job.jobId), "utf8").then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+    // A foreground job is never announced, so nothing was lost by dropping it.
+    expect(h.notified).toHaveLength(0);
+    expect(h.clock.pendingTimers).toBe(0);
+  });
+
+  it("keeps a job backgrounded in the same tick as its exit (threshold race)", async () => {
+    const h = await harness({ pollMs: 1_000, discardGraceMs: 0 });
+    const job = await h.manager.create({ command: "sleep 300", cwd: "/repo" });
+    h.port.last().exit({ exitCode: 0 });
+    await job.exit;
+    // The threshold fires just after the process settled: the record must
+    // survive, because the tool already handed its job_id to the model.
+    await h.manager.markBackgrounded(job.jobId);
+
+    h.clock.advance(1_000);
+    await waitFor(() => h.notified.length === 1, "notification delivered");
+    expect(h.manager.get(job.jobId)?.status).toBe("completed");
+    expect(await h.store.load(job.jobId)).toBeDefined();
+  });
+
+  it("discards foreground leftovers of a previous process on recover", async () => {
+    const h = await harness({ pollMs: 1_000, discardGraceMs: 5_000 });
+    const stale = createJobRecord({
+      jobId: "b_STAX0001",
+      command: "echo leftover",
+      cwd: "/repo",
+      sessionId: "s0",
+      hostPid: HOST_PID,
+      logPath: h.store.logPath("b_STAX0001"),
+      createdAt: 100,
+    });
+    const settled = transitionJob(stale, "running", { at: 150, pid: 6_001, pgid: 6_001 });
+    expect(settled.ok).toBe(true);
+    if (!settled.ok) return;
+    const done = transitionJob(settled.record, "completed", { at: 200, exitCode: 0 });
+    expect(done.ok).toBe(true);
+    if (!done.ok) return;
+    await h.store.save(done.record);
+    await writeFile(h.store.logPath("b_STAX0001"), "leftover\n");
+
+    const next = h.rebuild();
+    await next.recover();
+    h.clock.advance(5_000);
+    await waitFor(() => next.get("b_STAX0001") === undefined, "leftover discarded");
+    expect(await h.store.load("b_STAX0001")).toBeUndefined();
+    expect(h.notified).toHaveLength(0);
   });
 });

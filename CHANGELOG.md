@@ -23,7 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`status` / `output` / `wait` / `kill` / `list`, bounded `wait`, idempotent `kill`, re-readable
   incremental `output`). Configured under `bashJobs.*` (`autoBackgroundS` — `0` disables the whole
   feature and registers no override, `maxLogBytes`, `maxBackgroundJobs`, `retentionS`,
-  `shutdownPolicy`, plus JSON-only `dir` / `shellPath`) and surfaced in `/agent status`.
+  `shutdownPolicy`, plus JSON-only `dir` / `shellPath`) and surfaced in `/agent status`. Only jobs
+  that actually reached the model as a `job_id` are retained: a command that finished in the
+  foreground already returned its full result through the tool call, so its record and log are
+  dropped shortly after it settles instead of lingering for `retentionS` and burying `bash_job
+list` under every `echo`.
 - **Zero-build git installs** — the `pi.extensions` manifest now points at a source-form
   root entry (`./index.ts` → `./src/index.js`), which pi loads through its bundled jiti
   TypeScript runtime. `pi install git:github.com/Newbluecake/pi-subagent` and
