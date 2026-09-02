@@ -195,7 +195,10 @@ function clipAtSentenceBoundary(text: string, limit: number): string {
   return `${text.slice(0, limit - 3)}...`;
 }
 
-export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): string {
+export function formatAgentTypesForPrompt(
+  types: readonly AgentTypeConfig[],
+  opts: { foregroundAutoBackgroundMs?: number } = {},
+): string {
   if (types.length === 0) return "";
   const DESC_LIMIT = 300;
   const lines = types.map((t) => {
@@ -210,10 +213,12 @@ export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): st
     "## Available subagent types (pi-subagent)",
     "When calling the Agent tool, pass one of these exact names as `subagent_type`:",
     ...lines,
-    "Tool protocol: a foreground Agent call blocks until the subagent finishes and returns its result directly.",
-    "With run_in_background: true the Agent call returns immediately with a run_id — poll or block with get_subagent_result(run_id, wait?).",
-    "steer_subagent works only on a run that is still running; the Agent tool's resume parameter works only on a terminal run with an existing persisted session (terminal includes completed, failed, timed_out and aborted).",
-    "Anywhere a run_id is accepted (get_subagent_result, steer_subagent, resume), the Agent call's label (its description) works too.",
+    opts.foregroundAutoBackgroundMs !== undefined && opts.foregroundAutoBackgroundMs > 0
+      ? `Tool protocol: a foreground Agent call blocks until the subagent finishes and returns its result directly; if it runs longer than ~${formatPromptDuration(opts.foregroundAutoBackgroundMs)} the call returns early with a run_id — the run is NOT stopped, it keeps running in the background and you must collect it with get_subagent_result(run_id, wait?), steer it with steer_subagent, or stop it with abort_subagent.`
+      : "Tool protocol: a foreground Agent call blocks until the subagent finishes and returns its result directly; abort_subagent can stop a still-running subagent.",
+    "With run_in_background: true the Agent call returns immediately with a run_id — poll or block with get_subagent_result(run_id, wait?), steer_subagent, or stop it with abort_subagent.",
+    "steer_subagent works only on a run that is still running; abort_subagent stops a running run; the Agent tool's resume parameter works only on a terminal run with an existing persisted session (terminal includes completed, failed, timed_out and aborted).",
+    "Anywhere a run_id is accepted (get_subagent_result, steer_subagent, abort_subagent, resume), the Agent call's label (its description) works too.",
   ].join("\n");
 }
 
@@ -223,8 +228,18 @@ export function formatAgentTypesForPrompt(types: readonly AgentTypeConfig[]): st
  * unchanged when there is nothing to inject, so the caller can detect "no
  * change" by identity and skip pi's systemPrompt-override path entirely.
  */
-export function appendAgentTypesToSystemPrompt(systemPrompt: string, types: readonly AgentTypeConfig[]): string {
-  const section = formatAgentTypesForPrompt(types);
+function formatPromptDuration(ms: number): string {
+  if (ms >= 3_600_000) return `${Math.round(ms / 3_600_000)}h`;
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)}m`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
+export function appendAgentTypesToSystemPrompt(
+  systemPrompt: string,
+  types: readonly AgentTypeConfig[],
+  opts?: { foregroundAutoBackgroundMs?: number },
+): string {
+  const section = formatAgentTypesForPrompt(types, opts);
   return section ? `${systemPrompt}\n\n${section}` : systemPrompt;
 }
 export { parseFile as parseAgentType };

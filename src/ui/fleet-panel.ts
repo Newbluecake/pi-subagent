@@ -58,6 +58,8 @@ export interface FleetRow {
   escalation: string | undefined;
   maxEscalation: EscalationLevel | undefined;
   usage: UsageDelta | undefined;
+  /** Run was moved from foreground to background by the timeout threshold. */
+  autoBackgrounded?: boolean;
   /** X3 nested run (spawned with parentRunId). */
   nested: boolean;
   terminal: boolean;
@@ -283,6 +285,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     escalation: esc.text,
     maxEscalation: esc.max,
     usage: snapshot.diag.usage,
+    autoBackgrounded: snapshot.diag.autoBackgroundedAt !== undefined,
     nested: snapshot.parentRunId !== undefined,
     terminal,
     settledAgoMs: terminal ? Math.max(0, opts.now - snapshot.updatedAt) : undefined,

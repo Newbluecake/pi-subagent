@@ -113,6 +113,10 @@ export function createRPCServer(deps: RPCServerDeps): RPCServer {
         } else if (raw.method === "stop") {
           if (!isSchema<StopParams>(StopParamsSchema, raw.params)) throw new Error("invalid stop params");
           const params = raw.params;
+          // The outer envelope ok:true means only that RPC transport and
+          // parameter validation succeeded. The inner result is StopResult;
+          // its ok:false/already_terminal is an expected idempotent outcome,
+          // not an RPC failure.
           send(raw.requestId, {
             ok: true,
             result: await deps.query.stop(params.runId, params.cause as StopCause | undefined),

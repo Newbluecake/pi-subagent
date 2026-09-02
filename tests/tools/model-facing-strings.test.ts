@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
 import { createResultTool } from "../../src/tools/result-tool.js";
 import { createSteerTool } from "../../src/tools/steer-tool.js";
+import { createAbortTool } from "../../src/tools/abort-tool.js";
 import { createWorkflowTool } from "../../src/tools/workflow-tool.js";
 import { createStructuredOutputTool } from "../../src/tools/structured-output-tool.js";
 
@@ -25,6 +26,7 @@ function tools() {
     createAgentTool({ spawn }),
     createResultTool({ query: {} as never }),
     createSteerTool({ query: {} as never }),
+    createAbortTool({ query: {} as never }),
     createWorkflowTool({} as never),
     createStructuredOutputTool({ schema: { type: "object" }, onSubmit: () => ({ ok: true }) }),
   ];
@@ -39,9 +41,10 @@ describe("model-facing tool strings", () => {
   });
 
   it("documents Agent label acceptance for run_id parameters", () => {
-    const [agent, result, steer] = tools();
+    const [agent, result, steer, abort] = tools();
     expect(collectDescriptions(result.parameters).join(" ")).toContain("label");
     expect(collectDescriptions(steer.parameters).join(" ")).toContain("label");
+    expect(collectDescriptions(abort.parameters).join(" ")).toContain("label");
     expect(agent.description).toContain("terminal run");
   });
 

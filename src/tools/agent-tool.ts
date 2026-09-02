@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ErrorInfo, RunId, RunOutcome, RunSnapshot, SpawnRequest } from "../core/types.js";
+import type { BoundedWaitResult } from "../service/spawn-service.js";
 import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
@@ -26,8 +27,8 @@ export interface NestedSpawnPort {
  */
 export interface ForegroundProgressPort {
   getSnapshot(runId: RunId): RunSnapshot | undefined;
-  /** Resolves with the terminal outcome (undefined only if the wait itself was cut short). */
-  waitOutcome(runId: RunId): Promise<RunOutcome | undefined>;
+  waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
+  markAutoBackgrounded?(runId: RunId): void;
 }
 
 /** M-B: partial-update / final-result details consumed by renderResult. */
@@ -37,6 +38,7 @@ export interface AgentToolDetails {
   turns?: number;
   durationMs?: number;
   background?: boolean;
+  autoBackgrounded?: boolean;
   structuredResult?: unknown;
   /** Partial (isPartial) updates: preformatted live progress lines. */
   progress?: string[];
@@ -187,6 +189,7 @@ export function createAgentTool(deps: {
   forceSlotless?: boolean;
   /** M-B: live foreground progress (top-level tool only; never handed to nested tools). */
   progress?: ForegroundProgressPort;
+  autoBackgroundMs?: () => number;
 }): ToolDefinition<typeof AgentToolParams> {
   const nestedNote = deps.allowedTypes
     ? ` This is a nested delegation tool: subagent_type is restricted to [${deps.allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed).`
@@ -198,7 +201,7 @@ export function createAgentTool(deps: {
       "Launch an autonomous subagent to handle a complex, multi-step task. The subagent runs in its own bounded session " +
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
       "(completed/failed/timed_out/aborted). Use get_subagent_result to check on or wait for a background run, and " +
-      "steer_subagent to send a follow-up instruction to a still-running one. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
+      "steer_subagent to send a follow-up instruction to a still-running one. A foreground call that exceeds the configured auto-background threshold returns early with a run_id (the run keeps going; collect it with get_subagent_result). abort_subagent stops a running subagent. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
       "Set schema to require a structured (schema-validated) result instead of free text." +
       nestedNote,
     promptSnippet:
@@ -233,7 +236,7 @@ export function createAgentTool(deps: {
         );
       }
       const modelOverride = parseModel(params.model);
-      const request = {
+      const baseRequest = {
         type: params.subagent_type,
         prompt: params.prompt,
         label: params.description,
@@ -249,10 +252,9 @@ export function createAgentTool(deps: {
         ...(typeof params.timeout_ms === "number" ? { budgetOverride: { totalMs: params.timeout_ms } } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
         ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
-        ...(signal ? { signal } : {}),
       };
       if (params.run_in_background) {
-        const spawned = await deps.spawn.spawn(request);
+        const spawned = await deps.spawn.spawn({ ...baseRequest, ...(signal ? { signal } : {}) });
         if ("error" in spawned) throw new Error(spawned.error.message);
         return {
           content: [
@@ -264,16 +266,42 @@ export function createAgentTool(deps: {
           details: { runId: spawned.runId, background: true },
         };
       }
-      const outcome = await (async (): Promise<RunOutcome> => {
+      const outcome = await (async (): Promise<
+        RunOutcome | { content: [{ type: "text"; text: string }]; details: AgentToolDetails }
+      > => {
         // M-B: when a progress port is wired (top-level tool), spawn first to
         // learn the runId, stream 1 Hz partial updates from the live snapshot
         // store, and wait for the terminal outcome. Semantically identical to
         // spawnAndWait (same waiter, same abort threading via request.signal)
         // — the only addition is the read-only onUpdate side channel.
-        if (deps.progress && onUpdate) {
+        if (deps.progress && onUpdate && !deps.parentRunId) {
           const progress = deps.progress;
-          const spawned = await deps.spawn.spawn(request);
-          if ("error" in spawned) throw new Error(spawned.error.message);
+          const relay = new AbortController();
+          let forwardAbort = true;
+          let relayListenerAttached = false;
+          const onAbort = () => {
+            if (forwardAbort) relay.abort();
+          };
+          if (signal?.aborted) relay.abort();
+          else if (signal) {
+            signal.addEventListener("abort", onAbort, { once: true });
+            relayListenerAttached = true;
+          }
+          const stopForwarding = () => {
+            forwardAbort = false;
+            if (relayListenerAttached) signal!.removeEventListener("abort", onAbort);
+          };
+          let spawned: { runId: RunId } | { error: ErrorInfo };
+          try {
+            spawned = await deps.spawn.spawn({ ...baseRequest, signal: relay.signal });
+          } catch (error) {
+            stopForwarding();
+            throw error;
+          }
+          if ("error" in spawned) {
+            stopForwarding();
+            throw new Error(spawned.error.message);
+          }
           const push = () => {
             const snap = progress.getSnapshot(spawned.runId);
             if (!snap) return;
@@ -287,15 +315,33 @@ export function createAgentTool(deps: {
           (timer as { unref?: () => void }).unref?.();
           push();
           try {
-            const settled = await progress.waitOutcome(spawned.runId);
-            if (!settled) throw new Error(`Subagent "${params.description}" wait ended without a terminal outcome`);
-            return settled;
+            const autoMs = deps.autoBackgroundMs?.() ?? 0;
+            const waited = await progress.waitOutcome(spawned.runId, autoMs > 0 ? autoMs : undefined);
+            if (waited.kind === "pending") {
+              progress.markAutoBackgrounded?.(spawned.runId);
+              stopForwarding();
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Subagent "${params.description}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget. You must collect it later: get_subagent_result(run_id: "${spawned.runId}", wait: true) to block for its result; steer_subagent to send a follow-up instruction; abort_subagent to stop it.`,
+                  },
+                ],
+                details: { runId: spawned.runId, background: true, autoBackgrounded: true },
+              };
+            }
+            stopForwarding();
+            return waited.outcome;
+          } catch (error) {
+            stopForwarding();
+            throw error;
           } finally {
             clearInterval(timer);
           }
         }
-        return deps.spawn.spawnAndWait(request);
+        return deps.spawn.spawnAndWait({ ...baseRequest, ...(signal ? { signal } : {}) });
       })();
+      if ("content" in outcome) return outcome;
       if (outcome.status !== "completed") {
         const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
         const tail = outcome.text?.trim();

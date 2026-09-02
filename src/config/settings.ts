@@ -57,6 +57,8 @@ export interface AgentSettings {
   startupMs?: number;
   deliveryAttempts: number;
   deliveryBackoffMs: number;
+  /** Foreground Agent calls auto-background after this duration; 0 disables. */
+  foregroundAutoBackgroundMs: number;
   reconcileTtlMs: number;
   maxReconcileRounds: number;
   maxReconcileBatch: number;
@@ -74,6 +76,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   budget: DEFAULT_BUDGET,
   deliveryAttempts: 3,
   deliveryBackoffMs: 1_000,
+  foregroundAutoBackgroundMs: 600_000,
   reconcileTtlMs: 24 * 60 * 60 * 1_000,
   maxReconcileRounds: 3,
   maxReconcileBatch: 10,
@@ -118,6 +121,12 @@ export function loadSettings(source: unknown): AgentSettings {
       typeof value.deliveryBackoffMs === "number"
         ? Math.max(0, value.deliveryBackoffMs)
         : DEFAULT_SETTINGS.deliveryBackoffMs,
+    foregroundAutoBackgroundMs:
+      typeof value.foregroundAutoBackgroundMs === "number" &&
+      Number.isFinite(value.foregroundAutoBackgroundMs) &&
+      value.foregroundAutoBackgroundMs >= 0
+        ? value.foregroundAutoBackgroundMs
+        : DEFAULT_SETTINGS.foregroundAutoBackgroundMs,
     reconcileTtlMs:
       typeof value.reconcileTtlMs === "number" ? Math.max(0, value.reconcileTtlMs) : DEFAULT_SETTINGS.reconcileTtlMs,
     maxReconcileRounds:

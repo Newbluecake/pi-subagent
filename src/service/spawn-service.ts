@@ -24,9 +24,12 @@ export interface SpawnLabelTarget {
   readonly runId: RunId;
   readonly type: SpawnRequest["type"];
 }
+export type BoundedWaitResult = { kind: "settled"; outcome: RunOutcome } | { kind: "pending" };
 export interface SpawnService {
   spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
+  waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
+  markAutoBackgrounded(runId: RunId): void;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   waitAll(opts?: { runIds?: RunId[]; waitMs?: number }): Promise<{ settled: RunOutcome[]; pending: RunId[] }>;
   /** Resolve a label without exposing the mutable internal index. */
@@ -75,6 +78,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const records = new Map<RunId, RunSnapshot>();
   const outcomes = new Map<RunId, RunOutcome>();
   const waits = new Map<RunId, Set<(outcome: RunOutcome) => void>>();
+  const autoBackgroundedAt = new Map<RunId, number>();
   const running = new Set<RunId>();
   const resumeLocks = new Set<string>();
   const labels = new Map<string, SpawnLabelTarget>();
@@ -124,7 +128,16 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             deadlineAt: outcome.diag.deadlineAt,
             queueDeadlineAt: undefined,
           },
-          diag: outcome.diag,
+          diag: {
+            ...outcome.diag,
+            ...(outcome.diag.autoBackgroundedAt !== undefined
+              ? { autoBackgroundedAt: outcome.diag.autoBackgroundedAt }
+              : records.get(outcome.runId)?.diag.autoBackgroundedAt !== undefined
+                ? { autoBackgroundedAt: records.get(outcome.runId)!.diag.autoBackgroundedAt }
+                : autoBackgroundedAt.has(outcome.runId)
+                  ? { autoBackgroundedAt: autoBackgroundedAt.get(outcome.runId) }
+                  : {}),
+          },
           outcome,
           updatedAt: now(),
         } satisfies RunSnapshot)
@@ -136,6 +149,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     }
     for (const resolve of waits.get(outcome.runId) ?? []) resolve(outcome);
     waits.delete(outcome.runId);
+    autoBackgroundedAt.delete(outcome.runId);
   };
   const start = async (
     req: SpawnRequest,
@@ -165,6 +179,8 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const outcome = await deps.runner.run(spec, {
         ...(deps.onLifecycle ? { onLifecycle: deps.onLifecycle } : {}),
         onSnapshot: (s) => {
+          const markedAt = autoBackgroundedAt.get(runId);
+          if (markedAt !== undefined) s.diag.autoBackgroundedAt = markedAt;
           records.set(runId, s);
           deps.onSnapshot?.(s);
         },
@@ -366,6 +382,48 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         // Best effort only; consumption must not alter the returned outcome.
       }
       return result;
+    },
+    async waitOutcome(runId, waitMs) {
+      const done = outcomes.get(runId);
+      if (done) return { kind: "settled", outcome: done };
+      return new Promise<BoundedWaitResult>((resolve) => {
+        let settledFlag = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const set = waits.get(runId) ?? new Set<(outcome: RunOutcome) => void>();
+        const waiter = (outcome: RunOutcome) => {
+          if (settledFlag) return;
+          cleanup();
+          resolve({ kind: "settled", outcome });
+        };
+        const cleanup = () => {
+          if (settledFlag) return;
+          settledFlag = true;
+          if (timer !== undefined) clearTimeout(timer);
+          set.delete(waiter);
+          if (set.size === 0) waits.delete(runId);
+        };
+        set.add(waiter);
+        waits.set(runId, set);
+        if (waitMs !== undefined) {
+          timer = setTimeout(() => {
+            if (settledFlag) return;
+            cleanup();
+            const late = outcomes.get(runId);
+            resolve(late ? { kind: "settled", outcome: late } : { kind: "pending" });
+          }, waitMs);
+          (timer as { unref?: () => void }).unref?.();
+        }
+      });
+    },
+    markAutoBackgrounded(runId) {
+      if (!running.has(runId)) return;
+      const markedAt = now();
+      autoBackgroundedAt.set(runId, markedAt);
+      const live = records.get(runId);
+      if (live) {
+        live.diag.autoBackgroundedAt = markedAt;
+        deps.onSnapshot?.(live);
+      }
     },
     async abort(runId, cause = "user_stop") {
       if (!running.has(runId)) return false;

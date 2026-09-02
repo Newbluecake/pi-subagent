@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`abort_subagent` tool** — stop a running subagent by run id, unique prefix, or Agent label; terminal runs return an idempotent already-finished result.
+- **Foreground auto-backgrounding** — foreground Agent calls now return after 10 minutes by default when the run is still active; the run is not stopped and can be collected with `get_subagent_result`.
 - **Fuzzy model hints** (parity with upstream @tintinweb/pi-subagents) — agent
   frontmatter `model:` and the Agent tool's `model` param now accept a bare model
   id (`kimi-k3`) or a case-insensitive substring alias (`sonnet`, `haiku`) in

@@ -232,6 +232,8 @@ export interface RunOutcome {
 }
 export interface RunDiagnostics {
   createdAt: Millis;
+  /** Display-only timestamp when a foreground call was moved to background. */
+  autoBackgroundedAt?: Millis;
   enqueuedAt?: Millis;
   startedAt?: Millis;
   promptDispatchedAt?: Millis;

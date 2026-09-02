@@ -101,6 +101,7 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
   meta.push(row.phaseLabel, formatDuration(row.phaseMs), `Σ${formatDuration(row.elapsedMs)}`);
   const parts = [name, color("muted", meta.join(" "))];
   if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
+  if (row.autoBackgrounded) parts.push(color("muted", "⇣后台"));
   return parts.join(" ");
 }
 

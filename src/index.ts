@@ -28,6 +28,7 @@ import { createSpawnService, type SpawnService } from "./service/spawn-service.j
 import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
+import { createAbortTool } from "./tools/abort-tool.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
@@ -119,9 +120,11 @@ export default function activate(pi: ExtensionAPI): void {
       // M-B: live foreground progress — snapshot reads from the query service,
       // terminal wait through the spawn service's own waiter (no unknown-run
       // race for a just-spawned id, unlike QueryService.wait).
+      autoBackgroundMs: () => settings.foregroundAutoBackgroundMs,
       progress: {
         getSnapshot: (runId) => holder.current?.query.get(runId),
-        waitOutcome: async (runId) => (await requireStack(holder).spawn.waitAll({ runIds: [runId] })).settled[0],
+        waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
+        markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
       },
     }),
   );
@@ -133,6 +136,7 @@ export default function activate(pi: ExtensionAPI): void {
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   // Inject the registered agent types into the system prompt: the model has
   // no other way to learn valid `subagent_type` values and otherwise burns
   // turns on trial-and-error "unknown agent type" failures. `types` reloads
@@ -140,7 +144,9 @@ export default function activate(pi: ExtensionAPI): void {
   // picked up on the next turn. Child sessions never see this hook — their
   // activate() returns early on the HOST_KEY guard above.
   pi.on("before_agent_start", (event) => {
-    const systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list());
+    const systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list(), {
+      foregroundAutoBackgroundMs: settings.foregroundAutoBackgroundMs,
+    });
     return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
   });
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
@@ -230,6 +236,8 @@ function forwardSpawn(holder: { current?: Stack }): SpawnService {
     spawnAndWait: (req) => requireStack(holder).spawn.spawnAndWait(req),
     abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
     waitAll: (opts) => requireStack(holder).spawn.waitAll(opts),
+    waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
+    markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
     // CC1: forwarded for parity with the rest of SpawnService; no caller yet
     // (the workflow orchestrator that will use this lands in M3.1+).
     stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),

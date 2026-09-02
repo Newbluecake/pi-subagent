@@ -460,7 +460,7 @@ describe("FleetWidgetController (fake ui)", () => {
       wait: async () => ({ ok: false as const, reason: "unknown_run" as const }),
       waitAll: async () => ({ settled: [], pending: [] }),
       steer: async () => ({ ok: false as const, reason: "not_running" as const }),
-      stop: async () => ({ ok: false, escalatedTo: "L4" as const }),
+      stop: async () => ({ ok: false as const, reason: "stop_failed" as const, escalatedTo: "L4" as const }),
     };
     return holder;
   }

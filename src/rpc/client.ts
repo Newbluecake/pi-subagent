@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ErrorInfo } from "../core/types.js";
+import type { ErrorInfo, StopCause } from "../core/types.js";
+import type { StopResult } from "../service/query-service.js";
 import {
   DEFAULT_RPC_TIMEOUT_MS,
   RPC_REQUEST_CHANNEL,
@@ -28,6 +29,7 @@ export type RPCMethod = "ping" | "spawn" | "stop" | "result";
 export interface RPCClient {
   call<T = unknown>(method: RPCMethod, params: unknown): Promise<T>;
   ping(): Promise<{ version: string; ready: boolean }>;
+  stop(runId: string, cause?: Extract<StopCause, "user_stop" | "shutdown">): Promise<StopResult>;
 }
 
 export function createRPCClient(options: RPCClientOptions): RPCClient {
@@ -73,6 +75,9 @@ export function createRPCClient(options: RPCClientOptions): RPCClient {
     },
     ping() {
       return this.call("ping", {}) as Promise<{ version: string; ready: boolean }>;
+    },
+    stop(runId, cause) {
+      return this.call("stop", { runId, ...(cause ? { cause } : {}) }) as Promise<StopResult>;
     },
   };
 }

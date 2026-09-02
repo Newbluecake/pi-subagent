@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSpawnService } from "../../src/service/spawn-service.js";
 import type { AgentTypeConfig, RunOutcome } from "../../src/core/types.js";
 import type { Runner, SlotPool } from "../../src/service/ports.js";
@@ -34,6 +34,125 @@ function deps(runner: Runner) {
   };
 }
 describe("SpawnService", () => {
+  it("does not create a timer for an unbounded wait", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (value: RunOutcome) => void;
+      const service = createSpawnService({
+        ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+      });
+      const started = await service.spawn({ type: "worker", prompt: "x" });
+      const waiting = service.waitOutcome(started.runId);
+      expect(vi.getTimerCount()).toBe(0);
+      finish({ ...outcome, runId: started.runId });
+      await expect(waiting).resolves.toMatchObject({ kind: "settled" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waitOutcome settles and cleans up its waiter", async () => {
+    let finish!: (value: RunOutcome) => void;
+    const service = createSpawnService({
+      ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    const waiting = service.waitOutcome(started.runId, 1000);
+    finish({ ...outcome, runId: started.runId });
+    await expect(waiting).resolves.toMatchObject({ kind: "settled", outcome: { runId: started.runId } });
+    await expect(service.waitOutcome(started.runId)).resolves.toMatchObject({ kind: "settled" });
+  });
+
+  it("returns pending at the deadline and preserves a later terminal outcome", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: (value: RunOutcome) => void;
+      const service = createSpawnService({
+        ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+      });
+      const started = await service.spawn({ type: "worker", prompt: "x" });
+      const waiting = service.waitOutcome(started.runId, 10);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(waiting).resolves.toEqual({ kind: "pending" });
+      finish({ ...outcome, runId: started.runId });
+      await vi.waitFor(() => expect(service.snapshots().find((s) => s.runId === started.runId)?.outcome).toBeDefined());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains auto-background metadata when marked before the first snapshot", async () => {
+    let finish!: (value: RunOutcome) => void;
+    let snapshotCallback!: (snapshot: any) => void;
+    const service = createSpawnService({
+      ...deps({
+        run: async (spec, callbacks) => {
+          snapshotCallback = callbacks.onSnapshot!;
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          snapshotCallback({
+            runId: spec.runId,
+            generation: 1,
+            status: "running",
+            phase: "model_turn",
+            deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+            diag: { ...outcome.diag, createdAt: 0, phase: "model_turn" },
+            updatedAt: 0,
+          });
+          return new Promise<RunOutcome>((resolve) => (finish = resolve));
+        },
+      }),
+      now: () => 42,
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    service.markAutoBackgrounded(started.runId);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    finish({ ...outcome, runId: started.runId });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(service.snapshots().find((s) => s.runId === started.runId)?.diag.autoBackgroundedAt).toBe(42);
+  });
+
+  it("re-emits a live auto-background marker and ignores terminal marks", async () => {
+    let finish!: (value: RunOutcome) => void;
+    const snapshots: unknown[] = [];
+    const service = createSpawnService({
+      ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+      now: () => 99,
+      onSnapshot: (s) => snapshots.push(s),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    const live = {
+      runId: started.runId,
+      generation: 1,
+      status: "running" as const,
+      phase: "model_turn" as const,
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: { ...outcome.diag, phase: "model_turn" as const },
+      updatedAt: 0,
+    };
+    // The service's runner callback is the normal live snapshot path; use a
+    // runner callback capture here to verify marking causes a second emit.
+    const markService = createSpawnService({
+      ...deps({
+        run: async (_spec, callbacks) => {
+          callbacks.onSnapshot?.(live);
+          return new Promise<RunOutcome>((resolve) => (finish = resolve));
+        },
+      }),
+      now: () => 99,
+      onSnapshot: (s) => snapshots.push(s),
+    });
+    const markStarted = await markService.spawn({ type: "worker", prompt: "x" });
+    markService.markAutoBackgrounded(markStarted.runId);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(snapshots.length).toBeGreaterThanOrEqual(2);
+    expect((snapshots[snapshots.length - 1] as any).diag.autoBackgroundedAt).toBe(99);
+    finish({ ...outcome, runId: markStarted.runId });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const count = snapshots.length;
+    markService.markAutoBackgrounded(markStarted.runId);
+    expect(snapshots).toHaveLength(count);
+  });
+
   it("rejects unknown types without invoking runtime", async () => {
     let called = false;
     const result = await createSpawnService({

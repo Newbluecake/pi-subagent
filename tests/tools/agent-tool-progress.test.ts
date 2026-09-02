@@ -132,7 +132,7 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
     });
     const progress: ForegroundProgressPort = {
       getSnapshot: () => snap,
-      waitOutcome: () => gate,
+      waitOutcome: async () => ({ kind: "settled" as const, outcome: await gate }),
     };
     return { spawn, progress, release };
   }
@@ -212,7 +212,7 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
     };
     const progress: ForegroundProgressPort = {
       getSnapshot: () => undefined,
-      waitOutcome: async () => undefined,
+      waitOutcome: async () => ({ kind: "settled" as const, outcome: completed() }),
     };
     const tool = createAgentTool({ spawn, progress });
     const result = await tool.execute(
@@ -224,6 +224,145 @@ describe("M-B: foreground progress path (spawn + onUpdate + waitOutcome)", () =>
     );
     expect(calls).toEqual(["spawnAndWait"]);
     expect((result.details as AgentToolDetails).summary).toBeDefined();
+  });
+});
+
+describe("auto-background behavior", () => {
+  const params = { description: "demo", prompt: "p", subagent_type: "general" } as const;
+
+  it("returns a background result after the configured threshold", async () => {
+    const requestSignals: AbortSignal[] = [];
+    const spawn: NestedSpawnPort = {
+      async spawn(request) {
+        requestSignals.push(request.signal!);
+        return { runId: "run-bg" };
+      },
+      async spawnAndWait() {
+        throw new Error("unexpected spawnAndWait");
+      },
+    };
+    const progress: ForegroundProgressPort = {
+      getSnapshot: () => undefined,
+      waitOutcome: async (_runId, waitMs) => {
+        expect(waitMs).toBe(1000);
+        return { kind: "pending" };
+      },
+    };
+    const controller = new AbortController();
+    const result = await createAgentTool({ spawn, progress, autoBackgroundMs: () => 1000 }).execute(
+      "tc",
+      params,
+      controller.signal,
+      (() => {}) as never,
+      {} as never,
+    );
+    expect(result.details).toEqual({ runId: "run-bg", background: true, autoBackgrounded: true });
+    expect(result.content[0]!.text).toContain("get_subagent_result");
+    expect(result.content[0]!.text).toContain("NOT stopped");
+    expect(requestSignals[0]).not.toBe(controller.signal);
+    controller.abort();
+    expect(requestSignals[0]!.aborted).toBe(false);
+  });
+
+  it("passes undefined waitMs when auto-backgrounding is disabled", async () => {
+    let receivedWaitMs: number | undefined = 123;
+    const final = completed();
+    const spawn: NestedSpawnPort = {
+      async spawn() {
+        return { runId: final.runId };
+      },
+      async spawnAndWait() {
+        throw new Error("unexpected spawnAndWait");
+      },
+    };
+    const progress: ForegroundProgressPort = {
+      getSnapshot: () => undefined,
+      waitOutcome: async (_runId, waitMs) => {
+        receivedWaitMs = waitMs;
+        return { kind: "settled", outcome: final };
+      },
+    };
+    await createAgentTool({ spawn, progress, autoBackgroundMs: () => 0 }).execute(
+      "tc",
+      params,
+      undefined,
+      (() => {}) as never,
+      {} as never,
+    );
+    expect(receivedWaitMs).toBeUndefined();
+  });
+
+  it("keeps the caller signal for explicit background runs", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const spawn: NestedSpawnPort = {
+      async spawn(request) {
+        requestSignal = request.signal;
+        return { runId: "run-explicit" };
+      },
+      async spawnAndWait() {
+        throw new Error("unexpected spawnAndWait");
+      },
+    };
+    await createAgentTool({ spawn }).execute(
+      "tc",
+      { ...params, run_in_background: true },
+      controller.signal,
+      undefined,
+      {} as never,
+    );
+    expect(requestSignal).toBe(controller.signal);
+  });
+
+  it("cleans the relay listener after normal completion and spawn failure", async () => {
+    const controller = new AbortController();
+    let completedSignal!: AbortSignal;
+    const final = completed();
+    const progress: ForegroundProgressPort = {
+      getSnapshot: () => undefined,
+      waitOutcome: async () => ({ kind: "settled", outcome: final }),
+    };
+    const spawn: NestedSpawnPort = {
+      async spawn(request) {
+        completedSignal = request.signal!;
+        return { runId: final.runId };
+      },
+      async spawnAndWait() {
+        throw new Error("unexpected");
+      },
+    };
+    await createAgentTool({ spawn, progress }).execute(
+      "tc",
+      params,
+      controller.signal,
+      (() => {}) as never,
+      {} as never,
+    );
+    controller.abort();
+    expect(completedSignal.aborted).toBe(false);
+
+    const failedController = new AbortController();
+    let failedSignal!: AbortSignal;
+    const failed = {
+      async spawn(request: any) {
+        failedSignal = request.signal;
+        return { error: { kind: "internal", message: "no", retryable: false } };
+      },
+      async spawnAndWait() {
+        throw new Error("unexpected");
+      },
+    } as NestedSpawnPort;
+    await expect(
+      createAgentTool({ spawn: failed, progress }).execute(
+        "tc",
+        params,
+        failedController.signal,
+        (() => {}) as never,
+        {} as never,
+      ),
+    ).rejects.toThrow("no");
+    failedController.abort();
+    expect(failedSignal.aborted).toBe(false);
   });
 });
 

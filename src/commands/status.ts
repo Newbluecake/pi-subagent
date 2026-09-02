@@ -127,6 +127,7 @@ const SETTING_SPECS: Record<string, SettingSpec> = {
   deliveryAttempts: { kind: "number", min: 1, integer: true },
   deliveryBackoffMs: MS,
   reconcileTtlMs: MS,
+  foregroundAutoBackgroundMs: MS,
   maxReconcileRounds: COUNT,
   maxReconcileBatch: { kind: "number", min: 1, integer: true },
   "worktree.enabled": BOOL,

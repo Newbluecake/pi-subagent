@@ -13,10 +13,12 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`Agent` tool** — spawn bounded subagent runs: `description`, `prompt`, `subagent_type`, optional `model` override (strict `provider/id` or a fuzzy hint like `sonnet` / `kimi-k3`, resolved against pi's available models), `run_in_background`, `resume` (continue a finished session), `isolation: "worktree"` (git worktree per run), `timeout_ms`, and `schema` (structured, schema-validated output).
 - **`get_subagent_result`** — non-blocking poll by default; `wait: true` + `wait_ms` for bounded blocking.
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
+- **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
+- **Foreground auto-backgrounding** — after `foregroundAutoBackgroundMs` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
-- **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown.
+- **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
 - **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
 
 ## The agent tree
@@ -71,6 +73,7 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
   "concurrencyLimit": 6,
   "fleetWidget": true, // the agent tree above the editor
   "maxNestedDepth": 2, // subagent spawning subagents
+  "foregroundAutoBackgroundMs": 600000, // foreground auto-background threshold; 0 disables
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {

@@ -3,6 +3,12 @@ import type { Clock } from "../core/clock.js";
 import type { RunId, RunOutcome, RunPhase, RunSnapshot, RunStatus, StopCause } from "../core/types.js";
 import type { Runner, RunRegistry } from "./ports.js";
 
+export type StopResult =
+  | { ok: true; escalatedTo: "L2" | "L3" | "L4" }
+  | { ok: false; reason: "unknown_run" }
+  | { ok: false; reason: "already_terminal"; status: RunStatus }
+  | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
+
 export interface QueryService {
   get(runId: RunId): RunSnapshot | undefined;
   list(filter?: { status?: RunStatus[]; parentRunId?: RunId }): RunSnapshot[];
@@ -15,7 +21,7 @@ export interface QueryService {
     runId: RunId,
     text: string,
   ): Promise<{ ok: true } | { ok: false; reason: "not_running" | "steer_timeout" | "steer_rejected"; detail?: string }>;
-  stop(runId: RunId, cause?: StopCause): Promise<{ ok: boolean; escalatedTo: "L2" | "L3" | "L4" }>;
+  stop(runId: RunId, cause?: StopCause): Promise<StopResult>;
 }
 export interface QueryServiceDeps {
   registry: RunRegistry;
@@ -100,11 +106,17 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
     },
     async stop(id, cause = "user_stop") {
       const snapshot = deps.registry.get(id);
-      if (!snapshot || terminal(snapshot.status) || !deps.runner.abort) return { ok: false, escalatedTo: "L4" };
+      if (!snapshot) return { ok: false, reason: "unknown_run" };
+      if (terminal(snapshot.status)) return { ok: false, reason: "already_terminal", status: snapshot.status };
+      if (!deps.runner.abort) return { ok: false, reason: "stop_failed", escalatedTo: "L4" };
       try {
-        return await deps.runner.abort(id, cause);
+        const result = await deps.runner.abort(id, cause);
+        if (result.ok) return { ok: true, escalatedTo: result.escalatedTo };
+        const after = deps.registry.get(id);
+        if (after && terminal(after.status)) return { ok: false, reason: "already_terminal", status: after.status };
+        return { ok: false, reason: "stop_failed", escalatedTo: result.escalatedTo };
       } catch {
-        return { ok: false, escalatedTo: "L4" };
+        return { ok: false, reason: "stop_failed", escalatedTo: "L4" };
       }
     },
   };
