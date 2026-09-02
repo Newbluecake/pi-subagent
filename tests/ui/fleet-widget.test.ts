@@ -113,7 +113,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
       "  aaaaaaaa · 🧠思考 1s Σ1s",
-      " ╰ bash×2 ▸edit · 9s",
+      " ╰ ✓ bash ×2 | ▸edit · 9s",
     ]);
     const withTool = snapshot({
       diag: diag({
@@ -340,8 +340,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([busy], OPTS), {
       color: (tone, text) => `[${tone}]${text}`,
     })!;
-    // ╰ hook under the mark column + muted trail, ▸ in-flight stays accent
-    expect(lines[2]).toBe(" ╰ [muted]read [header]▸bash npm test · 100ms");
+    // ╰ hook under the mark column; green ✓ / muted name-and-count per the
+    // collapsed-tally reference style, ▸ in-flight stays accent
+    expect(lines[2]).toBe(" ╰ [success]✓[muted] read[muted] | [header]▸bash npm test · 100ms");
     expect(lines[1]).not.toContain("[muted]aaaa"); // main row label stays un-muted (bright anchor)
   });
 

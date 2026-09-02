@@ -4,6 +4,7 @@ import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
 import type { QueryService } from "../service/query-service.js";
 import {
   buildFleetViewModel,
+  colorizeToolTrail,
   formatDuration,
   type FleetColorize,
   type FleetHighlight,
@@ -22,9 +23,9 @@ import {
  * count, live cost, overflow) followed by 1–2 lines per run: the main row
  * (label · type · model · phase · phase age · Σ total elapsed · cost),
  * children indented under their parent (↳) via FleetRow.parentRunId, plus an
- * activity line hung on a ╰ hook (muted tool trail with an accent in-flight
- * ▸tool + args preview + live tool duration, » thinking stream) when the run
- * is mid-tool or mid-thought — long tool calls render in full on their own
+ * activity line hung on a ╰ hook (collapsed tool tally `✓ bash ×9 | ✓ read
+ * ×6` with green ✓ / red ✗ marks + an accent in-flight ▸tool + args preview
+ * + live tool duration, » thinking stream) when the run is mid-tool or mid-thought — long tool calls render in full on their own
  * line instead of being truncated off the row. The ╰ + muting keep per-agent
  * boundaries legible: bright main rows are the anchors, dim hooked lines
  * read as belonging to the row above.
@@ -106,10 +107,11 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
 }
 
 /** The run's live-activity line (rendered on its own indented continuation
- *  line so long tool calls are never truncated off the row): the tool trail
- *  with the in-flight `▸tool` segment (accent-colored) and/or the one-line
- *  thinking stream (`» …`, muted). undefined when the run is quiet.
- *  Boundary cue: the whole line is muted except the in-flight ▸ segment, so
+ *  line so long tool calls are never truncated off the row): the collapsed
+ *  tool tally (`✓ bash ×9 | ✓ read ×6` — green ✓ / red ✗ marks, muted names
+ *  and counts) plus the in-flight `▸tool` segment (whole-segment accent) and/or
+ *  the one-line thinking stream (`» …`, muted). undefined when the run is quiet.
+ *  Boundary cue: names/counts stay muted and only the ✓/✗/▸ marks pop, so
  *  bright main rows stay the visual anchors and dim activity reads as
  *  belonging to the row above it (see also the ╰ hook in renderRunLines). */
 function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): string | undefined {
@@ -119,12 +121,7 @@ function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): 
       ? undefined
       : `▸${row.currentTool}${row.currentToolMs === undefined ? "" : ` · ${formatDuration(row.currentToolMs)}`}`;
   const trail = row.toolTrail ?? fallbackTool;
-  if (trail) {
-    const idx = trail.indexOf("▸");
-    parts.push(
-      idx >= 0 ? color("muted", trail.slice(0, idx)) + color("header", trail.slice(idx)) : color("muted", trail),
-    );
-  }
+  if (trail) parts.push(colorizeToolTrail(trail, color));
   if (row.streamLine) parts.push(color("muted", `» ${row.streamLine}`));
   return parts.length ? parts.join(" ") : undefined;
 }

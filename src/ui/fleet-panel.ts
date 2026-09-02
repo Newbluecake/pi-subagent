@@ -13,7 +13,7 @@ import type { Millis, RunDiagnostics, RunId, RunPhase, RunSnapshot, RunStatus, U
  */
 
 export type FleetHighlight = "none" | "warn" | "crit";
-export type FleetTone = FleetHighlight | "header" | "muted";
+export type FleetTone = FleetHighlight | "header" | "muted" | "success";
 export type FleetColorize = (tone: FleetTone, text: string) => string;
 type EscalationLevel = RunDiagnostics["escalation"][number]["level"];
 
@@ -31,7 +31,7 @@ export interface FleetRow {
   label: string | undefined;
   /** M-C: model id from diag.model (display only; undefined = session default). */
   model: string | undefined;
-  /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "bash×3→read ▸edit · 3s" — the in-flight ▸ segment carries its live duration when the view is built with `now`. */
+  /** M-C: compact recent-tool trail from diag.toolHistory, e.g. "✓ bash ×3 | ✗ read | ▸edit · 3s" — each completed call collapses into a `✓ name ×k` segment (✗ for failures), segments join on " | ", and the in-flight ▸ segment carries its live duration when the view is built with `now`. */
   toolTrail: string | undefined;
   /** Live one-line stream of the model's in-progress thinking (last non-empty
    *  line of diag.text), only while the run is actually in a model turn — the
@@ -190,10 +190,12 @@ export function lastTextLine(text: string | undefined, max = 60): string | undef
 
 /**
  * M-C: compact trail of a run's recent tool calls for the agent-tree widget
- * and the Agent tool card. Adjacent completed calls of the same tool collapse
- * into `name×k` (failed ones render `name✗`), only the last `maxTokens`
- * tokens are kept, and an in-flight call is appended as `▸name` (with a
- * truncated args preview when known — the tool phase's one-line "中间过程").
+ * and the Agent tool card. Completed calls collapse into `✓ name` segments
+ * (`✗ name` for failures, `×k` when the same tool repeats), joined on
+ * " | " — the collapsed concurrent-calls summary style ("✓ Bash ×9 | ✓ Read
+ * ×6"). Only the last `maxTokens` tokens are kept, and an in-flight call is
+ * appended as `▸name` (with a truncated args preview when known — the tool
+ * phase's one-line "中间过程").
  * When `now` is given, the in-flight segment also carries its live duration
  * (`▸bash npm test · 3s`) so the tool call's timing is visible next to the
  * model-turn timing on the main row; pass undefined for terminal runs so a
@@ -223,17 +225,41 @@ export function toolTrailOf(
       continue;
     }
     const failed = r.isError === true;
+    // Same tool + same outcome merges into one ✓/✗ segment even across other
+    // tools in between: the trail is a per-tool tally ("✓ bash ×9 | ✓ read
+    // ×6"), not a chronological log — repeated identical segments add noise,
+    // not signal.
     const key = `${r.name}${failed ? "!" : ""}`;
-    const last = tokens[tokens.length - 1];
-    if (last && last.key === key) last.count++;
+    const existing = tokens.find((t) => t.key === key);
+    if (existing) existing.count++;
     else tokens.push({ key, name: r.name, failed, count: 1 });
   }
   const shown = tokens
     .slice(-maxTokens)
-    .map((t) => `${t.name}${t.failed ? "✗" : ""}${t.count > 1 ? `×${t.count}` : ""}`);
-  const done = shown.join("→");
+    .map((t) => `${t.failed ? "✗" : "✓"} ${t.name}${t.count > 1 ? ` ×${t.count}` : ""}`);
+  const done = shown.join(" | ");
   if (running === undefined) return done || undefined;
-  return done ? `${done} ▸${running}` : `▸${running}`;
+  return done ? `${done} | ▸${running}` : `▸${running}`;
+}
+
+/**
+ * Segment coloring for a toolTrailOf trail (the reference style: green ✓):
+ * `✓` success, `✗` crit, tool names / counts / separators muted, and the
+ * in-flight `▸` segment whole-segment accent so the live call stays the
+ * eye-catcher. Pass the identity colorizer on warn/crit rows — the caller
+ * wraps those whole lines in the highlight tone and nested SGR resets would
+ * reset the outer color mid-line.
+ */
+export function colorizeToolTrail(trail: string, color: FleetColorize): string {
+  return trail
+    .split(" | ")
+    .map((seg) => {
+      if (seg.startsWith("▸")) return color("header", seg);
+      if (seg.startsWith("✓")) return color("success", "✓") + color("muted", seg.slice(1));
+      if (seg.startsWith("✗")) return color("crit", "✗") + color("muted", seg.slice(1));
+      return color("muted", seg);
+    })
+    .join(color("muted", " | "));
 }
 
 function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | undefined {

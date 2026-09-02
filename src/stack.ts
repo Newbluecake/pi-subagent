@@ -352,6 +352,8 @@ export function buildSessionStack(
                   return uiTheme.fg("error", text);
                 case "muted":
                   return uiTheme.fg("muted", text);
+                case "success":
+                  return uiTheme.fg("success", text);
                 case "header":
                   return uiTheme.fg("accent", text);
                 default:
