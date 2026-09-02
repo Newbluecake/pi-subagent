@@ -3,11 +3,14 @@ import { systemClock } from "../../src/core/clock.js";
 import type { ChildOutcome, ChildSpawner } from "../../src/workflow/host.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "../../src/workflow/orchestrator.js";
-import { createWorkflowActivityRegistry } from "../../src/workflow/activity.js";
+import { createWorkflowActivityRegistry, type WorkflowActivitySnapshot } from "../../src/workflow/activity.js";
 import type { WorkflowOutcome, WorkflowRunBudget } from "../../src/workflow/types.js";
+import type { RunSnapshot } from "../../src/core/types.js";
 import {
+  buildWorkflowProgressLines,
   createDisabledWorkflowToolStub,
   createWorkflowTool,
+  formatWorkflowSummary,
   type WorkflowToolDeps,
 } from "../../src/tools/workflow-tool.js";
 
@@ -251,4 +254,189 @@ describe("SubagentWorkflow tool: WT13/WT17 timeout+fallback sequence (§4.3.2)",
       tool.execute("c", { script: 'export const meta={name:"t",description:"t"};\nreturn 1;' }, undefined),
     ).rejects.toThrow(/timed_out/);
   }, 10_000);
+});
+
+describe("M10: buildWorkflowProgressLines", () => {
+  const base: WorkflowActivitySnapshot = {
+    workflowId: "wf_1",
+    name: "demo-flow",
+    startedAt: 0,
+    activeChildren: [],
+    settledChildren: [],
+    settledTotal: 0,
+    completedTotal: 0,
+    replayTotal: 0,
+  };
+
+  it("renders the header with name, phase, elapsed and remaining budget", () => {
+    const lines = buildWorkflowProgressLines({ ...base, currentPhaseId: "Implement", deadlineAt: 1_800_000 }, 130_000);
+    expect(lines[0]).toBe("⏳ demo-flow · phase: Implement · 2m10s · 27m50s left");
+    expect(lines).toHaveLength(1); // no tally/children yet
+  });
+
+  it("renders the settled/running tally and the recent-settled trail with per-status marks", () => {
+    const lines = buildWorkflowProgressLines(
+      {
+        ...base,
+        settledTotal: 3,
+        completedTotal: 2,
+        replayTotal: 1,
+        settledChildren: [
+          { callId: "c1", label: "explore:auth", status: "completed", source: "live", durationMs: 48_000 },
+          { callId: "c2", label: "dev:api", status: "completed", source: "replay", durationMs: 0 },
+          { callId: "c3", label: "dev:web", status: "failed", source: "live", durationMs: 62_000 },
+        ],
+        activeChildren: [{ callId: "c4", label: "verify:api", enteredAt: 100_000 }],
+      },
+      130_000,
+    );
+    expect(lines[1]).toBe("✓ 2 (1 replay) · ✗ 1 · ▸ 1 running");
+    expect(lines[2]).toBe("✓ explore:auth (48s) · ↩ dev:api (0ms) · ✗ dev:web (1m02s)");
+    // c4 has no snapshot available (snapshotOf not provided) → fallback row.
+    expect(lines[3]).toBe("▸ verify:api · spawned 30s ago");
+  });
+
+  it("renders a live child's own M-B progress lines re-prefixed with its label when a snapshot is available", () => {
+    const snap: RunSnapshot = {
+      runId: "run-c1",
+      generation: 1,
+      status: "running",
+      phase: "model_turn",
+      deadlines: { enqueuedAt: 0, deadlineAt: undefined, queueDeadlineAt: undefined },
+      diag: {
+        createdAt: 100_000,
+        phase: "model_turn",
+        phaseEnteredAt: 100_000,
+        pendingTools: 1,
+        turns: 3,
+        escalation: [],
+        orphaned: false,
+        generation: 1,
+        degraded: [],
+        staleInputs: 0,
+        unkillable: [],
+        model: { provider: "p", id: "kimi-k3" },
+        toolHistory: [{ name: "bash", toolCallId: "t1", startedAt: 120_000 }],
+        usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, costUsd: 0.08 },
+      },
+      updatedAt: 130_000,
+    };
+    const lines = buildWorkflowProgressLines(
+      { ...base, activeChildren: [{ callId: "c1", label: "dev:api", runId: "run-c1", enteredAt: 100_000 }] },
+      130_000,
+      (runId) => (runId === "run-c1" ? snap : undefined),
+    );
+    expect(lines[1]).toBe("▸ 1 running");
+    expect(lines[2]).toContain("▸ dev:api · p/kimi-k3");
+    expect(lines[2]).toContain("turn 4");
+    expect(lines[2]).toContain("$0.08");
+    expect(lines.some((l) => l.includes("▸ bash"))).toBe(true); // the child's running tool row
+  });
+
+  it("caps per-child rows and collapses the rest into a +N line", () => {
+    const activeChildren = Array.from({ length: 8 }, (_, i) => ({
+      callId: `c${i}`,
+      label: `t${i}`,
+      enteredAt: 0,
+    }));
+    const lines = buildWorkflowProgressLines({ ...base, activeChildren }, 1_000);
+    expect(lines.filter((l) => l.startsWith("▸ t"))).toHaveLength(6);
+    expect(lines[lines.length - 1]).toBe("… +2 more running");
+  });
+});
+
+describe("M10: formatWorkflowSummary", () => {
+  it("renders status · duration · children tally (✓/↩/✗) · cost", () => {
+    const summary = formatWorkflowSummary(
+      fakeOutcome({
+        durationMs: 130_000,
+        children: [
+          { callId: "c1", source: "live", status: "completed", durationMs: 1 },
+          { callId: "c2", source: "replay", status: "completed", durationMs: 0 },
+          { callId: "c3", source: "live", status: "failed", durationMs: 2 },
+        ],
+      }),
+      { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.42 },
+    );
+    expect(summary).toBe("completed · 2m10s · 3 children (✓2 ↩1 ✗1) · $0.42");
+  });
+
+  it("omits the children tally and cost when absent", () => {
+    expect(formatWorkflowSummary(fakeOutcome({ durationMs: 500 }))).toBe("completed · 500ms");
+  });
+});
+
+describe("M10: live tool-card progress (onUpdate)", () => {
+  it("streams a header partial immediately and a per-child row once the child spawns", async () => {
+    const activity = createWorkflowActivityRegistry();
+    let release!: (o: { settled: ChildOutcome[]; pending: string[] }) => void;
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "r1" }),
+      abort: async () => true,
+      waitAll: () => new Promise((resolve) => (release = resolve)),
+      configHashOf: (type) => `cfg:${type}`,
+    };
+    const tool = createWorkflowTool({
+      defaultBudget: REAL_BUDGET,
+      activity,
+      createOrchestrator: (workflowId) =>
+        createOrchestrator({
+          clock: systemClock,
+          createWorkerHost: () => createWorkerHost({ clock: systemClock }),
+          spawner,
+          gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
+          parentRunId: workflowId,
+          // Mirrors stack.ts's wiring: the orchestrator's event stream feeds the activity registry.
+          emit: (channel, payload) => activity.onEvent(channel, payload),
+        }),
+      snapshotOf: () => undefined, // no session snapshots in this harness → fallback rows
+    });
+    const partials: string[] = [];
+    const pending = tool.execute(
+      "call-live",
+      {
+        script:
+          'export const meta = { name: "live-card", description: "t" };\n' +
+          'return await agent("task one", { label: "dev:a" });',
+      },
+      undefined,
+      ((u: { content?: { type: string; text?: string }[] }) => {
+        partials.push(
+          (u.content ?? [])
+            .map((c) => (c.type === "text" ? (c.text ?? "") : ""))
+            .filter(Boolean)
+            .join("\n"),
+        );
+      }) as never,
+    );
+    try {
+      // The 1 Hz progress timer drives per-child rows; poll the collected
+      // partials rather than sleeping a fixed interval.
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && !partials.some((t) => t.includes("dev:a"))) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(partials.some((t) => t.includes("⏳ live-card"))).toBe(true);
+      expect(partials.some((t) => t.includes("▸ dev:a"))).toBe(true);
+      expect(partials.some((t) => t.includes("▸ 1 running"))).toBe(true);
+    } finally {
+      release({ settled: [{ runId: "r1", status: "completed", text: "done" }], pending: [] });
+    }
+    const result = await pending;
+    const details = result.details as { status: string; summary?: string };
+    expect(details.status).toBe("completed");
+    expect(details.summary).toContain("completed");
+    expect(details.summary).toContain("1 children");
+  }, 20_000);
+
+  it("works unchanged when no onUpdate is provided (no progress plumbing engaged)", async () => {
+    const { spawner } = makeSpawner();
+    const tool = createWorkflowTool(realDeps(spawner));
+    const result = await tool.execute(
+      "call-noprogress",
+      { script: 'export const meta = { name: "t", description: "t" };\nreturn 42;' },
+      undefined,
+    );
+    expect((result.details as { status: string }).status).toBe("completed");
+  }, 15_000);
 });

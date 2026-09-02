@@ -6,6 +6,7 @@ import {
   type ChildOutcome,
   type ChildSpawner,
   type GateRunner,
+  type WorkflowChildEvent,
 } from "../../src/workflow/host.js";
 import type { WorkflowRunBudget } from "../../src/workflow/types.js";
 import { fakeSpawnWorkerFactory } from "./helpers.js";
@@ -395,5 +396,102 @@ describe("HR8: terminate() rejects every pending host call (§3.3 HR8)", () => {
     // this call is ever recorded, and nothing is ever sent for it.
     expect(handler.registry.resolve("1")).toBeUndefined();
     expect(h.sent.find((m) => (m as { id?: string }).id === "1")).toBeUndefined();
+  });
+});
+
+describe("host.ts: M10 child lifecycle events (onChildEvent)", () => {
+  function harnessWithEvents(spawner: ChildSpawner) {
+    const h = harness();
+    const events: WorkflowChildEvent[] = [];
+    return {
+      ...h,
+      events,
+      attachWithEvents() {
+        return attachHostCallHandler({
+          clock: h.clock,
+          workerHost: h.workerHost,
+          spawner,
+          gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
+          budget: { ...BASE_BUDGET },
+          onChildEvent: (e) => events.push(e),
+        });
+      },
+    };
+  }
+
+  it("a successful live spawn fires 'spawned' (label/agentType/runId) after bind, then 'settled' once the child settles", async () => {
+    let resolveOutcome!: (o: { settled: ChildOutcome[]; pending: string[] }) => void;
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "run1" }),
+      abort: async () => true,
+      waitAll: () => new Promise((resolve) => (resolveOutcome = resolve)),
+    };
+    const h = harnessWithEvents(spawner);
+    await h.boot();
+    const handler = h.attachWithEvents();
+
+    h.postHostCall("1", "agent", { prompt: "task", opts: { label: "dev:a", agentType: "general-purpose" } });
+    await flush();
+
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toMatchObject({
+      kind: "spawned",
+      callId: "1",
+      runId: "run1",
+      label: "dev:a",
+      agentType: "general-purpose",
+    });
+
+    resolveOutcome({ settled: [{ runId: "run1", status: "completed", text: "ok" }], pending: [] });
+    await flush();
+
+    expect(h.events).toHaveLength(2);
+    expect(h.events[1]).toMatchObject({
+      kind: "settled",
+      callId: "1",
+      runId: "run1",
+      label: "dev:a",
+      agentType: "general-purpose",
+      status: "completed",
+      source: "live",
+    });
+    // M10 side effect: the recorded summary itself now carries the label
+    // (WorkflowChildSummary.label existed but was never populated).
+    expect(handler.children[0]).toMatchObject({ callId: "1", label: "dev:a", status: "completed" });
+  });
+
+  it("an admission-time spawn failure fires only 'settled' (withheld) — never a spawned-after-failure inversion", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ error: { message: "no slots" } }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [], pending: [] }),
+    };
+    const h = harnessWithEvents(spawner);
+    await h.boot();
+    h.attachWithEvents();
+
+    h.postHostCall("1", "agent", { prompt: "task", opts: { label: "dev:b" } });
+    await flush();
+
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toMatchObject({ kind: "settled", callId: "1", label: "dev:b", status: "withheld" });
+    expect(h.events[0]!.kind).not.toBe("spawned");
+  });
+
+  it("without an onChildEvent listener the handler behaves exactly as before (observational, never load-bearing)", async () => {
+    const h = harness();
+    await h.boot();
+    const handler = h.attach(
+      {
+        spawn: async () => ({ runId: "run1" }),
+        abort: async () => true,
+        waitAll: async () => ({ settled: [{ runId: "run1", status: "completed", text: "ok" }], pending: [] }),
+      },
+      async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
+    );
+    h.postHostCall("1", "agent", { prompt: "task", opts: null });
+    await flush();
+    expect(handler.children).toHaveLength(1);
+    expect(handler.children[0]!.status).toBe("completed");
   });
 });

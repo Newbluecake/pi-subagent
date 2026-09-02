@@ -478,6 +478,13 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
       onChildSettled: () => {
         children = hostHandler.children;
       },
+      // M10: relay the host handler's child-lifecycle feed onto the run's
+      // event stream so above-`src/workflow/**` observers (the tool card's
+      // live progress, the activity registry) can render per-child rows
+      // without a live `Orchestrator` snapshot API.
+      onChildEvent: (event) => {
+        deps.emit?.("subagent:workflow:child", { workflowId: req.workflowId, ...event });
+      },
       onPhaseChange: (event) => {
         deps.emit?.("subagent:workflow:phase", { workflowId: req.workflowId, ...event });
       },

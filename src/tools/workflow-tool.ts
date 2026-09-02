@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox";
+import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "../core/clock.js";
 import { withDeadline } from "../core/deadline.js";
 import type { Orchestrator, OrchestratorRunRequest } from "../workflow/orchestrator.js";
-import type { WorkflowActivityRegistry } from "../workflow/activity.js";
+import type { WorkflowActivityRegistry, WorkflowActivitySnapshot } from "../workflow/activity.js";
 import type { WorkflowId, WorkflowOutcome, WorkflowRunBudget } from "../workflow/types.js";
-import type { UsageDelta } from "../core/types.js";
+import type { RunSnapshot, UsageDelta } from "../core/types.js";
+import { buildProgressLines } from "./agent-tool.js";
+import { formatDuration } from "../ui/fleet-panel.js";
+import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
 
 /**
@@ -29,6 +33,29 @@ export interface WorkflowToolDeps {
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
   /** M8: resolve a live child run's lifetime usage so the workflow tool result can carry the aggregate spend (pi usage accounting). */
   usageOf?(runId: string): UsageDelta | undefined;
+  /**
+   * M10: live per-run snapshots (the same `QueryService.get` the Agent
+   * tool's M-B progress port reads) — powers the tool card's per-child live
+   * rows while `run()` is still blocking. Optional: without it the card
+   * degrades to workflow-level progress (name/phase/elapsed + child labels
+   * from the activity registry), never to a blank card.
+   */
+  snapshotOf?(runId: string): RunSnapshot | undefined;
+}
+
+/** M10: partial-update / final-result details consumed by renderResult (mirrors agent-tool.ts's `AgentToolDetails`). */
+export interface WorkflowToolDetails {
+  workflowId?: string;
+  status?: string;
+  durationMs?: number;
+  /** Partial (isPartial) updates: preformatted live progress lines. */
+  progress?: string[];
+  /** Final result: one-line stats summary (status · duration · children tally · cost). */
+  summary?: string;
+  costUsd?: number;
+  children?: WorkflowOutcome["children"];
+  runIds?: string[];
+  replay?: WorkflowOutcome["replay"];
 }
 
 /**
@@ -100,6 +127,100 @@ function mergeBudget(base: WorkflowRunBudget, timeoutMs?: number): WorkflowRunBu
 function scriptDisplayName(script: string): string {
   const m = /export\s+const\s+meta\s*=\s*\{[^}]*name\s*:\s*["'`]([^"'`]+)["'`]/.exec(script);
   return m?.[1] ?? "(unnamed workflow)";
+}
+
+/** M10: at most this many per-child live rows on the tool card; the rest collapse into a "+N more" line. */
+const MAX_PROGRESS_CHILD_ROWS = 6;
+/** M10: how many recently-settled children the card's ✓/✗ trail shows. */
+const MAX_SETTLED_TRAIL = 3;
+
+function settledMark(status: string, source: "live" | "replay"): string {
+  if (status === "completed") return source === "replay" ? "\u21a9" : "\u2713"; // ↩ replay hit, ✓ live
+  if (status === "withheld") return "\u2298"; // ⊘ never ran (admission/budget)
+  return "\u2717"; // ✗
+}
+
+/**
+ * M10: live progress lines for the blocking workflow tool card — the
+ * workflow-level counterpart of agent-tool.ts's `buildProgressLines`.
+ * Line 1 is a status header (name · phase · elapsed · budget left); line 2
+ * is a settled/running tally; then one live row per active child (the
+ * child's own M-B progress lines, re-prefixed with its label), falling back
+ * to a plain "spawned … ago" row while the child's session snapshot has not
+ * landed in the query service yet.
+ */
+export function buildWorkflowProgressLines(
+  activity: WorkflowActivitySnapshot,
+  now: number,
+  snapshotOf?: (runId: string) => RunSnapshot | undefined,
+): string[] {
+  const header = [
+    `\u23f3 ${activity.name}`,
+    activity.currentPhaseId !== undefined ? `phase: ${activity.currentPhaseId}` : undefined,
+    formatDuration(Math.max(0, now - activity.startedAt)),
+    activity.deadlineAt !== undefined ? `${formatDuration(Math.max(0, activity.deadlineAt - now))} left` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const lines = [header];
+
+  const failed = activity.settledTotal - activity.completedTotal;
+  const tally = [
+    activity.settledTotal > 0
+      ? `\u2713 ${activity.completedTotal}${activity.replayTotal > 0 ? ` (${activity.replayTotal} replay)` : ""}`
+      : undefined,
+    failed > 0 ? `\u2717 ${failed}` : undefined,
+    activity.activeChildren.length > 0 ? `\u25b8 ${activity.activeChildren.length} running` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (tally) lines.push(tally);
+
+  const recent = activity.settledChildren.slice(-MAX_SETTLED_TRAIL);
+  if (recent.length > 0) {
+    lines.push(
+      recent
+        .map((c) => `${settledMark(c.status, c.source)} ${c.label ?? c.callId} (${formatDuration(c.durationMs)})`)
+        .join(" · "),
+    );
+  }
+
+  const shown = activity.activeChildren.slice(0, MAX_PROGRESS_CHILD_ROWS);
+  for (const child of shown) {
+    const name = child.label ?? child.callId;
+    const snap = child.runId !== undefined ? snapshotOf?.(child.runId) : undefined;
+    if (!snap) {
+      lines.push(`\u25b8 ${name} · spawned ${formatDuration(Math.max(0, now - child.enteredAt))} ago`);
+      continue;
+    }
+    const childLines = buildProgressLines(snap, now, 1);
+    const first = childLines[0] ?? "";
+    childLines[0] = `\u25b8 ${name} · ${first.replace(/^\u23f3 /, "")}`;
+    lines.push(...childLines);
+  }
+  const hidden = activity.activeChildren.length - shown.length;
+  if (hidden > 0) lines.push(`\u2026 +${hidden} more running`);
+  return lines;
+}
+
+/** M10: final stats line, e.g. "completed · 2m10s · 5 children (\u27133 \u21a91 \u27171) · $0.42". */
+export function formatWorkflowSummary(outcome: WorkflowOutcome, totalUsage?: UsageDelta): string {
+  const parts: string[] = [outcome.status, formatDuration(outcome.durationMs)];
+  if (outcome.children.length > 0) {
+    const completed = outcome.children.filter((c) => c.status === "completed").length;
+    const replay = outcome.children.filter((c) => c.source === "replay").length;
+    const failed = outcome.children.length - completed;
+    const tally = [
+      completed > 0 ? `\u2713${completed}` : undefined,
+      replay > 0 ? `\u21a9${replay}` : undefined,
+      failed > 0 ? `\u2717${failed}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    parts.push(`${outcome.children.length} children${tally ? ` (${tally})` : ""}`);
+  }
+  if (totalUsage) parts.push(formatWidgetCost(totalUsage.costUsd));
+  return parts.join(" · ");
 }
 
 const MAX_CHILD_PREVIEW = 2_048;
@@ -231,7 +352,28 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
     promptSnippet:
       "SubagentWorkflow(script, args?, journal?, noReplay?, replayScope?, timeout_ms?) - run a multi-agent orchestration script",
     parameters: WorkflowToolParams,
-    async execute(_toolCallId, params, signal) {
+    /**
+     * M10: without a renderCall the TUI falls back to the bare tool name for
+     * what is typically the longest-blocking call in the toolbox. Show the
+     * workflow's declared name + the knobs that matter (journal / timeout),
+     * like the Agent card shows its description.
+     */
+    renderCall(args, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const name = typeof args?.script === "string" ? scriptDisplayName(args.script) : "…";
+      const title = theme.fg("toolTitle", theme.bold(`Subagent Workflow: ${name}`));
+      const meta = [
+        args?.journal ? `journal: ${args.journal}` : undefined,
+        args?.replayScope ? `replay: ${args.replayScope}` : undefined,
+        args?.noReplay ? "no-replay" : undefined,
+        typeof args?.timeout_ms === "number" ? `timeout: ${formatDuration(args.timeout_ms)}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      text.setText(meta ? `${title}\n${theme.fg("muted", meta)}` : title);
+      return text;
+    },
+    async execute(_toolCallId, params, signal, onUpdate) {
       // \u00a75.1 rule 1: check signal?.aborted before anything else \u2014 never boot a worker for an already-cancelled call.
       if (signal?.aborted) {
         return {
@@ -250,6 +392,25 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
         startedAt + budget.workflowTotalMs,
       );
       const orchestrator = deps.createOrchestrator(workflowId);
+      // M10: live tool-card progress while `run()` blocks — the same 1 Hz
+      // read-only onUpdate side channel the Agent tool's M-B path uses
+      // (read: activity registry + per-child run snapshots; it never touches
+      // engine state, and the timer is unref'd so it cannot wedge `pi -p`).
+      let progressTimer: ReturnType<typeof setInterval> | undefined;
+      if (onUpdate) {
+        const push = () => {
+          const snap = deps.activity.list().find((w) => w.workflowId === workflowId);
+          if (!snap) return;
+          const lines = buildWorkflowProgressLines(snap, systemClock.now(), deps.snapshotOf);
+          onUpdate({
+            content: [{ type: "text" as const, text: lines.join("\n") }],
+            details: { workflowId, progress: lines } satisfies WorkflowToolDetails,
+          });
+        };
+        progressTimer = setInterval(push, 1000);
+        (progressTimer as { unref?: () => void }).unref?.();
+        push();
+      }
       try {
         const req: OrchestratorRunRequest = {
           workflowId,
@@ -297,14 +458,62 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
             workflowId: outcome.workflowId,
             status: outcome.status,
             durationMs: outcome.durationMs,
+            // M10: presentation stats (renderResult summary line + history replay).
+            summary: formatWorkflowSummary(outcome, totalUsage),
+            ...(totalUsage ? { costUsd: totalUsage.costUsd } : {}),
             children: outcome.children,
             runIds: liveRunIds,
             ...(outcome.replay ? { replay: outcome.replay } : {}),
-          },
+          } satisfies WorkflowToolDetails,
         };
       } finally {
+        if (progressTimer !== undefined) clearInterval(progressTimer);
         deps.activity.unregister(workflowId);
       }
+    },
+    /**
+     * M10: renders both partial (streaming) updates and the final result —
+     * same contract as the Agent tool's renderResult:
+     *  - partial: the live progress lines (⏳ header + tally + per-child
+     *    rows), tone-mapped per mark (✗ error / ▸ accent / ✓·↩·⊘ muted);
+     *  - final: a muted stats summary line, then the outcome text (collapsed
+     *    to a handful of lines unless the entry is expanded).
+     */
+    renderResult(result, options, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const details = (result.details ?? {}) as WorkflowToolDetails;
+      const body = result.content
+        .map((c) => (c.type === "text" ? c.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      if (options.isPartial && details.progress) {
+        const rendered = details.progress
+          .map((line) => {
+            const t = line.trimStart();
+            if (t.startsWith("\u2717")) return theme.fg("error", line);
+            if (t.startsWith("\u25b8")) return theme.fg("accent", line);
+            if (t.startsWith("\u2713") || t.startsWith("\u21a9") || t.startsWith("\u2298"))
+              return theme.fg("muted", line);
+            return line;
+          })
+          .join("\n");
+        text.setText(rendered);
+        return text;
+      }
+      const parts: string[] = [];
+      if (details.summary) parts.push(theme.fg("muted", `\u2713 ${details.summary}`));
+      if (body) {
+        const lines = body.split("\n");
+        const cap = 6;
+        if (!options.expanded && lines.length > cap) {
+          parts.push(lines.slice(0, cap).join("\n"));
+          parts.push(theme.fg("muted", `\u2026 +${lines.length - cap} more lines`));
+        } else {
+          parts.push(body);
+        }
+      }
+      text.setText(parts.join("\n"));
+      return text;
     },
   } satisfies ToolDefinition<typeof WorkflowToolParams>;
 }

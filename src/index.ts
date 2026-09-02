@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { SubagentExtensionPoints, UsageDelta } from "./core/types.js";
+import type { RunSnapshot, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
@@ -268,6 +268,7 @@ function forwardWorkflow(holder: { current?: Stack }): {
   activity: WorkflowActivityRegistry;
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
   usageOf(runId: string): UsageDelta | undefined;
+  snapshotOf(runId: string): RunSnapshot | undefined;
 } {
   return {
     get defaultBudget() {
@@ -279,6 +280,9 @@ function forwardWorkflow(holder: { current?: Stack }): {
     createOrchestrator: (workflowId) => requireStack(holder).workflow.createOrchestrator(workflowId),
     // M8: child spend lookup for the workflow tool's aggregate usage.
     usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
+    // M10: live child snapshots for the workflow tool card's per-child rows
+    // (same QueryService the Agent tool's M-B progress port reads).
+    snapshotOf: (runId) => holder.current?.query.get(runId),
   };
 }
 function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {

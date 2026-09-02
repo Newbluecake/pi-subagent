@@ -98,6 +98,31 @@ export type GateRunner = (
 ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
 
 /**
+ * M10 (live workflow tool card): an observational child-lifecycle event —
+ * "spawned" fires once a live `agent()` child has really spawned and its
+ * `runId` is bound (and it was *not* already cancelled in the admission
+ * window, see `registry.bind()`'s `cancelNow` path); "settled" fires exactly
+ * once per child from the same `recordSettled` chokepoint that feeds
+ * `WorkflowOutcome.children` — live, replay-hit and withheld outcomes alike.
+ * Purely observational: consumers (the `SubagentWorkflow` tool's live card,
+ * the fleet UI) must treat delivery as best-effort; none of the engine's
+ * zero-hang invariants may ever come to depend on a listener existing.
+ */
+export interface WorkflowChildEvent {
+  readonly kind: "spawned" | "settled";
+  readonly callId: CallId;
+  readonly runId?: RunId;
+  readonly label?: string;
+  readonly agentType?: string;
+  readonly phaseId?: string;
+  /** "settled" only — mirrors the recorded `WorkflowChildSummary`. */
+  readonly status?: WorkflowChildSummary["status"];
+  readonly source?: "live" | "replay";
+  readonly durationMs?: Millis;
+  readonly at: Millis;
+}
+
+/**
  * M3.5 §6.5/§6.6: everything `handleAgent` needs to run the replay
  * short-circuit + write journal entries for one run. Optional on
  * `HostCallHandlerDeps` — a run with no `journal` configured skips both
@@ -150,6 +175,8 @@ export interface HostCallHandlerDeps {
   readonly journal?: JournalRunConfig;
   /** Fired once per settled/withheld child, in settlement order (feeds `WorkflowOutcome.children`). */
   onChildSettled?(summary: WorkflowChildSummary): void;
+  /** M10: live child-lifecycle feed (see `WorkflowChildEvent`). Optional, harmless no-op if absent. */
+  onChildEvent?(event: WorkflowChildEvent): void;
   /** M3.4 §9.2: fired once per `phase(title)`/timeout transition (progress-event plumbing; optional, harmless no-op if absent). */
   onPhaseChange?(event: { phaseId: string; kind: "enter" | "timeout"; at: Millis }): void;
 }
@@ -202,6 +229,12 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   const children: WorkflowChildSummary[] = [];
   const startedAt = new Map<CallId, Millis>();
   const phaseOf = new Map<CallId, string>();
+  // M10: submission-time display metadata, consulted when the lifecycle
+  // events fire (recordSettled / the post-bind "spawned" announcement) and
+  // folded into the recorded summary itself — `WorkflowChildSummary.label`
+  // existed in the type since M3.x but was never populated until now.
+  const labelOf = new Map<CallId, string>();
+  const agentTypeOf = new Map<CallId, string>();
   let terminated = false;
   let currentPhaseId: string | undefined;
 
@@ -284,8 +317,27 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
   });
 
   function recordSettled(summary: WorkflowChildSummary): void {
-    children.push(summary);
-    deps.onChildSettled?.(summary);
+    const label = labelOf.get(summary.callId);
+    const agentType = agentTypeOf.get(summary.callId);
+    labelOf.delete(summary.callId);
+    agentTypeOf.delete(summary.callId);
+    const enriched = summary.label === undefined && label !== undefined ? { ...summary, label } : summary;
+    children.push(enriched);
+    deps.onChildSettled?.(enriched);
+    // M10: "settled" fires here — the single chokepoint every child outcome
+    // (live settle, replay hit, withheld, force-settled abort) passes through.
+    deps.onChildEvent?.({
+      kind: "settled",
+      callId: enriched.callId,
+      ...(enriched.runId !== undefined ? { runId: enriched.runId } : {}),
+      ...(label !== undefined ? { label } : {}),
+      ...(agentType !== undefined ? { agentType } : {}),
+      ...(enriched.phaseId !== undefined ? { phaseId: enriched.phaseId } : {}),
+      status: enriched.status,
+      source: enriched.source,
+      durationMs: enriched.durationMs,
+      at: deps.clock.now(),
+    });
     if (registry.listActive().length === 0) {
       const waiters = drainWaiters.splice(0, drainWaiters.length);
       for (const cb of waiters) cb();
@@ -442,6 +494,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
         registry.submit(callId, deps.clock.now());
         startedAt.set(callId, deps.clock.now());
         if (phaseId !== undefined) phaseOf.set(callId, phaseId);
+        if (label !== undefined) labelOf.set(callId, label);
+        agentTypeOf.set(callId, agentType);
         registry.settle(callId, deps.clock.now());
         recordSettled({
           callId,
@@ -538,6 +592,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     registry.submit(callId, deps.clock.now());
     startedAt.set(callId, deps.clock.now());
     if (phaseId !== undefined) phaseOf.set(callId, phaseId);
+    if (label !== undefined) labelOf.set(callId, label);
+    agentTypeOf.set(callId, agentType);
 
     const spawned = await deps.spawner.spawn({
       type: agentType,
@@ -575,6 +631,20 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       // would duplicate `children[]`.
       return { kind: "host_ack", id: callId, ok: false, cancelled: true, cause: bound.cause ?? "cancelled" };
     }
+
+    // M10: the child is really running and was not cancelled in the
+    // admission window — announce it. Emitted *after* the `cancelNow` check
+    // so a call whose withheld settle already fired never produces a
+    // spawned-after-settled ordering inversion for observers.
+    deps.onChildEvent?.({
+      kind: "spawned",
+      callId,
+      runId: spawned.runId,
+      ...(label !== undefined ? { label } : {}),
+      agentType,
+      ...(phaseId !== undefined ? { phaseId } : {}),
+      at: deps.clock.now(),
+    });
 
     // HR3: fire the settle wait in the background — the ack below returns
     // immediately, independent of how long the child itself takes.
