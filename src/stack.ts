@@ -53,7 +53,11 @@ import { buildWorkflowRunBudget } from "./workflow/run-budget.js";
 import { createWorkflowChildSpawner } from "./workflow/spawner-adapter.js";
 import type { WorkflowId, WorkflowRunBudget } from "./workflow/types.js";
 
-/** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack (index.ts rebuilds the stack on every session_start and never calls a stack dispose hook). */
+/** X7b: the previous session's fleet widget, disposed at the top of buildSessionStack.
+ *  This module-level handoff only covers SAME-module session swaps (new/fork/resume):
+ *  pi's /reload re-imports the extension as a fresh module (jiti moduleCache:false),
+ *  leaving this undefined — that path is covered by session_shutdown disposing
+ *  Stack.fleetWidget instead (see the Stack interface note). */
 let previousFleetWidget: FleetWidgetController | undefined;
 /** M-E: the previous session's usage broadcaster — same rebuild-dispose pattern as the fleet widget. */
 let previousUsageBroadcaster: UsageBroadcaster | undefined;
@@ -252,6 +256,15 @@ export interface Stack {
   scheduler: Scheduler;
   rpc: RPCServer;
   workflow: WorkflowSupport;
+  /** X7b fleet widget; absent when settings.fleetWidget is off. Exposed so session_shutdown
+   *  can dispose it: pi's /reload re-imports the extension as a FRESH module (jiti
+   *  moduleCache:false), so the module-level previousFleetWidget handoff in
+   *  buildSessionStack only covers same-module session swaps (new/fork/resume) — after a
+   *  reload the old controller is unreachable module state, and since the stale ctx.ui
+   *  closures keep working (no assertActive on setWidget), an undisposed controller's
+   *  self-rescheduling 1Hz tick outlives its session FOREVER, pushing setWidget(undefined)
+   *  over the new session's frames → the agent tree visibly blinks off/on. */
+  fleetWidget?: FleetWidgetController;
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
 }
@@ -681,6 +694,7 @@ export function buildSessionStack(
     scheduler,
     rpc,
     workflow,
+    ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
   };
 }

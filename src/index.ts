@@ -87,11 +87,12 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   const settings = loadSettingsFromFile();
-  // Built FRESH per activate(): pi may re-run activate on the same cached
-  // module (its /reload does not bust Node's module cache). A module-level
-  // mutable array would accumulate duplicate entries across activations —
-  // the stale ones closing over an invalidated pi (observed in the wild:
-  // H2 fan-out hit a dead worktree extension and crashed the run).
+  // Built FRESH per activate(): depending on pi's version, /reload either
+  // re-runs activate on the cached module or re-imports a FRESH module (jiti
+  // moduleCache:false). A module-level mutable array would accumulate
+  // duplicate entries across same-module activations — the stale ones closing
+  // over an invalidated pi (observed in the wild: H2 fan-out hit a dead
+  // worktree extension and crashed the run).
   const extensionPoints: SubagentExtensionPoints[] = [wireWorktree(pi, settings)];
   const types = createAgentTypeRegistry();
   // Eager warm-up: session_start's awaited reload() is authoritative, but a
@@ -211,6 +212,7 @@ export default function activate(pi: ExtensionAPI): void {
     // Defensive: if pi ever fires session_start without a paired shutdown,
     // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
     if (holder.current) {
+      holder.current.fleetWidget?.dispose();
       holder.current.scheduler.stop();
       holder.current.rpc.close();
     }
@@ -224,6 +226,15 @@ export default function activate(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (event) => {
     const stack = holder.current;
     if (!stack) return;
+    // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
+    // re-imports this extension as a fresh module (jiti moduleCache:false), so
+    // the module-level previousFleetWidget handoff in buildSessionStack never
+    // sees the pre-reload controller — and because the stale ctx.ui closures
+    // keep working (setWidget has no assertActive), its self-rescheduling 1Hz
+    // tick would otherwise outlive the session forever, pushing
+    // setWidget(undefined) over the new session's frames: the agent tree
+    // blinks off/on at the combined tick rate, worse with every reload.
+    stack.fleetWidget?.dispose();
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
     const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);

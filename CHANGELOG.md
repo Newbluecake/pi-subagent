@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **fleet widget** — the agent tree no longer blinks off/on after `/reload`. pi's reload re-imports the extension as a fresh module (jiti `moduleCache:false`), so the module-level `previousFleetWidget` handoff never saw the pre-reload controller; and since the stale `ctx.ui` closures keep working (`setWidget` has no `assertActive`), the old controller's self-rescheduling 1Hz tick outlived its session forever, pushing `setWidget(undefined)` over the new session's frames — one extra blink per reload. `Stack` now exposes `fleetWidget` and `session_shutdown` disposes it.
+
 ### Changed
 
 - **fleet widget / tool card** — the thinking phase label is now animated: the icon cycles through four emoji frames (`🧠思考 → 💭思考 → 🤔思考 → 💡思考`) derived from wall time (1s quantum), so the 1Hz widget/panel tick advances it by exactly one frame with no render-side animation state. Frames are deliberately unambiguous-width emoji — an earlier braille-spinner version wrap-flickered CJK terminals (braille is East Asian Ambiguous: terminals render it 2 columns, string-width measures 1). `phaseLabel(phase, diag)` without a `now` keeps the static `🧠思考` form.
