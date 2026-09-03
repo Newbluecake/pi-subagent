@@ -182,6 +182,11 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Per-job log file cap in bytes",
   },
   "bashJobs.maxBackgroundJobs": count("bashJobs.maxBackgroundJobs", 0, "Max concurrent background jobs"),
+  "bashJobs.drainTimeoutS": seconds("bashJobs.drainTimeoutMs", {
+    max: 600,
+    hint: "values under 1s fall back to the 30s default",
+    description: "Bounded wait for post-exit log tail capture",
+  }),
   "bashJobs.retentionS": seconds("bashJobs.retentionMs", {
     description: "Terminal job records pruned after this age",
   }),

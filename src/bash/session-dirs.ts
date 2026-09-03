@@ -253,7 +253,7 @@ export async function handoffInProcess(
         continue;
       }
       if (
-        !isTerminalJobStatus(record.status) ||
+        (!isTerminalJobStatus(record.status) && !previous.hasOpenLocalHandle(record.jobId)) ||
         (record.backgroundedAt !== undefined && record.notifiedAt === undefined)
       ) {
         await moveRecordFiles(previous.dir, current.dir, record, options, {

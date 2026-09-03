@@ -67,6 +67,8 @@ export interface BashJobsSettings {
   maxBackgroundJobs: number;
   /** Terminal job records/log files are pruned after this age. Default 24h; <= 0 disables pruning. */
   retentionMs: number;
+  /** Post-exit log drain cap. Invalid values fall back to the 30s default. */
+  drainTimeoutMs: number;
   /** What to do with still-running jobs on session shutdown (§3.7). Default "keep". */
   shutdownPolicy: "keep" | "kill";
   /** Job state/log root; each session uses a sanitized child directory. */
@@ -127,6 +129,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     maxLogBytes: 10_485_760,
     maxBackgroundJobs: 8,
     retentionMs: 24 * 60 * 60 * 1_000,
+    drainTimeoutMs: 30_000,
     shutdownPolicy: "keep",
   },
 };
@@ -166,6 +169,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
     .filter((k) => k.endsWith("Ms"))
     .map((k) => `workflow.budget.${k}`),
   "bashJobs.autoBackgroundMs",
+  "bashJobs.drainTimeoutMs",
   "bashJobs.retentionMs",
 ];
 
@@ -273,6 +277,13 @@ export function parseBashJobsSettings(input: unknown): BashJobsSettings {
     maxLogBytes: num(value.maxLogBytes, defaults.maxLogBytes),
     maxBackgroundJobs: num(value.maxBackgroundJobs, defaults.maxBackgroundJobs),
     retentionMs: num(value.retentionMs, defaults.retentionMs),
+    drainTimeoutMs:
+      typeof value.drainTimeoutMs === "number" &&
+      Number.isFinite(value.drainTimeoutMs) &&
+      value.drainTimeoutMs > 0 &&
+      Number.isInteger(value.drainTimeoutMs)
+        ? value.drainTimeoutMs
+        : defaults.drainTimeoutMs,
     shutdownPolicy:
       value.shutdownPolicy === "keep" || value.shutdownPolicy === "kill"
         ? value.shutdownPolicy

@@ -10,6 +10,7 @@ describe("bashJobs settings block (§6)", () => {
       maxLogBytes: 10_485_760,
       maxBackgroundJobs: 8,
       retentionMs: 24 * 60 * 60 * 1_000,
+      drainTimeoutMs: 30_000,
       shutdownPolicy: "keep",
     });
     // optional fields are absent, not `undefined` (exactOptionalPropertyTypes)
@@ -49,6 +50,7 @@ describe("bashJobs settings block (§6)", () => {
       maxLogBytes: 1_024,
       maxBackgroundJobs: 2,
       retentionMs: 0,
+      drainTimeoutMs: defaults.drainTimeoutMs,
       shutdownPolicy: "keep",
     });
   });
@@ -109,10 +111,23 @@ describe("bashJobs settings block (§6)", () => {
       maxLogBytes: defaults.maxLogBytes,
       maxBackgroundJobs: defaults.maxBackgroundJobs,
       retentionMs: 1,
+      drainTimeoutMs: defaults.drainTimeoutMs,
       shutdownPolicy: "keep",
     });
   });
 
+  it("accepts a positive drain timeout and falls back for invalid values", () => {
+    expect(parseBashJobsSettings({ drainTimeoutMs: 600 }).drainTimeoutMs).toBe(600);
+    for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, "600"]) {
+      expect(parseBashJobsSettings({ drainTimeoutMs: value }).drainTimeoutMs).toBe(defaults.drainTimeoutMs);
+    }
+  });
+
+  it("reads drainTimeoutS and migrates legacy drainTimeoutMs", () => {
+    expect(loadSettings({ bashJobs: { drainTimeoutS: 5 } }).bashJobs.drainTimeoutMs).toBe(5_000);
+    expect(loadSettings({ bashJobs: { drainTimeoutS: 0 } }).bashJobs.drainTimeoutMs).toBe(defaults.drainTimeoutMs);
+    expect(loadSettings({ bashJobs: { drainTimeoutMs: 5_000 } }).bashJobs.drainTimeoutMs).toBe(5_000);
+  });
   it("is wired into loadSettings", () => {
     expect(loadSettings(undefined).bashJobs).toEqual(defaults);
     expect(loadSettings({}).bashJobs).toEqual(defaults);
@@ -124,15 +139,17 @@ describe("bashJobs settings block (§6)", () => {
     });
   });
 
-  it("reads its two durations from the file as integer seconds (`*S`), byte/count keys unchanged", () => {
-    expect(loadSettings({ bashJobs: { autoBackgroundS: 30, retentionS: 3_600, maxLogBytes: 2_048 } }).bashJobs).toEqual(
-      {
-        ...defaults,
-        autoBackgroundMs: 30_000,
-        retentionMs: 3_600_000,
-        maxLogBytes: 2_048,
-      },
-    );
+  it("reads its durations from the file as integer seconds (`*S`), byte/count keys unchanged", () => {
+    expect(
+      loadSettings({ bashJobs: { autoBackgroundS: 30, retentionS: 3_600, drainTimeoutS: 5, maxLogBytes: 2_048 } })
+        .bashJobs,
+    ).toEqual({
+      ...defaults,
+      autoBackgroundMs: 30_000,
+      retentionMs: 3_600_000,
+      drainTimeoutMs: 5_000,
+      maxLogBytes: 2_048,
+    });
     // 0 (feature off / prune immediately) survives the conversion
     expect(loadSettings({ bashJobs: { autoBackgroundS: 0, retentionS: 0 } }).bashJobs).toEqual({
       ...defaults,

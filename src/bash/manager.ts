@@ -44,7 +44,7 @@ import { formatDuration } from "../core/format.js";
  * - **I-b** notifications have exactly one channel: "terminal on disk +
  *   `backgroundedAt` set + `notifiedAt` unset" observed by the *current*
  *   manager's poll (§3.6). Write paths only persist; a disposed manager's
- *   in-flight `exitPromise` callbacks therefore cannot double-notify after
+ *   in-flight finalization callbacks therefore cannot double-notify after
  *   `/reload`.
  * - **I-c** identity doubt never kills: `checkPidOwnership() === "unsafe"`
  *   marks the job `orphaned` and refuses the kill (§3.3 safety floor).
@@ -101,6 +101,8 @@ export interface BashJobManagerOptions {
   maxReadBytes?: number;
   /** Minimum spacing between `create()`-driven retention sweeps. */
   sweepIntervalMs?: Millis;
+  /** Post-exit drain cap used by the process port and log marker. */
+  drainTimeoutMs?: Millis;
   warn?: (message: string) => void;
 }
 
@@ -119,7 +121,7 @@ export interface CreatedJob {
   readonly pid: number;
   readonly pgid: number;
   readonly logPath: string;
-  /** Settles with the terminal record. **Never rejects.** */
+  /** Settles with the terminal record after bounded exit/drain finalization. Never rejects. */
   readonly exit: Promise<JobRecord>;
 }
 
@@ -143,7 +145,8 @@ export interface JobOutputRead {
   readonly exitCode: number | null;
   /** The log itself was capped at `maxLogBytes` — output was dropped (§3.4). */
   readonly logTruncated: boolean;
-  /** Inner tool's closing text; present only once the job is terminal. */
+  /** Whether the local log stream has been closed. */
+  readonly logClosed: boolean;
   readonly finalText?: string;
   readonly record: JobRecord;
 }
@@ -224,6 +227,7 @@ export interface BashJobManager {
   hasBackgroundCapacity(): boolean;
   /** Export backgrounded local jobs for the next in-process stack. */
   exportLocalJobs(): LocalJobHandoff[];
+  hasOpenLocalHandle(jobId: JobId): boolean;
   /** Adopt local handles exported by the previous stack. */
   adoptLocalJobs(handoffs: LocalJobHandoff[]): void;
   /** Wait until all queued store writes have settled. */
@@ -258,6 +262,9 @@ export interface LocalHandle {
   closed: boolean;
   /** False once anything was written that did not end in a newline. */
   atLineStart: boolean;
+  pendingTerminal: { status: JobStatus; exitCode: number | null; at: Millis } | undefined;
+  /** True after this handle crosses a session boundary. */
+  adopted: boolean;
   /** Idempotency latch for the terminal footer line (change B). */
   footerWritten: boolean;
   /** Explicit ownership token for cross-stack finalization. */
@@ -285,14 +292,18 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   const maxBackgroundJobs = normalizePositive(options.maxBackgroundJobs, DEFAULT_MAX_BACKGROUND_JOBS);
   const maxReadBytes = normalizePositive(options.maxReadBytes, DEFAULT_MAX_READ_BYTES);
   const pollMs = normalizePositive(options.pollMs, DEFAULT_NOTIFY_POLL_MS);
+  const drainTimeoutMs =
+    options.drainTimeoutMs !== undefined && Number.isFinite(options.drainTimeoutMs) && options.drainTimeoutMs >= 0
+      ? Math.trunc(options.drainTimeoutMs)
+      : 30_000;
+  const killGraceMs = options.killGraceMs;
+  const notify = options.notify;
   const sweepIntervalMs = normalizePositive(options.sweepIntervalMs, DEFAULT_SWEEP_INTERVAL_MS);
   // Unlike the other knobs, 0 is meaningful here ("discard on the next tick").
   const discardGraceMs =
     options.discardGraceMs !== undefined && Number.isFinite(options.discardGraceMs) && options.discardGraceMs >= 0
       ? Math.trunc(options.discardGraceMs)
       : DEFAULT_DISCARD_GRACE_MS;
-  const killGraceMs = options.killGraceMs;
-  const notify = options.notify;
   const myToken = {};
 
   const entries = new Map<JobId, Entry>();
@@ -334,13 +345,15 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const entry = ensureEntry(record);
     const handle = entry.local;
     const merged =
-      handle && !isTerminalJobStatus(record.status)
-        ? {
-            ...record,
-            logBytes: Math.max(record.logBytes, handle.written),
-            outputTruncated: record.outputTruncated || handle.truncated,
-          }
-        : record;
+      handle && record.backgroundedAt === undefined && entry.record.backgroundedAt !== undefined
+        ? { ...record, backgroundedAt: entry.record.backgroundedAt }
+        : handle && !isTerminalJobStatus(record.status)
+          ? {
+              ...record,
+              logBytes: Math.max(record.logBytes, handle.written),
+              outputTruncated: record.outputTruncated || handle.truncated,
+            }
+          : record;
     entry.record = merged;
     if (isTerminalJobStatus(merged.status)) settleWaiters(entry);
     return merged;
@@ -407,7 +420,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     ticking = true;
     try {
       for (const entry of [...entries.values()]) await probeAdopted(entry);
-      for (const entry of [...entries.values()]) await deliverNotice(entry.record);
+      for (const entry of [...entries.values()]) await deliverNotice(entry);
       for (const entry of [...entries.values()]) await discardForeground(entry.record);
     } finally {
       ticking = false;
@@ -432,8 +445,10 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     await applyTransition(record.jobId, "exited_unknown", { at: clock.now(), exitCode: null });
   }
 
-  async function deliverNotice(record: JobRecord): Promise<void> {
+  async function deliverNotice(entry: Entry): Promise<void> {
     if (disposed || notify === undefined) return;
+    if (entry.local && !entry.local.closed) return;
+    const record = entry.record;
     if (!shouldNotifyJob(record) || notifying.has(record.jobId)) return;
     notifying.add(record.jobId);
     try {
@@ -577,28 +592,103 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     entry.record = { ...entry.record, logBytes: handle.written };
   }
 
+  function formatDrainCapNotice(): string {
+    return `\n[pi-subagent] log tail capture stopped: pipes still busy ${drainTimeoutMs}ms after process exit\n`;
+  }
+
   async function finalizeLocal(jobId: JobId, entry: Entry, handle: LocalHandle): Promise<JobRecord> {
     const mine = myToken;
-    // `exitPromise` never rejects (process.ts contract), so this can only fail
-    // on a persistence error — which must not surface as a rejection either.
-    const exit = await handle.spawned.exitPromise;
+    const exit = await handle.spawned.processExitPromise;
     const at = clock.now();
     if (handle.owner !== mine) return entry.record;
     const status = terminalStatusFor(handle, exit);
-    appendLogFooter(entry, handle, status, exit.exitCode, at);
-    await handle.flush.catch(() => undefined);
-    handle.closed = true;
-    await new Promise<void>((resolve) => handle.stream.end(() => resolve()));
-    const stored = await applyTransition(jobId, status, {
+    const patch: JobTransitionPatch = {
       at,
       exitCode: exit.exitCode,
       logBytes: handle.written,
       outputTruncated: handle.truncated,
       ...(exit.error !== undefined ? { finalText: exit.error.message } : {}),
-    });
-    // I-b: a disposed manager persists but never notifies.
+    };
+    if (!isTerminalJobStatus(entry.record.status)) {
+      try {
+        const stored = await applyTransition(jobId, status, patch);
+        if (stored) entry.record = stored;
+        else {
+          const local = transitionJob(entry.record, status, patch);
+          if (local.ok) {
+            entry.record = putRecord(local.record);
+            handle.pendingTerminal = { status, exitCode: exit.exitCode, at };
+          }
+          warn(`bash job ${jobId} terminal state persistence failed for ${status}`);
+        }
+      } catch (error) {
+        const local = transitionJob(entry.record, status, patch);
+        if (local.ok) {
+          entry.record = putRecord(local.record);
+          handle.pendingTerminal = { status, exitCode: exit.exitCode, at };
+        }
+        warn(`bash job ${jobId} terminal state persistence failed for ${status}: ${String(error)}`);
+      }
+    }
     ensurePolling();
-    return stored ?? entry.record;
+
+    const { stop } = await handle.spawned.drainedPromise;
+    if (handle.owner !== mine) return entry.record;
+    try {
+      if (handle.pendingTerminal) {
+        try {
+          const stored = await applyTransition(jobId, handle.pendingTerminal.status, {
+            at: handle.pendingTerminal.at,
+            exitCode: handle.pendingTerminal.exitCode,
+            logBytes: handle.written,
+            outputTruncated: handle.truncated,
+          });
+          if (stored) handle.pendingTerminal = undefined;
+        } catch (error) {
+          warn(`bash job ${jobId} terminal state lost on disk, recover() will reconcile: ${String(error)}`);
+        }
+      }
+      if (stop === "capped") {
+        const marker = formatDrainCapNotice();
+        pushWrite(handle, Buffer.from(handle.atLineStart ? marker.slice(1) : marker, "utf8"));
+        handle.truncated = true;
+      }
+      appendLogFooter(entry, handle, entry.record.status, exit.exitCode, at);
+      await handle.flush.catch(() => undefined);
+      handle.closed = true;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        let timer: TimerHandle | undefined;
+        const done = (): void => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clock.clearTimer(timer);
+          handle.stream.removeListener("error", done);
+          resolve();
+        };
+        handle.stream.once("error", done);
+        handle.stream.end(done);
+        timer = clock.setTimer(5_000, done);
+      });
+      await applyPatch(jobId, (current) => ({
+        ...current,
+        ...(isTerminalJobStatus(entry.record.status)
+          ? {
+              status: entry.record.status,
+              ...(entry.record.endedAt === undefined ? {} : { endedAt: entry.record.endedAt }),
+              exitCode: entry.record.exitCode,
+              ...(entry.record.backgroundedAt === undefined ? {} : { backgroundedAt: entry.record.backgroundedAt }),
+            }
+          : {}),
+        logBytes: handle.written,
+        outputTruncated: handle.truncated,
+      }));
+    } catch (error) {
+      warn(`bash job ${jobId} finalization failed: ${String(error)}`);
+    }
+    ensurePolling();
+    if (handle.adopted) void tick();
+    return entry.record;
   }
 
   async function create(init: CreateJobInit): Promise<CreatedJob> {
@@ -638,9 +728,11 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       written: 0,
       truncated: false,
       closed: false,
+      adopted: false,
       atLineStart: true,
       footerWritten: false,
       owner: myToken,
+      pendingTerminal: undefined,
     };
     handle.stream.on("error", (error) => {
       warn(`bash job ${jobId} log write failed: ${String(error)}`);
@@ -746,6 +838,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       state: current.status,
       exitCode: current.exitCode,
       logTruncated: current.outputTruncated,
+      logClosed: entry?.local ? entry.local.closed : true,
       ...(current.finalText !== undefined ? { finalText: current.finalText } : {}),
       record: current,
     };
@@ -758,7 +851,34 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     const record = entry?.record ?? (await store.load(jobId));
     if (!record) throw new Error(`bash job not found: ${jobId}`);
     if (isTerminalJobStatus(record.status)) {
-      return { jobId, outcome: "already-terminal", alreadyTerminal: true, record };
+      const openLocal = entry?.local && !entry.local.closed;
+      if (!openLocal) {
+        return { jobId, outcome: "already-terminal", alreadyTerminal: true, record };
+      }
+      const pid = record.pid;
+      if (pid === undefined) {
+        return {
+          jobId,
+          outcome: "already-dead",
+          alreadyTerminal: true,
+          reason: `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders could not be signalled safely`,
+          record,
+        };
+      }
+      const outcome = await processPort.killJobTree(pid, {
+        ...(killOptions.graceMs !== undefined ? { graceMs: killOptions.graceMs } : {}),
+        ...(record.procStartTime !== undefined ? { expectedProcStartTime: record.procStartTime } : {}),
+      });
+      return {
+        jobId,
+        outcome,
+        alreadyTerminal: true,
+        reason:
+          outcome === "refused"
+            ? `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders could not be signalled safely`
+            : `job already exited with code ${record.exitCode ?? "unknown"}; surviving pipe holders were terminated`,
+        record,
+      };
     }
     const pid = record.pid;
     if (pid === undefined) {
@@ -889,8 +1009,8 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   function exportLocalJobs(): LocalJobHandoff[] {
     const handoffs: LocalJobHandoff[] = [];
     for (const [jobId, entry] of entries) {
-      if (!entry.local || isTerminalJobStatus(entry.record.status) || entry.record.backgroundedAt === undefined)
-        continue;
+      if (!entry.local || entry.local.closed || entry.record.backgroundedAt === undefined) continue;
+      entry.local.owner = {};
       handoffs.push({ jobId, record: entry.record, handle: entry.local });
       entries.delete(jobId);
       localJobs.delete(jobId);
@@ -898,11 +1018,16 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     return handoffs;
   }
 
+  function hasOpenLocalHandle(jobId: JobId): boolean {
+    const local = entries.get(jobId)?.local;
+    return local !== undefined && !local.closed;
+  }
   function adoptLocalJobs(handoffs: LocalJobHandoff[]): void {
     for (const handoff of handoffs) {
       const entry = ensureEntry(handoff.record);
       entry.local = handoff.handle;
       handoff.handle.owner = myToken;
+      handoff.handle.adopted = true;
       localJobs.add(handoff.jobId);
       void finalizeLocal(handoff.jobId, entry, handoff.handle).catch((error) => {
         warn(`bash job ${handoff.jobId} finalization failed after handoff: ${String(error)}`);
@@ -1003,6 +1128,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     },
 
     exportLocalJobs,
+    hasOpenLocalHandle,
     adoptLocalJobs,
     drain() {
       return new Promise<void>((resolve) => {

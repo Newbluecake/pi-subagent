@@ -191,7 +191,10 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
   void mkdir(store.dir, { recursive: true, mode: 0o700 })
     .then(() => writeFile(join(store.dir, "session-id"), `${sessionId}\n`, { encoding: "utf8", mode: 0o600 }))
     .catch(() => undefined);
-  const processPort = createProcessPort(config.shellPath !== undefined ? { shellPath: config.shellPath } : {});
+  const processPort = createProcessPort({
+    ...(config.shellPath !== undefined ? { shellPath: config.shellPath } : {}),
+    drainTimeoutMs: config.drainTimeoutMs,
+  });
   // Late-bound: `notify` needs the manager it is being constructed with (to
   // read the log tail) — same pattern as widgetRef/spawnRef above.
   const managerRef: { current?: BashJobManager } = {};
@@ -203,6 +206,7 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
     hostPid: process.pid,
     maxLogBytes: config.maxLogBytes,
     maxBackgroundJobs: config.maxBackgroundJobs,
+    drainTimeoutMs: config.drainTimeoutMs,
     notify: async (record) => {
       const tail = managerRef.current ? await readBashJobTail(managerRef.current, record) : undefined;
       pi.sendMessage(
@@ -608,9 +612,10 @@ export function buildSessionStack(
   if (bashJobs) {
     const rootDir = settings.bashJobs.dir ?? join(getAgentDir(), "bash-jobs");
     const selfDirName = sanitizeSessionDirName(currentSessionId(ctx));
-    const processPort = createProcessPort(
-      settings.bashJobs.shellPath !== undefined ? { shellPath: settings.bashJobs.shellPath } : {},
-    );
+    const processPort = createProcessPort({
+      ...(settings.bashJobs.shellPath !== undefined ? { shellPath: settings.bashJobs.shellPath } : {}),
+      drainTimeoutMs: settings.bashJobs.drainTimeoutMs,
+    });
     const dirOptions = {
       rootDir,
       selfDirName,

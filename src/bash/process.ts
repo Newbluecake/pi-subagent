@@ -31,22 +31,7 @@ import type { JobRecord } from "./types.js";
  * process than signal an unrelated one**.
  */
 
-/** Result of a spawn. `stdout`/`stderr` are live pipes; attach listeners immediately. */
-export interface SpawnedJob {
-  readonly pid: number;
-  /** POSIX `detached` makes the child its own group leader, so this equals `pid`. */
-  readonly pgid: number;
-  readonly stdout: Readable;
-  readonly stderr: Readable;
-  /**
-   * Settles when the child has exited **and** its stdio has fallen idle.
-   * Never rejects (see `JobExit.error`) so an owner that only awaits it later
-   * can never produce an unhandled rejection.
-   */
-  readonly exitPromise: Promise<JobExit>;
-  /** `/proc/<pid>/stat` field 22 — Linux best-effort pid-reuse guard. */
-  readonly procStartTime?: string;
-}
+export type DrainStop = "ended" | "idle" | "capped" | "error";
 
 export interface JobExit {
   /** `null` when the child was terminated by a signal. */
@@ -54,6 +39,27 @@ export interface JobExit {
   readonly signal: NodeJS.Signals | null;
   /** A post-spawn `error` event, surfaced instead of rejecting. */
   readonly error?: Error;
+}
+
+export interface DrainedResult {
+  /** The same frozen object resolved by `processExitPromise`. */
+  readonly exit: JobExit;
+  readonly stop: DrainStop;
+}
+
+/** Result of a spawn. `stdout`/`stderr` are live pipes; attach listeners immediately. */
+export interface SpawnedJob {
+  readonly pid: number;
+  /** POSIX `detached` makes the child its own group leader, so this equals `pid`. */
+  readonly pgid: number;
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+  /** Exit/close first event settles; never rejects. */
+  readonly processExitPromise: Promise<JobExit>;
+  /** Bounded pipe drain settles after end/idle/cap/error; never rejects. */
+  readonly drainedPromise: Promise<DrainedResult>;
+  /** `/proc/<pid>/stat` field 22 — Linux best-effort pid-reuse guard. */
+  readonly procStartTime?: string;
 }
 
 export type KillOutcome =
@@ -107,8 +113,9 @@ export interface ProcessPortOptions {
   graceMs?: Millis;
   /** Liveness poll cadence inside the grace window. */
   killPollMs?: Millis;
+  /** Hard cap on post-exit pipe draining; defaults to 30 seconds. */
+  drainTimeoutMs?: Millis;
 }
-
 export interface ShellConfig {
   readonly shell: string;
   readonly args: readonly string[];
@@ -118,12 +125,10 @@ export interface ShellConfig {
 export const ALLOWED_SHELL_BASENAMES: ReadonlySet<string> = new Set(["bash", "zsh", "sh"]);
 
 export const DEFAULT_KILL_GRACE_MS = 2_000;
+export const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 const DEFAULT_KILL_POLL_MS = 50;
 /**
- * Post-exit stdio idle window, mirroring pi's `waitForChildProcess`
- * (`dist/utils/child-process.js`): a detached descendant can hold the pipes
- * open after the shell exits, so we wait for the pipes to fall idle rather
- * than resolving on a fixed deadline and truncating the tail.
+ * Exit and drain are decoupled: drain semantics mirror pi#5303, but are bounded.
  */
 const EXIT_STDIO_GRACE_MS = 100;
 
@@ -249,91 +254,120 @@ function signalGroup(pid: number, signal: NodeJS.Signals): boolean {
 }
 
 /**
- * Replicates pi's `waitForChildProcess` semantics without importing it:
- * resolve once the child exited and both pipes ended, or once they have been
- * idle for `EXIT_STDIO_GRACE_MS` (a detached descendant holding the inherited
- * handle must not hang us, but must not be cut mid-write either).
+ * Exit/drain watcher. The first exit or close event freezes the result and
+ * settles processExitPromise; pipe draining continues independently.
  */
-function waitForExit(child: ChildProcess): Promise<JobExit> {
-  return new Promise<JobExit>((resolve) => {
-    let settled = false;
-    let exited = false;
-    let exitCode: number | null = null;
-    let exitSignal: NodeJS.Signals | null = null;
-    let stdoutEnded = child.stdout === null;
-    let stderrEnded = child.stderr === null;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const cleanup = (): void => {
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = undefined;
-      }
-      child.removeListener("error", onError);
-      child.removeListener("exit", onExit);
-      child.removeListener("close", onClose);
-      child.stdout?.removeListener("end", onStdoutEnd);
-      child.stderr?.removeListener("end", onStderrEnd);
-      child.stdout?.removeListener("data", onData);
-      child.stderr?.removeListener("data", onData);
-    };
-
-    const finalize = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      resolve({ exitCode, signal: exitSignal, ...(error !== undefined ? { error } : {}) });
-    };
-
-    const armIdleTimer = (): void => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => finalize(), EXIT_STDIO_GRACE_MS);
-      (idleTimer as { unref?: () => void }).unref?.();
-    };
-
-    const maybeFinalizeAfterExit = (): void => {
-      if (exited && !settled && stdoutEnded && stderrEnded) finalize();
-    };
-    const onData = (): void => {
-      if (exited && !settled) armIdleTimer();
-    };
-    const onStdoutEnd = (): void => {
-      stdoutEnded = true;
-      maybeFinalizeAfterExit();
-    };
-    const onStderrEnd = (): void => {
-      stderrEnded = true;
-      maybeFinalizeAfterExit();
-    };
-    const onError = (error: Error): void => {
-      // Post-spawn errors are reported, never thrown: this promise is often
-      // awaited long after the fact (or not at all).
-      finalize(error);
-    };
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      exited = true;
-      exitCode = code;
-      exitSignal = signal;
-      maybeFinalizeAfterExit();
-      if (!settled) armIdleTimer();
-    };
-    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
-      exited = true;
-      exitCode = code;
-      exitSignal = signal;
-      finalize();
-    };
-
-    child.stdout?.once("end", onStdoutEnd);
-    child.stderr?.once("end", onStderrEnd);
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
-    child.once("error", onError);
-    child.once("exit", onExit);
-    child.once("close", onClose);
+export function watchChild(
+  child: ChildProcess,
+  drainTimeoutMs: Millis,
+): {
+  processExitPromise: Promise<JobExit>;
+  drainedPromise: Promise<DrainedResult>;
+} {
+  let resultCaptured = false;
+  let exited = false;
+  let stdoutEnded = child.stdout === null;
+  let stderrEnded = child.stderr === null;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let capTimer: ReturnType<typeof setTimeout> | undefined;
+  let resolveExit!: (exit: JobExit) => void;
+  let resolveDrained!: (result: DrainedResult) => void;
+  const processExitPromise = new Promise<JobExit>((resolve) => {
+    resolveExit = resolve;
   });
+  const drainedPromise = new Promise<DrainedResult>((resolve) => {
+    resolveDrained = resolve;
+  });
+
+  const clearTimers = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (capTimer) clearTimeout(capTimer);
+    idleTimer = undefined;
+    capTimer = undefined;
+  };
+  const cleanup = (): void => {
+    clearTimers();
+    child.removeListener("error", onError);
+    child.removeListener("exit", onExit);
+    child.removeListener("close", onClose);
+    child.stdout?.removeListener("end", onStdoutEnd);
+    child.stderr?.removeListener("end", onStderrEnd);
+    child.stdout?.removeListener("data", onData);
+    child.stderr?.removeListener("data", onData);
+  };
+  const finishDrain = (stop: DrainStop): void => {
+    cleanup();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    resolveDrained({ exit: exitResult, stop });
+  };
+  const armIdleTimer = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => finishDrain("idle"), EXIT_STDIO_GRACE_MS);
+    (idleTimer as { unref?: () => void }).unref?.();
+  };
+  let exitResult: JobExit = Object.freeze({ exitCode: null, signal: null });
+  const maybeEnd = (): void => {
+    if (exited && stdoutEnded && stderrEnded) finishDrain("ended");
+  };
+  const captureExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    if (resultCaptured) return;
+    resultCaptured = true;
+    exited = true;
+    exitResult = Object.freeze({ exitCode: code, signal });
+    resolveExit(exitResult);
+    maybeEnd();
+    if (!stdoutEnded || !stderrEnded) {
+      armIdleTimer();
+      // The cap arms exactly once and is never re-armed: it is the absolute
+      // bound that keeps a perpetually chatty detached descendant from
+      // wedging the event loop (the idle timer alone would defer forever).
+      capTimer = setTimeout(() => finishDrain("capped"), Math.max(0, drainTimeoutMs));
+      (capTimer as { unref?: () => void }).unref?.();
+    }
+  };
+  const onStdoutEnd = (): void => {
+    stdoutEnded = true;
+    maybeEnd();
+  };
+  const onStderrEnd = (): void => {
+    stderrEnded = true;
+    maybeEnd();
+  };
+  const onExit = (code: number | null, signal: NodeJS.Signals | null): void => captureExit(code, signal);
+  const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+    stdoutEnded = true;
+    stderrEnded = true;
+    captureExit(code, signal);
+    maybeEnd();
+  };
+  /**
+   * Post-exit output re-arms the *idle* cutoff only (pi#5303: a descendant
+   * still flushing its tail must not be truncated mid-write), and never
+   * touches the absolute cap. Without this re-arm the idle timer fires 100ms
+   * after exit unconditionally and the cap is dead code for any
+   * `drainTimeoutMs` >= EXIT_STDIO_GRACE_MS.
+   */
+  const onData = (): void => {
+    if (resultCaptured) armIdleTimer();
+  };
+  const onError = (error: Error): void => {
+    if (resultCaptured) return;
+    resultCaptured = true;
+    exited = true;
+    exitResult = Object.freeze({ exitCode: null, signal: null, error });
+    resolveExit(exitResult);
+    finishDrain("error");
+  };
+
+  child.stdout?.once("end", onStdoutEnd);
+  child.stderr?.once("end", onStderrEnd);
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  child.once("error", onError);
+  child.once("exit", onExit);
+  child.once("close", onClose);
+  return { processExitPromise, drainedPromise };
 }
 
 export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort {
@@ -358,8 +392,14 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
     // Bind the exit watcher before awaiting `spawn` so an immediate exit is
     // never missed, and keep an inert catch on it: the promise may be handed
     // to an owner that only consumes it much later.
-    const exitPromise = waitForExit(child);
-    void exitPromise.catch(() => {});
+    const { processExitPromise, drainedPromise } = watchChild(
+      child,
+      Number.isFinite(options.drainTimeoutMs) && (options.drainTimeoutMs ?? 0) >= 0
+        ? Math.trunc(options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
+        : DEFAULT_DRAIN_TIMEOUT_MS,
+    );
+    void processExitPromise.catch(() => {});
+    void drainedPromise.catch(() => {});
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -394,7 +434,8 @@ export function createProcessPort(options: ProcessPortOptions = {}): ProcessPort
       pgid: readProcGroup(pid) ?? pid,
       stdout: child.stdout,
       stderr: child.stderr,
-      exitPromise,
+      processExitPromise,
+      drainedPromise,
       ...(procStartTime !== undefined ? { procStartTime } : {}),
     };
   }

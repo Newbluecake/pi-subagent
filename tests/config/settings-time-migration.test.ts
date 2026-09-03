@@ -10,6 +10,7 @@ import {
   loadSettingsFromFile,
 } from "../../src/config/settings.js";
 import { secondsKeyOf } from "../../src/config/time-units.js";
+import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 /**
  * Requirement 2 (auto-migration): `loadSettingsFromFile` is the single point
@@ -42,10 +43,13 @@ describe("settings file time-unit migration", () => {
     expect(TIME_SETTING_MS_PATHS).not.toContain("budget.startupRetries");
     expect(TIME_SETTING_MS_PATHS).toContain("workflow.budget.terminateConfirmMs");
     expect(TIME_SETTING_MS_PATHS).toContain("bashJobs.retentionMs");
+    expect(TIME_SETTING_MS_PATHS).toContain("bashJobs.drainTimeoutMs");
     expect(TIME_SETTING_MS_PATHS).not.toContain("bashJobs.maxLogBytes");
     expect(TIME_SETTING_MS_PATHS.every((p) => p.endsWith("Ms"))).toBe(true);
     expect(isTimeSettingKey("budget.idleS")).toBe(true);
     expect(isTimeSettingKey("bashJobs.maxLogBytes")).toBe(false);
+    expect(isTimeSettingKey("bashJobs.drainTimeoutS")).toBe(true);
+    expect(SETTING_SPECS["bashJobs.drainTimeoutS"]).toMatchObject({ path: "bashJobs.drainTimeoutMs", time: true });
   });
 
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {

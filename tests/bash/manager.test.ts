@@ -42,9 +42,14 @@ const HOST_PID = 4242;
 class FakeProc {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
-  private settle!: (exit: JobExit) => void;
-  readonly exitPromise = new Promise<JobExit>((resolve) => {
-    this.settle = resolve;
+  private settleExit!: (exit: JobExit) => void;
+  private settleDrain!: (result: { exit: JobExit; stop: "ended" | "idle" | "capped" | "error" }) => void;
+  private lastExit: JobExit | undefined;
+  readonly processExitPromise = new Promise<JobExit>((resolve) => {
+    this.settleExit = resolve;
+  });
+  readonly drainedPromise = new Promise<{ exit: JobExit; stop: "ended" | "idle" | "capped" | "error" }>((resolve) => {
+    this.settleDrain = resolve;
   });
   constructor(
     readonly pid: number,
@@ -57,15 +62,28 @@ class FakeProc {
       pgid: this.pid,
       stdout: this.stdout,
       stderr: this.stderr,
-      exitPromise: this.exitPromise,
+      processExitPromise: this.processExitPromise,
+      drainedPromise: this.drainedPromise,
       ...(this.procStartTime !== undefined ? { procStartTime: this.procStartTime } : {}),
     };
   }
 
-  exit(exit: Partial<JobExit> = {}): void {
+  exitOnly(exit: Partial<JobExit> = {}): void {
+    if (this.lastExit) return;
+    this.lastExit = { exitCode: 0, signal: null, ...exit };
+    this.settleExit(this.lastExit);
+  }
+
+  drain(stop: "ended" | "idle" | "capped" | "error" = "ended"): void {
+    if (!this.lastExit) this.exitOnly();
     this.stdout.end();
     this.stderr.end();
-    this.settle({ exitCode: 0, signal: null, ...exit });
+    this.settleDrain({ exit: this.lastExit!, stop });
+  }
+
+  exit(exit: Partial<JobExit> = {}): void {
+    this.exitOnly(exit);
+    this.drain();
   }
 }
 

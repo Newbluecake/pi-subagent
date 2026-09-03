@@ -255,7 +255,9 @@ export default function activate(pi: ExtensionAPI): void {
 
 /** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
 async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): Promise<void> {
-  const live = bashJobs.list().filter((record) => !isTerminalJobStatus(record.status));
+  const live = bashJobs
+    .list()
+    .filter((record) => !isTerminalJobStatus(record.status) || bashJobs.hasOpenLocalHandle(record.jobId));
   if (live.length === 0) return;
   const kills = Promise.allSettled(live.map((record) => bashJobs.kill(record.jobId).catch(() => undefined)));
   await Promise.race([kills, new Promise<void>((resolve) => systemClock.setTimer(Math.max(0, graceMs), resolve))]);

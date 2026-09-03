@@ -337,9 +337,18 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       if (existing.status === "orphaned") throw new Error(orphanRefusal(jobId));
       const result = await manager.kill(jobId);
       const at = now();
+      const phrase = describeJobStatus(result.record);
       if (result.outcome === "refused") throw new Error(result.reason ?? orphanRefusal(jobId));
+      if (result.alreadyTerminal && result.outcome !== "already-terminal") {
+        return {
+          ...text(
+            `Bash job ${jobId} had already finished (${phrase}); ${result.reason ?? "surviving pipe holders were handled"}.\n` +
+              formatLogFileHint(result.record.logPath),
+          ),
+          details: { ...jobDetails(result.record, at), alreadyTerminal: true, killed: true, outcome: result.outcome },
+        };
+      }
       if (result.alreadyTerminal) {
-        const phrase = describeJobStatus(result.record);
         return {
           ...text(
             `Bash job ${jobId} has already finished (${phrase}); nothing to kill.\n` +
