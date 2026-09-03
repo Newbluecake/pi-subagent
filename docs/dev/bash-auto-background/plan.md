@@ -469,6 +469,10 @@ this call still applies and will kill the process.
 文件域交叉：仅 status.ts（S1 改 SPECS、S7 改渲染）与 stack.ts/index.ts（全部归 S6
 一人），派工时 S1 与 S7 不并行或先后合入。
 
+## Session isolation follow-up
+
+后台 bash job 的实现细节已由 [bash-jobs-session-isolation/plan.md](../bash-jobs-session-isolation/plan.md) 定稿并实施：存储 root 按 session 分层，支持进程内句柄交接、冷启动孤儿收养、flat 迁移和死 session GC。
+
 ## 13. 开放问题（需拍板）
 
 1. bash 是否加 `run_in_background?: boolean`（立即后台）？v1 默认不加（保 schema 逐字节

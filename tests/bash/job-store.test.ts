@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -61,6 +61,12 @@ describe("bash job store paths", () => {
 });
 
 describe("bash job store persistence", () => {
+  it("creates the store directory with mode 0700", async () => {
+    const { store } = await harness();
+    await store.save(record("b_3F7K2M9P", store));
+    expect((await stat(store.dir)).mode & 0o777).toBe(0o700);
+  });
+
   it("creates the dir on demand and round-trips a record", async () => {
     const { store, warnings } = await harness();
     const saved = terminal(record("b_3F7K2M9P", store), 5_000);
@@ -228,6 +234,24 @@ describe("bash job store retention", () => {
     await store.remove("b_3F7K2M9P");
     await store.remove("b_3F7K2M9P");
     expect(await readdir(store.dir)).toEqual([]);
+  });
+
+  it("refuses to remove a persisted log path outside the configured root", async () => {
+    const { dir, warnings } = await harness();
+    const jobsDir = join(dir, "jobs");
+    const store = createJobStore({
+      dir: jobsDir,
+      retentionMs: 1_000,
+      clock: new FakeClock(),
+      extraLogRoot: jobsDir,
+      warn: (message) => warnings.push(message),
+    });
+    const outside = join(dir, "outside.log");
+    await store.save({ ...record("b_OUTSIDE1", store), logPath: outside });
+    await writeFile(outside, "secret", "utf8");
+    await store.remove("b_OUTSIDE1");
+    expect(await readFile(outside, "utf8")).toBe("secret");
+    expect(warnings.some((warning) => warning.includes("unsafe bash job log path"))).toBe(true);
   });
 });
 

@@ -8,7 +8,8 @@ import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
 import { bashJobsEnabled, buildSessionStack, formatBashJobNotification, readBashJobTail } from "../../src/stack.js";
 import { probePid, readProcStartTime } from "../../src/bash/process.js";
-import type { JobRecord } from "../../src/bash/types.js";
+import { sanitizeSessionDirName } from "../../src/bash/session-dirs.js";
+import { createJobRecord, type JobRecord } from "../../src/bash/types.js";
 import type { BashJobManager } from "../../src/bash/manager.js";
 
 /**
@@ -74,7 +75,8 @@ function settingsWith(
 }
 
 function seedRecord(dir: string, record: Partial<JobRecord> & { jobId: string }): JobRecord {
-  mkdirSync(dir, { recursive: true });
+  const targetDir = join(dir, sanitizeSessionDirName("session-under-test"));
+  mkdirSync(targetDir, { recursive: true });
   const full: JobRecord = {
     v: 1,
     command: "sleep 30",
@@ -86,13 +88,13 @@ function seedRecord(dir: string, record: Partial<JobRecord> & { jobId: string })
     spawnedAt: Date.now() - 60_000,
     backgroundedAt: Date.now() - 59_000,
     exitCode: null,
-    logPath: join(dir, `${record.jobId}.log`),
+    logPath: join(targetDir, `${record.jobId}.log`),
     logBytes: 0,
     outputTruncated: false,
     readCursor: 0,
     ...record,
   } as JobRecord;
-  writeFileSync(join(dir, `${full.jobId}.json`), JSON.stringify(full), "utf8");
+  writeFileSync(join(targetDir, `${full.jobId}.json`), JSON.stringify(full), "utf8");
   if (!existsSync(full.logPath)) writeFileSync(full.logPath, "", "utf8");
   return full;
 }
@@ -108,11 +110,84 @@ afterEach(() => {
 });
 
 describe("S7 stack wiring: BashJobManager construction", () => {
+  it.runIf(posix)("does not expose a terminal job from session A in session B", async () => {
+    const dir = join(tmpRoot, "isolated-jobs");
+    const sessionA = {
+      ...ctx,
+      sessionManager: { getEntries: () => [], getSessionId: () => "session-a" },
+    } as ExtensionContext;
+    const sessionB = {
+      ...ctx,
+      sessionManager: { getEntries: () => [], getSessionId: () => "session-b" },
+    } as ExtensionContext;
+    const first = buildSessionStack(fakePi().pi, sessionA, settingsWith(dir), types, []);
+    const job = await first.bashJobs!.create({ command: "true", cwd: process.cwd() });
+    await job.exit;
+    const second = buildSessionStack(fakePi().pi, sessionB, settingsWith(dir), types, []);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(second.bashJobs!.list().some((record) => record.jobId === job.jobId)).toBe(false);
+    first.bashJobs?.dispose();
+    second.bashJobs?.dispose();
+  });
+
+  it.runIf(posix)("adopts a dead-host orphan on a startup-style stack build", async () => {
+    const dir = join(tmpRoot, "startup-jobs");
+    const oldDir = join(dir, "old-session-abcdef12");
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    const pid = child.pid!;
+    child.unref();
+    try {
+      const record = {
+        ...createJobRecord({
+          jobId: "b_START001",
+          command: "sleep 30",
+          cwd: process.cwd(),
+          sessionId: "old-session",
+          hostPid: 999999,
+          logPath: join(oldDir, "b_START001.log"),
+          createdAt: Date.now(),
+        }),
+        status: "running" as const,
+        pid,
+        pgid: pid,
+        backgroundedAt: Date.now(),
+        spawnedAt: Date.now(),
+        procStartTime: readProcStartTime(pid),
+      } as JobRecord;
+      mkdirSync(oldDir, { recursive: true });
+      writeFileSync(join(oldDir, "b_START001.json"), JSON.stringify(record), "utf8");
+      writeFileSync(record.logPath, "startup orphan\n", "utf8");
+      const stack = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
+      await vi.waitFor(() => expect(stack.bashJobs?.get(record.jobId)?.status).toBe("running"), {
+        timeout: 5_000,
+        interval: 25,
+      });
+      expect(stack.bashJobs?.get(record.jobId)?.backgroundedAt).toBeTypeOf("number");
+      const forkCtx = {
+        ...ctx,
+        sessionManager: { getEntries: () => [], getSessionId: () => "fork-after-adopt" },
+      } as ExtensionContext;
+      const fork = buildSessionStack(fakePi().pi, forkCtx, settingsWith(dir), types, []);
+      await vi.waitFor(() => expect(fork.bashJobs?.get(record.jobId)?.status).toBe("running"), {
+        timeout: 5_000,
+        interval: 25,
+      });
+      expect(fork.bashJobs?.get(record.jobId)?.sessionId).toBe("fork-after-adopt");
+      await fork.bashJobs?.kill(record.jobId);
+    } finally {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
   it("builds a manager when the feature is on and none at all when the threshold is 0", () => {
     const dir = join(tmpRoot, "jobs");
     const on = buildSessionStack(fakePi().pi, ctx, settingsWith(dir), types, []);
     expect(bashJobsEnabled(settingsWith(dir))).toBe(posix);
-    expect(on.bashJobs?.dir).toBe(posix ? dir : undefined);
+    expect(on.bashJobs?.dir).toBe(posix ? join(dir, sanitizeSessionDirName("session-under-test")) : undefined);
     on.bashJobs?.dispose();
 
     const off = buildSessionStack(fakePi().pi, ctx, settingsWith(dir, { autoBackgroundMs: 0 }), types, []);
@@ -166,7 +241,9 @@ describe("S7 stack wiring: BashJobManager construction", () => {
       let persisted!: JobRecord;
       await vi.waitFor(
         () => {
-          persisted = JSON.parse(readFileSync(join(dir, "b_TEST0001.json"), "utf8")) as JobRecord;
+          persisted = JSON.parse(
+            readFileSync(join(record.logPath.replace(/\/[^/]+\.log$/, ""), "b_TEST0001.json"), "utf8"),
+          ) as JobRecord;
           expect(persisted.notifiedAt).toBeTypeOf("number");
         },
         { timeout: 5_000, interval: 25 },
@@ -424,12 +501,17 @@ describe("S7 index wiring: session_shutdown policy table (§3.7)", () => {
     // Wait for recover() to adopt the seeded job (adoption stamps backgroundedAt).
     await vi.waitFor(
       () => {
-        const raw = JSON.parse(readFileSync(join(jobsDir, "b_TEST0002.json"), "utf8")) as JobRecord;
+        const raw = JSON.parse(
+          readFileSync(join(jobsDir, sanitizeSessionDirName("session-under-test"), "b_TEST0002.json"), "utf8"),
+        ) as JobRecord;
         expect(raw.backgroundedAt).toBeTypeOf("number");
         expect(probePid(pid)).toBe(true);
       },
       { timeout: 5_000, interval: 25 },
     );
+    // Recovery is intentionally started asynchronously by stack construction;
+    // allow the manager table to be populated before exercising shutdown.
+    await new Promise((resolve) => setTimeout(resolve, 100));
     return host;
   }
 

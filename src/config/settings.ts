@@ -65,11 +65,11 @@ export interface BashJobsSettings {
   maxLogBytes: number;
   /** Hard cap on concurrently running background jobs (§3.8). Default 8. */
   maxBackgroundJobs: number;
-  /** Terminal job records/log files are pruned after this age. Default 24h; 0 = prune immediately. */
+  /** Terminal job records/log files are pruned after this age. Default 24h; <= 0 disables pruning. */
   retentionMs: number;
   /** What to do with still-running jobs on session shutdown (§3.7). Default "keep". */
   shutdownPolicy: "keep" | "kill";
-  /** Job state/log directory; defaults to `getAgentDir()/bash-jobs` when unset. */
+  /** Job state/log root; each session uses a sanitized child directory. */
   dir?: string;
   /** Shell used to run job commands; defaults to the $SHELL whitelist → bash (§3.3) when unset. */
   shellPath?: string;

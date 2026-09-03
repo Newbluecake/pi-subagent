@@ -1,10 +1,19 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { systemClock } from "./core/clock.js";
 import { createBashJobManager, type BashJobManager } from "./bash/manager.js";
 import { createJobStore } from "./bash/job-store.js";
+import {
+  adoptOrphans,
+  handoffInProcess,
+  migrateFlatRecords,
+  reconcileRootDir,
+  sanitizeSessionDirName,
+  sweepHandoffRemnants,
+} from "./bash/session-dirs.js";
 import { createProcessPort } from "./bash/process.js";
 import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
@@ -166,11 +175,18 @@ function currentSessionId(ctx: ExtensionContext): string {
  */
 function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: AgentSettings): BashJobManager {
   const config = settings.bashJobs;
+  const rootDir = config.dir ?? join(getAgentDir(), "bash-jobs");
+  const sessionId = currentSessionId(ctx);
   const store = createJobStore({
-    dir: config.dir ?? join(getAgentDir(), "bash-jobs"),
+    dir: join(rootDir, sanitizeSessionDirName(sessionId)),
     retentionMs: config.retentionMs,
     clock: systemClock,
+    dirMode: 0o700,
+    extraLogRoot: rootDir,
   });
+  void mkdir(store.dir, { recursive: true, mode: 0o700 })
+    .then(() => writeFile(join(store.dir, "session-id"), `${sessionId}\n`, { encoding: "utf8", mode: 0o600 }))
+    .catch(() => undefined);
   const processPort = createProcessPort(config.shellPath !== undefined ? { shellPath: config.shellPath } : {});
   // Late-bound: `notify` needs the manager it is being constructed with (to
   // read the log tail) — same pattern as widgetRef/spawnRef above.
@@ -179,7 +195,7 @@ function buildBashJobManager(pi: ExtensionAPI, ctx: ExtensionContext, settings: 
     store,
     processPort,
     clock: systemClock,
-    sessionId: currentSessionId(ctx),
+    sessionId,
     hostPid: process.pid,
     maxLogBytes: config.maxLogBytes,
     maxBackgroundJobs: config.maxBackgroundJobs,
@@ -260,9 +276,10 @@ export function buildSessionStack(
   previousCoalescer = undefined;
   previousAckHold?.dispose();
   previousAckHold = undefined;
-  // §3.6/§3.7: timers only — the processes keep running and are re-adopted by
-  // the new manager's recover() below.
-  previousBashJobs?.dispose();
+  // §3.6/§3.7: capture before dispose so in-process jobs can transfer their
+  // live LocalHandle to the new manager; dispose keeps those handles alive.
+  const prevBashJobs = previousBashJobs;
+  prevBashJobs?.dispose();
   previousBashJobs = undefined;
 
   // The widget controller is created after QueryService exists (below), but
@@ -573,18 +590,46 @@ export function buildSessionStack(
   }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
-  // §3.6: adopt still-running jobs and re-arm pending notices. Fire-and-forget
-  // like notifier.reconcile() — a directory scan must never delay session start,
-  // and a failure only means "no adoption this session", not a broken session.
+  // §3.6: prepare the session directory before recover so migrated/orphaned
+  // records enter the normal adjudication and notification path.
   if (bashJobs) {
-    void bashJobs
-      .recover()
+    const rootDir = settings.bashJobs.dir ?? join(getAgentDir(), "bash-jobs");
+    const selfDirName = sanitizeSessionDirName(currentSessionId(ctx));
+    const processPort = createProcessPort(
+      settings.bashJobs.shellPath !== undefined ? { shellPath: settings.bashJobs.shellPath } : {},
+    );
+    const dirOptions = {
+      rootDir,
+      selfDirName,
+      retentionMs: settings.bashJobs.retentionMs,
+      clock: systemClock,
+      processPort,
+      sessionId: currentSessionId(ctx),
+      skipDirNames: [selfDirName],
+      warn: (message: string) => console.warn(`[pi-subagent] ${message}`),
+    } as const;
+    void (async () => {
+      await migrateFlatRecords(dirOptions, selfDirName);
+      await migrateFlatRecords(dirOptions, undefined, [selfDirName]);
+      if (prevBashJobs) await handoffInProcess(prevBashJobs, bashJobs, dirOptions);
+      await adoptOrphans(dirOptions, prevBashJobs ? [basename(prevBashJobs.dir)] : []);
+      await bashJobs.recover();
+      if (prevBashJobs && prevBashJobs.dir !== bashJobs.dir) {
+        await prevBashJobs.drain();
+        await sweepHandoffRemnants(
+          prevBashJobs.dir,
+          new Set(bashJobs.list().map((record) => record.jobId)),
+          dirOptions,
+        );
+      }
+    })()
       .catch((error: unknown) => {
         console.warn(`[pi-subagent] bash job recovery failed (jobs stay unadopted): ${String(error)}`);
       })
-      // M2: recover populates the manager asynchronously; refresh now so
-      // recovered jobs appear without waiting for the next 1Hz frame.
       .finally(() => widgetRef.current?.refresh());
+    void reconcileRootDir(dirOptions).catch((error: unknown) => {
+      console.warn(`[pi-subagent] bash job directory reconciliation failed: ${String(error)}`);
+    });
   }
 
   // M3.6 (CC3, §11 M3.6): the workflow engine's session-lifetime pieces —

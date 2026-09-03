@@ -28,6 +28,7 @@ import {
   type JobStatus,
 } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
+import { handoffInProcess } from "../../src/bash/session-dirs.js";
 
 /**
  * §3 manager suite. The process boundary is faked (`tests/bash/process.test.ts`
@@ -687,6 +688,85 @@ describe("bash job manager: waitExit", () => {
     h.manager.dispose();
     expect((await waiting)?.status).toBe("running");
     expect(h.clock.pendingTimers).toBe(0);
+  });
+});
+
+describe("bash job manager: handoff ownership (§3.6)", () => {
+  it("exports only backgrounded local jobs", async () => {
+    const h = await harness();
+    const foreground = await h.manager.create({ command: "foreground", cwd: "/repo" });
+    expect(h.manager.exportLocalJobs()).toEqual([]);
+    await h.manager.markBackgrounded(foreground.jobId);
+    expect(h.manager.exportLocalJobs().map((handoff) => handoff.jobId)).toEqual([foreground.jobId]);
+  });
+
+  it("transfers ownership through A to B to C and settles exactly once", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "sleep 1", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    const first = h.manager.exportLocalJobs();
+    const b = h.rebuild();
+    b.adoptLocalJobs(first);
+    const second = b.exportLocalJobs();
+    const c = h.rebuild();
+    c.adoptLocalJobs(second);
+
+    h.port.last().exit({ exitCode: 7 });
+    await waitFor(() => c.get(job.jobId)?.status === "failed", "C finalization");
+    const stored = await h.store.load(job.jobId);
+    expect(stored?.status).toBe("failed");
+    expect(stored?.exitCode).toBe(7);
+    const log = await readFile(job.logPath, "utf8");
+    expect((log.match(/\[pi-subagent\] job .* failed/g) ?? []).length).toBe(1);
+  });
+
+  it("updates the in-memory log path before cross-directory adoption", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "path", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    const nextDir = join(h.dir, "next");
+    const nextStore = createJobStore({ dir: nextDir, retentionMs: 86_400_000, clock: h.clock });
+    const next = h.rebuild({ store: nextStore, sessionId: "s2" });
+    await handoffInProcess(h.manager, next, {
+      rootDir: h.dir,
+      sessionId: "s2",
+      retentionMs: 86_400_000,
+      clock: h.clock,
+      processPort: h.port,
+    });
+    expect(next.get(job.jobId)?.logPath).toBe(join(nextDir, `${job.jobId}.log`));
+    h.port.last().stdout.write("visible\n");
+    await settle();
+    expect((await next.readOutput(job.jobId, { offset: 0, advanceCursor: false })).content).toContain("visible");
+  });
+
+  it("keeps the terminal result when exit races with export", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "race", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.port.last().exit({ exitCode: 7 });
+    const handoff = h.manager.exportLocalJobs();
+    const next = h.rebuild();
+    next.adoptLocalJobs(handoff);
+    await waitFor(() => next.get(job.jobId)?.status === "failed", "raced finalization");
+    expect((await h.store.load(job.jobId))?.exitCode).toBe(7);
+  });
+});
+
+describe("bash job manager: notification convergence", () => {
+  it("marks memory notified when the record is externally removed", async () => {
+    const h = await harness({ pollMs: 1_000 });
+    const job = await h.manager.create({ command: "notify", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.port.last().exit({ exitCode: 0 });
+    await job.exit;
+    await h.store.remove(job.jobId);
+    h.clock.advance(1_000);
+    await waitFor(() => h.notified.length === 1, "notification after external removal");
+    h.clock.advance(5_000);
+    await settle();
+    expect(h.notified).toHaveLength(1);
+    expect(h.manager.get(job.jobId)?.notifiedAt).toBeTypeOf("number");
   });
 });
 

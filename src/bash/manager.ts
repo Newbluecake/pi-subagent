@@ -179,6 +179,12 @@ export interface RecoverSummary {
   readonly prunedFiles: readonly string[];
 }
 
+export interface LocalJobHandoff {
+  readonly jobId: JobId;
+  readonly record: JobRecord;
+  readonly handle: LocalHandle;
+}
+
 export interface BashJobManager {
   readonly dir: string;
   readonly maxBackgroundJobs: number;
@@ -207,6 +213,12 @@ export interface BashJobManager {
   /** §3.8 — this host's `running` **and** backgrounded jobs. */
   backgroundJobCount(): number;
   hasBackgroundCapacity(): boolean;
+  /** Export backgrounded local jobs for the next in-process stack. */
+  exportLocalJobs(): LocalJobHandoff[];
+  /** Adopt local handles exported by the previous stack. */
+  adoptLocalJobs(handoffs: LocalJobHandoff[]): void;
+  /** Wait until all queued store writes have settled. */
+  drain(): Promise<void>;
   /** Clears timers only. Never kills a process, never notifies afterwards. */
   dispose(): void;
 }
@@ -227,7 +239,7 @@ export function shouldDiscardJob(record: JobRecord): boolean {
   return isTerminalJobStatus(record.status) && record.backgroundedAt === undefined;
 }
 
-interface LocalHandle {
+export interface LocalHandle {
   readonly spawned: SpawnedJob;
   readonly stream: WriteStream;
   /** Serializes log writes and lets `readOutput` wait for a real flush. */
@@ -239,6 +251,8 @@ interface LocalHandle {
   atLineStart: boolean;
   /** Idempotency latch for the terminal footer line (change B). */
   footerWritten: boolean;
+  /** Explicit ownership token for cross-stack finalization. */
+  owner: object;
   termination?: "killed" | "timed_out";
 }
 
@@ -270,6 +284,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       : DEFAULT_DISCARD_GRACE_MS;
   const killGraceMs = options.killGraceMs;
   const notify = options.notify;
+  const myToken = {};
 
   const entries = new Map<JobId, Entry>();
   /**
@@ -422,9 +437,13 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       notifying.delete(record.jobId);
     }
     const at = clock.now();
-    await applyPatch(record.jobId, (current) =>
+    const stored = await applyPatch(record.jobId, (current) =>
       current.notifiedAt === undefined ? { ...current, notifiedAt: at } : undefined,
     );
+    if (stored === undefined) {
+      const entry = entries.get(record.jobId);
+      if (entry) entry.record = { ...entry.record, notifiedAt: at };
+    }
   }
 
   /**
@@ -550,10 +569,12 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
   }
 
   async function finalizeLocal(jobId: JobId, entry: Entry, handle: LocalHandle): Promise<JobRecord> {
+    const mine = myToken;
     // `exitPromise` never rejects (process.ts contract), so this can only fail
     // on a persistence error — which must not surface as a rejection either.
     const exit = await handle.spawned.exitPromise;
     const at = clock.now();
+    if (handle.owner !== mine) return entry.record;
     const status = terminalStatusFor(handle, exit);
     appendLogFooter(entry, handle, status, exit.exitCode, at);
     await handle.flush.catch(() => undefined);
@@ -589,7 +610,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     // Persist before spawning: a crash between the two leaves a `staged`
     // record that `recover()` can honestly report as lost.
     await store.save(staged);
-    await mkdir(store.dir, { recursive: true }).catch(() => undefined);
+    await mkdir(store.dir, { recursive: true, mode: 0o700 }).catch(() => undefined);
 
     let spawned: SpawnedJob;
     try {
@@ -610,6 +631,7 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       closed: false,
       atLineStart: true,
       footerWritten: false,
+      owner: myToken,
     };
     handle.stream.on("error", (error) => {
       warn(`bash job ${jobId} log write failed: ${String(error)}`);
@@ -855,6 +877,31 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
     };
   }
 
+  function exportLocalJobs(): LocalJobHandoff[] {
+    const handoffs: LocalJobHandoff[] = [];
+    for (const [jobId, entry] of entries) {
+      if (!entry.local || isTerminalJobStatus(entry.record.status) || entry.record.backgroundedAt === undefined)
+        continue;
+      handoffs.push({ jobId, record: entry.record, handle: entry.local });
+      entries.delete(jobId);
+      localJobs.delete(jobId);
+    }
+    return handoffs;
+  }
+
+  function adoptLocalJobs(handoffs: LocalJobHandoff[]): void {
+    for (const handoff of handoffs) {
+      const entry = ensureEntry(handoff.record);
+      entry.local = handoff.handle;
+      handoff.handle.owner = myToken;
+      localJobs.add(handoff.jobId);
+      void finalizeLocal(handoff.jobId, entry, handoff.handle).catch((error) => {
+        warn(`bash job ${handoff.jobId} finalization failed after handoff: ${String(error)}`);
+      });
+    }
+    ensurePolling();
+  }
+
   // ── public surface ───────────────────────────────────────────────────────
 
   /** §3.8 — only this host's live, already-handed-off jobs occupy a slot. */
@@ -931,6 +978,19 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
 
     hasBackgroundCapacity() {
       return backgroundJobCount() < maxBackgroundJobs;
+    },
+
+    exportLocalJobs,
+    adoptLocalJobs,
+    drain() {
+      return new Promise<void>((resolve) => {
+        // The store intentionally exposes no queue; a no-op update is the
+        // smallest barrier that is serialized after all prior writes.
+        void store.loadAll().then(
+          () => resolve(),
+          () => resolve(),
+        );
+      });
     },
 
     dispose() {

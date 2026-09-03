@@ -170,6 +170,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...WORKFLOW_BUDGET_SPECS,
   // bash auto-background (§6): v1 exposes the numeric knobs plus the shutdown
   // policy enum; bashJobs.dir / bashJobs.shellPath stay JSON-file-only.
+  // bashJobs.dir is the root for per-session job directories.
   "bashJobs.autoBackgroundS": seconds("bashJobs.autoBackgroundMs", {
     hint: "0 turns the whole feature off",
     description: "Auto-background foreground bash after this",

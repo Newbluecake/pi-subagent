@@ -12,6 +12,7 @@ import { createBashTool, type BashBackgroundDetails } from "../../src/tools/bash
 import { createBashJobTool } from "../../src/tools/bash-job-tool.js";
 import type { BashJobManager } from "../../src/bash/manager.js";
 import { probePid } from "../../src/bash/process.js";
+import { sanitizeSessionDirName } from "../../src/bash/session-dirs.js";
 import { isTerminalJobStatus, type JobRecord } from "../../src/bash/types.js";
 
 /**
@@ -62,10 +63,10 @@ const types = {
   reload: async () => ({ types: [], errors: [] }),
 } as unknown as AgentTypeRegistry;
 
-function makeCtx(cwd: string): ExtensionContext {
+function makeCtx(cwd: string, sessionId = "session-under-test"): ExtensionContext {
   return {
     cwd,
-    sessionManager: { getSessionId: () => "session-under-test", getEntries: () => [], getSessionFile: () => undefined },
+    sessionManager: { getSessionId: () => sessionId, getEntries: () => [], getSessionFile: () => undefined },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
     model: { provider: "test", id: "test-model" },
     thinkingLevel: undefined,
@@ -355,19 +356,49 @@ describe("I3 restart recovery", () => {
       await run(second.jobs, { action: "kill", job_id: jobId });
       await vi.waitFor(() => expect(probePid(pid)).toBe(false), { timeout: WAIT_TIMEOUT_MS, interval: 50 });
 
-      await vi.waitFor(() => expect(notices(second.host).length).toBe(1), { timeout: WAIT_TIMEOUT_MS, interval: 50 });
-      expect(notices(second.host)[0]!.message.content as string).toContain("killed after");
+      const jobNotices = () => notices(second.host).filter((notice) => notice.message.details?.jobId === jobId);
+      await vi.waitFor(() => expect(jobNotices().length).toBe(1), {
+        timeout: WAIT_TIMEOUT_MS,
+        interval: 50,
+      });
+      expect(jobNotices()[0]!.message.content as string).toContain("killed after");
       await sleep(QUIET_WINDOW_MS);
       // Exactly once, and only through the *current* manager's channel: the
       // disposed manager's live callbacks may persist but must never notify.
-      expect(notices(second.host).length).toBe(1);
-      expect(notices(first.host)).toEqual([]);
+      expect(jobNotices().length).toBe(1);
+      expect(notices(first.host).filter((notice) => notice.message.details?.jobId === jobId)).toEqual([]);
     },
     60_000,
   );
 });
 
 // ── I4: a running record whose pid is certainly gone ─────────────────────
+
+describe("I3 fork handoff exit code", () => {
+  it.runIf(posix)(
+    "preserves exitCode 7 across a fork with a new session directory",
+    async () => {
+      const first = buildHarness(120_000);
+      const started = await run(first.bash, {
+        command: "sh -c 'sleep 0.3; exit 7'",
+        run_in_background: true,
+      });
+      const { jobId } = backgroundDetails(started);
+      ctx = makeCtx(workDir, "forked-session");
+      const second = buildHarness(120_000);
+      await vi.waitFor(
+        async () => {
+          const record = await loadRecord(second.manager, jobId);
+          expect(record.status).toBe("failed");
+          expect(record.exitCode).toBe(7);
+        },
+        { timeout: WAIT_TIMEOUT_MS, interval: 50 },
+      );
+      expect((await loadRecord(second.manager, jobId)).exitCode).toBe(7);
+    },
+    60_000,
+  );
+});
 
 describe("I4 exited_unknown recovery", () => {
   it.runIf(posix)(
@@ -377,7 +408,9 @@ describe("I4 exited_unknown recovery", () => {
       const corpse = spawn("sh", ["-c", "exit 0"], { stdio: "ignore" });
       const deadPid = corpse.pid!;
       await new Promise<void>((resolve) => corpse.on("exit", () => resolve()));
-      const logPath = join(jobsDir, "b_TEST0400.log");
+      const sessionDir = join(jobsDir, sanitizeSessionDirName("session-under-test"));
+      mkdirSync(sessionDir, { recursive: true });
+      const logPath = join(sessionDir, "b_TEST0400.log");
       writeFileSync(logPath, "partial output\nlast line before the crash\n", "utf8");
       const seeded: JobRecord = {
         v: 1,
@@ -401,7 +434,7 @@ describe("I4 exited_unknown recovery", () => {
         outputTruncated: false,
         readCursor: 0,
       };
-      writeFileSync(join(jobsDir, "b_TEST0400.json"), JSON.stringify(seeded), "utf8");
+      writeFileSync(join(sessionDir, "b_TEST0400.json"), JSON.stringify(seeded), "utf8");
 
       const { host, manager, jobs } = buildHarness(120_000);
       await vi.waitFor(() => expect(manager.get("b_TEST0400")?.status).toBe("exited_unknown"), {

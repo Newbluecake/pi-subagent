@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **bash jobs** — `bashJobs.dir` is now a root containing one sanitized `<sessionId>/` directory per pi session; flat records are migrated when their owner is dead, list/status visibility is session-scoped, and in-process reload/new/fork transfers live jobs. Cold starts adopt owner-dead orphan jobs. Session directories are garbage-collected with the same `.json`/`.log`/`.tmp` safety rules as the job store; this is visibility isolation, not an OS security boundary.
+
 ### Added
 
 - **bash auto-backgrounding** — the built-in `bash` tool is overridden by name (POSIX only) so a

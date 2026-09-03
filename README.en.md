@@ -77,9 +77,9 @@ Settings (durations are whole seconds, like everywhere else):
 | `bashJobs.autoBackgroundS`   | `120`                           | Background a foreground bash call after this; `0` turns the whole feature off (no override registered at all)      |
 | `bashJobs.maxLogBytes`       | `10485760`                      | Per-job log cap; once hit the log stops growing and is flagged truncated — **the process keeps running**           |
 | `bashJobs.maxBackgroundJobs` | `8`                             | Concurrent background jobs; when full the threshold keeps waiting in the foreground and an explicit request errors |
-| `bashJobs.retentionS`        | `86400`                         | How long terminal job records/logs are kept; expired files go in the directory cleanup sweep (below)               |
+| `bashJobs.retentionS`        | `86400`                         | How long terminal job records/logs are kept; expired files go in the root cleanup sweep (below); `<=0` disables it |
 | `bashJobs.shutdownPolicy`    | `"keep"`                        | Running jobs on a real `quit`: `keep` or `kill`. reload/new/resume/fork always keep them                           |
-| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`         | Job state + log directory (**JSON file only**, not exposed in `/agent settings`)                                   |
+| `bashJobs.dir`               | `~/.pi/agent/bash-jobs`         | Job/log root, partitioned below by `<sessionId>` (**breaking**, JSON file only)                                    |
 | `bashJobs.shellPath`         | `$SHELL` (whitelisted) → `bash` | Shell used for job commands; `$SHELL` is honoured only when its basename ∈ {bash, zsh, sh} (**JSON file only**)    |
 
 Behaviour notes:
@@ -87,13 +87,13 @@ Behaviour notes:
 - **Not overridden on win32**: no process-group semantics there, so the built-in `bash` is left alone and neither `bash` nor `bash_job` is registered.
 - **Same-name override conflicts**: in pi the first registration of a tool name wins. If another extension also overrides `bash` and registers first, this feature is simply inert (it never breaks the other one); to disable the override deliberately, set `bashJobs.autoBackgroundS` to `0`.
 - **Directory cleanup**: the sweep runs once at session start and then, at most **once per 10 minutes**, whenever a new bash job is created (**no timer is ever armed** — a session left open for days still cleans up). One sweep handles four things: expired terminal jobs (JSON + log); `.json` files that cannot be read at all (illegal name / corrupt JSON / failed schema check), aged by **file mtime** and deleted together with a same-named `.log`; orphan `.log` files with no `.json` beside them (same mtime rule, and never while that job is still tracked in memory); and `.tmp` debris from an interrupted atomic write (fixed 1-hour TTL). Safety boundary: **only the `.json` / `.log` / `.tmp` suffixes are ever touched** — anything else you put in that directory is left alone; a **non-terminal record is never pruned**; and whenever a file's mtime cannot be compared against the clock (e.g. it lies in the future), the file is kept. Every non-record deletion is WARNed.
-- **Logs and sensitive output**: job records and logs live in `~/.pi/agent/bash-jobs/` (mode 0600, same threat model as pi's session files). Secrets printed by a command **land on disk** until `retentionS` prunes them — point `bashJobs.dir` elsewhere, or redirect sensitive output, if that matters to you.
+- **Logs and sensitive output**: job records and logs live in `~/.pi/agent/bash-jobs/<sessionId>/` (files mode 0600, directories mode 0700, same threat model as pi's session files). This is visibility isolation, not an OS security boundary: the same user can still read another session's directory. Secrets printed by a command **land on disk** until `retentionS` prunes them — redirect sensitive output.
 - **Self-contained logs**: when a job reaches a terminal state, one footer line is appended to its log —
   `[pi-subagent] job b_XXXXXXXX completed (exit 0) after 2m30s` (no exit code is invented for killed / timed-out /
   exit-code-lost jobs). `tail -3 <log>` therefore answers "how did this end?" without a tool call. The line is written
   exactly once, counts towards the log's byte total, and is appended even when the log already hit `maxLogBytes` — the
   conclusion must not be swallowed by a capacity policy, so the file may end up slightly over the cap.
-- **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
+- **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice; in-process reload/new/fork transfers the live handle, while cold starts adopt owner-dead orphans. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
 - Like every non-`budget.*` setting, changes here take effect after `/reload`.
 
 ## Scheduled tasks

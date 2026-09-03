@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Clock } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import { isJobId } from "./ids.js";
@@ -24,6 +24,10 @@ export interface JobStoreOptions {
   clock: Clock;
   /** Diagnostics sink for unreadable files; defaults to `console.warn`. */
   warn?: (message: string) => void;
+  /** Mode for newly-created directories. */
+  dirMode?: number;
+  /** Optional root under which a persisted alternate logPath may be removed. */
+  extraLogRoot?: string;
 }
 
 export interface PruneOptions {
@@ -87,6 +91,8 @@ export const TMP_RETENTION_MS = 3_600_000;
 
 export function createJobStore(options: JobStoreOptions): JobStore {
   const { dir, retentionMs, clock } = options;
+  const dirMode = options.dirMode ?? 0o700;
+  const extraLogRoot = options.extraLogRoot;
   const warn = options.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
   const recordPath = (jobId: JobId) => join(dir, `${jobId}${RECORD_SUFFIX}`);
   const logPath = (jobId: JobId) => join(dir, `${jobId}${LOG_SUFFIX}`);
@@ -109,12 +115,18 @@ export function createJobStore(options: JobStoreOptions): JobStore {
   }
 
   async function writeAtomic(record: JobRecord): Promise<void> {
-    await mkdir(dir, { recursive: true });
+    await mkdir(dir, { recursive: true, mode: dirMode });
     const target = recordPath(record.jobId);
     const temp = `${target}.${process.pid}.${clock.now()}.${tmpSeq++}.tmp`;
     try {
       await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temp, target);
+      try {
+        await rename(temp, target);
+      } catch (error) {
+        if (errorCode(error) !== "ENOENT") throw error;
+        await mkdir(dir, { recursive: true, mode: dirMode });
+        await rename(temp, target);
+      }
     } finally {
       // After a successful rename the tmp path is already gone; this only
       // cleans up the failure case.
@@ -170,8 +182,22 @@ export function createJobStore(options: JobStoreOptions): JobStore {
 
   function remove(jobId: JobId): Promise<void> {
     return enqueue(async () => {
+      const record = await readRecord(jobId);
       await unlink(recordPath(jobId)).catch(() => undefined);
       await unlink(logPath(jobId)).catch(() => undefined);
+      const alternate = record?.logPath;
+      if (alternate === undefined || alternate === logPath(jobId)) return;
+      const root = extraLogRoot === undefined ? undefined : resolve(extraLogRoot);
+      const alternateResolved = resolve(alternate);
+      const relativePath = root === undefined ? "" : relative(root, alternateResolved);
+      const insideRoot = relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
+      if (basename(alternate) !== `${jobId}${LOG_SUFFIX}` || !insideRoot) {
+        warn(`refusing to remove unsafe bash job log path for ${jobId}: ${alternate}`);
+        return;
+      }
+      await unlink(alternateResolved).catch((error) => {
+        if (errorCode(error) !== "ENOENT") warn(`failed to remove bash job log ${alternate}: ${String(error)}`);
+      });
     });
   }
 
