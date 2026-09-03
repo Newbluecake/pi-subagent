@@ -25,6 +25,10 @@
  *                  | { kind: "script_returned", result: unknown }
  *                  | { kind: "script_threw", message: string, stack?: string }
  *                  | { kind: "host_call", id, op: "agent"|"gate", args } (§3.3/§3.5, M3.2)
+ *                  | { kind: "stage_error", source: "parallel"|"pipeline", itemIndex, stageIndex?, message }
+ *                    (fire-and-forget WARN: a parallel()/pipeline() stage threw and the slot was settled
+ *                    to null — the host surfaces these in WorkflowDiagnostics so a caller can tell the
+ *                    script's result may be silently incomplete)
  * Everything the scaffold needs to start (script source, slice timeout,
  * heartbeat period, the heartbeat `SharedArrayBuffer`, the port itself) is
  * passed once via `workerData` at construction — there is no separate "boot"
@@ -191,24 +195,25 @@ function gate(cmd, opts) {
   });
 }
 
-/** §5.2: parallel(thunks) — barrier over a thunk array; a thunk that throws (sync or async) resolves that slot to null without failing its siblings. */
+/** §5.2: parallel(thunks) — barrier over a thunk array; a thunk that throws (sync or async) resolves that slot to null without failing its siblings. The throw is reported to the host (kind:"stage_error") so the null is never silent. */
 function parallel(thunks) {
   if (!Array.isArray(thunks)) throw new TypeError("parallel(thunks) expects an array of zero-arg functions");
   if (thunks.length > maxBatchItems) throw new Error("parallel(): " + thunks.length + " items exceeds maxBatchItems (" + maxBatchItems + ")");
   return Promise.all(
-    thunks.map(function (thunk) {
+    thunks.map(function (thunk, index) {
       return Promise.resolve()
         .then(function () {
           return thunk();
         })
-        .catch(function () {
+        .catch(function (error) {
+          reportStageError("parallel", index, undefined, error);
           return null;
         });
     }),
   );
 }
 
-/** §5.2: pipeline(items, ...stages) — no barrier between stages; a stage throwing skips the remaining stages for that item only, settling it to null. */
+/** §5.2: pipeline(items, ...stages) — no barrier between stages; a stage throwing skips the remaining stages for that item only, settling it to null (and reporting the throw to the host, kind:"stage_error"). */
 function pipeline(items) {
   if (!Array.isArray(items)) throw new TypeError("pipeline(items, ...stages) expects items to be an array");
   if (items.length > maxBatchItems) throw new Error("pipeline(): " + items.length + " items exceeds maxBatchItems (" + maxBatchItems + ")");
@@ -216,7 +221,7 @@ function pipeline(items) {
   return Promise.all(
     items.map(function (item, index) {
       return stages
-        .reduce(function (chain, stage) {
+        .reduce(function (chain, stage, stageIndex) {
           return chain.then(function (state) {
             if (state.skipped) return state;
             return Promise.resolve()
@@ -226,7 +231,8 @@ function pipeline(items) {
               .then(function (v) {
                 return { skipped: false, value: v };
               })
-              .catch(function () {
+              .catch(function (error) {
+                reportStageError("pipeline", index, stageIndex, error);
                 return { skipped: true, value: null };
               });
           });
@@ -248,6 +254,29 @@ function send(msg) {
     // so unconditionally as step S5 of terminate()); a send racing that close
     // is expected and must never crash the worker thread.
   }
+}
+
+/**
+ * Fire-and-forget WARN to the host: a parallel()/pipeline() stage threw and
+ * its slot is being settled to null. The null-settling semantics themselves
+ * are upstream-compatible (§5.2) and unchanged — this message only makes the
+ * failure *visible* (WorkflowDiagnostics.stageErrors), so a caller can tell
+ * the script's result may be silently incomplete.
+ */
+function reportStageError(source, itemIndex, stageIndex, error) {
+  // NB: instanceof is useless here — the script runs in a vm.Context
+  // with its own realm, so its Error constructor is not ours. Read the
+  // property instead (cross-realm safe), fall back to String().
+  var message =
+    error && typeof error.message === "string" ? error.message : String(error);
+  var msg = {
+    kind: "stage_error",
+    source: source,
+    itemIndex: itemIndex,
+    message: message,
+  };
+  if (typeof stageIndex === "number") msg.stageIndex = stageIndex;
+  send(msg);
 }
 
 function serializeError(e) {

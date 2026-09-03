@@ -15,6 +15,7 @@ import type {
   WorkerLifecycle,
   WorkerTerminateOutcome,
   WorkflowHeartbeatDiag,
+  WorkflowStageError,
 } from "./types.js";
 
 /**
@@ -96,6 +97,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
 
   const onMetaError: Array<(message: string) => void> = [];
   const onLog: Array<(line: string) => void> = [];
+  const onStageError: Array<(error: WorkflowStageError) => void> = [];
   const onScriptReturned: Array<(result: unknown) => void> = [];
   const onScriptThrew: Array<(error: SerializedError) => void> = [];
   const onExit: Array<(code: number, expected: boolean) => void> = [];
@@ -108,6 +110,7 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
   const events: WorkerHostEvents = {
     onMetaError: (cb) => onMetaError.push(cb),
     onLog: (cb) => onLog.push(cb),
+    onStageError: (cb) => onStageError.push(cb),
     onScriptReturned: (cb) => onScriptReturned.push(cb),
     onScriptThrew: (cb) => onScriptThrew.push(cb),
     onExit: (cb) => onExit.push(cb),
@@ -141,6 +144,18 @@ export function createWorkerHost(deps: WorkerHostDeps): WorkerHost {
       case "log": {
         const line = (msg as { line?: unknown }).line;
         for (const cb of onLog) cb(typeof line === "string" ? line : "");
+        return;
+      }
+      case "stage_error": {
+        const raw = msg as { source?: unknown; itemIndex?: unknown; stageIndex?: unknown; message?: unknown };
+        if ((raw.source !== "parallel" && raw.source !== "pipeline") || typeof raw.itemIndex !== "number") return; // HR7-equivalent: malformed, drop silently.
+        const error: WorkflowStageError = {
+          source: raw.source,
+          itemIndex: raw.itemIndex,
+          ...(typeof raw.stageIndex === "number" ? { stageIndex: raw.stageIndex } : {}),
+          message: typeof raw.message === "string" ? raw.message : "unknown stage error",
+        };
+        for (const cb of onStageError) cb(error);
         return;
       }
       case "script_returned": {

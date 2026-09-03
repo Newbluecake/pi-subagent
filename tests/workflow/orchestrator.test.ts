@@ -152,6 +152,48 @@ describe("orchestrator.ts (M3.1 skeleton: boot -> script -> settle)", () => {
     expect(outcome.status).toBe("completed"); // not overwritten by the exit event terminate() itself triggers
   });
 
+  it("stage_error messages from the worker land in diag.stageErrors (count exact, samples capped at 5)", async () => {
+    const clock = new FakeClock();
+    const { deps, factory } = makeDeps(clock);
+    const orch = createOrchestrator(deps);
+    const runPromise = orch.run(req());
+    await new Promise((r) => setTimeout(r, 0));
+    const port = factory.workerData().commPort;
+    for (let i = 0; i < 7; i++) {
+      port.postMessage({ kind: "stage_error", source: "pipeline", itemIndex: i, stageIndex: 0, message: `boom ${i}` });
+    }
+    port.postMessage({ kind: "stage_error", source: "parallel", itemIndex: 3, message: "thunk boom" });
+    port.postMessage({ kind: "stage_error", source: "bogus", itemIndex: "x", message: "malformed" }); // dropped silently
+    port.postMessage({ kind: "script_returned", result: "ok" });
+    const outcome = await runPromise;
+    expect(outcome.status).toBe("completed");
+    expect(outcome.diag.stageErrors?.count).toBe(8); // malformed one dropped, not counted
+    expect(outcome.diag.stageErrors?.samples).toHaveLength(5);
+    expect(outcome.diag.stageErrors?.samples[0]).toEqual({
+      source: "pipeline",
+      itemIndex: 0,
+      stageIndex: 0,
+      message: "boom 0",
+    });
+    expect(outcome.diag.stageErrors?.samples[4]).toEqual({
+      source: "pipeline",
+      itemIndex: 4,
+      stageIndex: 0,
+      message: "boom 4",
+    });
+  });
+
+  it("a clean run carries no diag.stageErrors at all", async () => {
+    const clock = new FakeClock();
+    const { deps, factory } = makeDeps(clock);
+    const orch = createOrchestrator(deps);
+    const runPromise = orch.run(req());
+    await new Promise((r) => setTimeout(r, 0));
+    factory.workerData().commPort.postMessage({ kind: "script_returned", result: "ok" });
+    const outcome = await runPromise;
+    expect(outcome.diag.stageErrors).toBeUndefined();
+  });
+
   it("WT8: absolute workflowTotalMs deadline fires even though the worker never sends anything (never-resolving script)", async () => {
     const clock = new FakeClock();
     const { deps } = makeDeps(clock);

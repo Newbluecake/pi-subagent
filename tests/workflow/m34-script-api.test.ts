@@ -129,11 +129,18 @@ describe("M3.4 parallel(thunks) (\u00a75.2/\u00a75.3: barrier, thrown thunk -> n
       return results;
     `);
     const { host, outcome } = await bootReal(script, spawner);
+    const stageErrors: Array<{ source: string; itemIndex: number; stageIndex?: number; message: string }> = [];
+    host.events.onStageError((e) => stageErrors.push(e));
     const result = await outcome;
     expect(result.threw).toBeUndefined();
     // Order preserved; failing thunks -> null; the barrier waited for the
     // 60ms agent() call before the overall parallel() resolved.
     expect(result.returned).toEqual([null, "slow-done", null, "immediate"]);
+    // …but the nulls are no longer silent: each thrown thunk was reported.
+    expect(stageErrors).toEqual([
+      { source: "parallel", itemIndex: 0, message: "sync boom" },
+      { source: "parallel", itemIndex: 2, message: "async boom" },
+    ]);
     await host.terminate("test-done");
   }, 10_000);
 
@@ -214,8 +221,13 @@ describe("M3.4 pipeline(items, ...stages) (\u00a75.2/\u00a75.3: no stage barrier
       return results;
     `);
     const { host, outcome } = await bootReal(script, spawner);
+    const stageErrors: Array<{ source: string; itemIndex: number; stageIndex?: number; message: string }> = [];
+    host.events.onStageError((e) => stageErrors.push(e));
     const result = await outcome;
     expect(result.returned).toEqual([null, "done:b|stage2-b"]);
+    // The thrown stage was reported with its item and stage index (stage 1
+    // for item "a" never ran — the item was already skipped).
+    expect(stageErrors).toEqual([{ source: "pipeline", itemIndex: 0, stageIndex: 0, message: "stage1 boom" }]);
     await host.terminate("test-done");
   }, 10_000);
 });

@@ -255,6 +255,19 @@ function renderOutcomeText(outcome: WorkflowOutcome): string {
     );
   }
   parts.push(`workflow ${outcome.workflowId}: ${outcome.status}${outcome.stopCause ? ` (${outcome.stopCause})` : ""}`);
+  if (outcome.diag.stageErrors) {
+    const se = outcome.diag.stageErrors;
+    parts.push(
+      `WARNING: ${se.count} parallel()/pipeline() stage(s) threw and were settled to null \u2014 the result below may be ` +
+        "silently incomplete (a null where a real value was expected). First reported failures: " +
+        se.samples
+          .map(
+            (s) =>
+              `${s.source}[item ${s.itemIndex}${s.stageIndex !== undefined ? ` stage ${s.stageIndex}` : ""}]: ${s.message}`,
+          )
+          .join(" | "),
+    );
+  }
   if (outcome.result !== undefined) {
     parts.push(`result: ${typeof outcome.result === "string" ? outcome.result : JSON.stringify(outcome.result)}`);
   }

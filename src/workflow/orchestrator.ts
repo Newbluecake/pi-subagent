@@ -21,6 +21,7 @@ import type {
   WorkflowId,
   WorkflowOutcome,
   WorkflowRunBudget,
+  WorkflowStageError,
   WorkflowStopCause,
   WorkflowTerminalStatus,
   WorkflowTimeoutReason,
@@ -63,6 +64,9 @@ import type {
  */
 
 const MAX_SCRIPT_BYTES = 512 * 1024;
+
+/** Cap on WorkflowDiagnostics.stageErrors.samples (the `count` field is always exact). */
+const STAGE_ERROR_SAMPLE_CAP = 5;
 
 export interface OrchestratorRunRequest {
   readonly workflowId: WorkflowId;
@@ -285,6 +289,8 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
     const createdAt = deps.clock.now();
     let heartbeat: WorkflowHeartbeatDiag = { seq: 0, observedAt: createdAt, stalledMs: 0 };
     let logLines = 0;
+    let stageErrorCount = 0;
+    const stageErrorSamples: WorkflowStageError[] = [];
     let orphanWorker: WorkflowDiagnostics["orphanWorker"];
     let children: readonly WorkflowChildSummary[] = [];
     let hostHandlerRef: HostCallHandler | undefined;
@@ -326,6 +332,7 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
         ...(req.budget.workflowTotalMs > 0 ? { deadlineAt: createdAt + req.budget.workflowTotalMs } : {}),
         heartbeat,
         logLines,
+        ...(stageErrorCount > 0 ? { stageErrors: { count: stageErrorCount, samples: stageErrorSamples } } : {}),
         ...(orphanWorker ? { orphanWorker } : {}),
         ...(pendingReconcile ? { retryingCancels: retryingCancelsAtDecision } : {}),
         ...(hostHandlerRef?.currentPhaseId !== undefined ? { currentPhaseId: hostHandlerRef.currentPhaseId } : {}),
@@ -433,6 +440,15 @@ export function createOrchestratorImpl(deps: OrchestratorDeps, hooks: Orchestrat
 
     workerHost.events.onLog(() => {
       logLines += 1;
+    });
+
+    // parallel()/pipeline() stage failures: the worker settles the slot to
+    // null (§5.2 semantics, unchanged) but reports the throw so it is never
+    // silent. `count` is authoritative; `samples` is capped — a pathological
+    // script failing every stage of a large batch must not bloat the diag.
+    workerHost.events.onStageError((error) => {
+      stageErrorCount += 1;
+      if (stageErrorSamples.length < STAGE_ERROR_SAMPLE_CAP) stageErrorSamples.push(error);
     });
 
     // M3.5 RP9: updates `journalConfig.deterministic.current` the instant the

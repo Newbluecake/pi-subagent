@@ -134,6 +134,47 @@ describe("SubagentWorkflow tool (M3.6): real worker end-to-end", () => {
     const script = 'export const meta = { name: "t", description: "t" };\nawait agent("x");\nthrow new Error("boom");';
     await expect(tool.execute("call-4", { script }, undefined)).rejects.toThrow(/boom/);
   }, 10_000);
+
+  it("a pipeline stage that throws settles items to null AND surfaces a stage-error WARNING (the null is never silent)", async () => {
+    const { spawner } = makeSpawner();
+    const tool = createWorkflowTool(realDeps(spawner));
+    // First-stage signature bug, the exact incident shape: (item) reads the
+    // *prev* arg (undefined on stage 0), so every item throws a TypeError.
+    const script =
+      'export const meta = { name: "pipe-null", description: "t" };\n' +
+      "const graded = await pipeline(\n" +
+      "  [{ dim: 'a' }, { dim: 'b' }],\n" +
+      "  async (item) => item.dim.toUpperCase(),\n" +
+      "  async (prev) => prev + '!',\n" +
+      ");\n" +
+      "return JSON.stringify(graded);";
+    const result = await tool.execute("call-5", { script }, undefined);
+    const text = (result.content[0] as { text: string }).text;
+    // §5.2 null-settling semantics unchanged…
+    expect(text).toContain("[null,null]");
+    expect((result.details as { status: string }).status).toBe("completed");
+    // …but the failure is now visible to the caller, with source/item/stage.
+    expect(text).toMatch(/WARNING: 2 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+    expect(text).toMatch(/pipeline\[item 0 stage 0\]:/);
+    expect(text).toMatch(/Cannot read propert/);
+  }, 15_000);
+
+  it("a parallel thunk that throws resolves its slot to null AND surfaces a stage-error WARNING", async () => {
+    const { spawner } = makeSpawner();
+    const tool = createWorkflowTool(realDeps(spawner));
+    const script =
+      'export const meta = { name: "par-null", description: "t" };\n' +
+      "const r = await parallel([\n" +
+      "  async () => { throw new Error('thunk boom'); },\n" +
+      "  async () => 'ok',\n" +
+      "]);\n" +
+      "return JSON.stringify(r);";
+    const result = await tool.execute("call-6", { script }, undefined);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain('[null,"ok"]');
+    expect(text).toMatch(/WARNING: 1 parallel\(\)\/pipeline\(\) stage\(s\) threw/);
+    expect(text).toMatch(/parallel\[item 0\]: thunk boom/);
+  }, 15_000);
 });
 
 describe("SubagentWorkflow disabled stub (settings.workflow.enabled === false)", () => {

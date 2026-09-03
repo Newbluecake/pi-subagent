@@ -218,6 +218,14 @@ export interface WorkflowDiagnostics {
   readonly deadlineAt?: Millis;
   readonly heartbeat: WorkflowHeartbeatDiag;
   readonly logLines: number;
+  /**
+   * parallel()/pipeline() stage failures the sandbox settled to null (§5.2
+   * semantics unchanged — the null is deliberate and upstream-compatible).
+   * Present only when at least one stage threw: `count` is authoritative,
+   * `samples` carries the first few reports so a caller can see *what* failed
+   * and tell that the script's result may be silently incomplete.
+   */
+  readonly stageErrors?: { readonly count: number; readonly samples: readonly WorkflowStageError[] };
   readonly orphanWorker?: { readonly threadId?: number; readonly reason: string; readonly at: Millis };
   /** M3.3 §3.6 CR6: calls whose A2 bounded-retry cancel loop is still in flight at the moment this snapshot was taken (only meaningful on `outcomeAt1()`-shaped, `pendingReconcile:true` snapshots — always 0 once `pendingReconcile` is `false`, since WL4's reconcile finalizes every call one way or another). */
   readonly retryingCancels?: number;
@@ -355,9 +363,23 @@ export interface SerializedError {
   readonly stack?: string;
 }
 
+/**
+ * One parallel()/pipeline() stage failure reported by the worker sandbox
+ * (worker -> host `{ kind: "stage_error" }`). `stageIndex` is present only
+ * for `pipeline` (parallel thunks are single-stage).
+ */
+export interface WorkflowStageError {
+  readonly source: "parallel" | "pipeline";
+  readonly itemIndex: number;
+  readonly stageIndex?: number;
+  readonly message: string;
+}
+
 export interface WorkerHostEvents {
   onMetaError(cb: (message: string) => void): void;
   onLog(cb: (line: string) => void): void;
+  /** A parallel()/pipeline() stage threw and its slot was settled to null — fire-and-forget, same wire shape as `onLog`. */
+  onStageError(cb: (error: WorkflowStageError) => void): void;
   onScriptReturned(cb: (result: unknown) => void): void;
   onScriptThrew(cb: (error: SerializedError) => void): void;
   /** Native `Worker` 'exit'. `expected` is true only when the host itself drove S1–S8 first. */
