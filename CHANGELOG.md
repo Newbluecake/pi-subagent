@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **fleet widget / tool card** — the thinking phase label is now animated: `🧠思考` is replaced by a 10-frame braille spinner (`⠋思考 → ⠙思考 → …`) whose frame derives from wall time (1s quantum), so the 1Hz widget/panel tick advances it by exactly one frame with no render-side animation state. `phaseLabel(phase, diag)` without a `now` keeps the static `🧠思考` form.
+- **fleet widget / tool card** — the thinking phase label is now animated: the icon cycles through four emoji frames (`🧠思考 → 💭思考 → 🤔思考 → 💡思考`) derived from wall time (1s quantum), so the 1Hz widget/panel tick advances it by exactly one frame with no render-side animation state. Frames are deliberately unambiguous-width emoji — an earlier braille-spinner version wrap-flickered CJK terminals (braille is East Asian Ambiguous: terminals render it 2 columns, string-width measures 1). `phaseLabel(phase, diag)` without a `now` keeps the static `🧠思考` form.
 
 - **bash jobs** — `bashJobs.dir` is now a root containing one sanitized `<sessionId>/` directory per pi session; flat records are migrated when their owner is dead, list/status visibility is session-scoped, and in-process reload/new/fork transfers live jobs. Cold starts adopt owner-dead orphan jobs. Session directories are garbage-collected with the same `.json`/`.log`/`.tmp` safety rules as the job store; this is visibility isolation, not an OS security boundary.
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import {
   buildFleetViewModel,
@@ -8,8 +9,8 @@ import {
   highlightOf,
   idleOf,
   phaseLabel,
-  THINKING_SPINNER_FRAMES,
-  thinkingSpinnerFrame,
+  THINKING_FRAMES,
+  thinkingFrame,
 } from "../../src/ui/fleet-panel.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -115,14 +116,18 @@ describe("view-model: highlightOf boundary rules", () => {
   });
 });
 
-describe("view-model: animated thinking label (braille spinner)", () => {
-  it("thinking phases render the spinner frame for the current wall second", () => {
-    expect(phaseLabel("model_turn", undefined, 10_000)).toBe("⠋思考"); // floor(10s/1s) % 10 = 0
-    expect(phaseLabel("model_turn", undefined, 11_000)).toBe("⠙思考");
-    expect(phaseLabel("prompt_dispatch", undefined, 42_000)).toBe("⠹思考"); // 42 % 10 = 2
+describe("view-model: animated thinking label (emoji frame cycle)", () => {
+  it("thinking phases render the emoji frame for the current wall second", () => {
+    expect(phaseLabel("model_turn", undefined, 10_000)).toBe("🤔思考"); // floor(10s/1s) % 4 = 2
+    expect(phaseLabel("model_turn", undefined, 11_000)).toBe("💡思考");
+    expect(phaseLabel("prompt_dispatch", undefined, 41_000)).toBe("💭思考"); // 41 % 4 = 1
     // consecutive 1Hz ticks advance exactly one frame
     const frames = [0, 1, 2, 3].map((s) => phaseLabel("model_turn", undefined, s * 1000));
-    expect(frames).toEqual(THINKING_SPINNER_FRAMES.slice(0, 4).map((f) => `${f}思考`));
+    expect(frames).toEqual(THINKING_FRAMES.map((f) => `${f}思考`));
+  });
+
+  it("every frame is unambiguous width 2 (East Asian Ambiguous frames wrap-flicker CJK terminals)", () => {
+    for (const frame of THINKING_FRAMES) expect(visibleWidth(frame)).toBe(2);
   });
 
   it("without a wall clock the label stays the static 🧠思考 (backward compatible)", () => {
@@ -132,12 +137,12 @@ describe("view-model: animated thinking label (braille spinner)", () => {
 
   it("non-thinking phases never animate; negative now clamps to frame 0", () => {
     expect(phaseLabel("tool_exec", undefined, 11_000)).toBe("🔧工具");
-    expect(thinkingSpinnerFrame(-5)).toBe("⠋");
+    expect(thinkingFrame(-5)).toBe("🧠");
   });
 
   it("buildFleetViewModel rows carry the animated label for the view's now", () => {
     const model = buildFleetViewModel([snapshot()], { now: 13_000 });
-    expect(model.rows[0]!.phaseLabel).toBe("⠸思考"); // 13 % 10 = 3
+    expect(model.rows[0]!.phaseLabel).toBe("💭思考"); // 13 % 4 = 1
   });
 });
 

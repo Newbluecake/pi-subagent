@@ -146,9 +146,9 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
   const meta: string[] = [row.type ?? "·"];
   if (row.model) meta.push(row.model);
   // Active rows show the current phase's age (phaseMs) AND the run's total
-  // elapsed (Σ): ⠋思考 12s Σ1m05s reads as "this model turn has been
+  // elapsed (Σ): 💭思考 12s Σ1m05s reads as "this model turn has been
   // generating for 12s; the whole run is 1m05s old". The thinking label's
-  // braille frame is derived from wall time (see thinkingSpinnerFrame), so
+  // emoji frame is derived from wall time (see thinkingFrame), so
   // the 1Hz tick animates it. Tool-call timing lives
   // on the activity line's ▸ segment (see toolTrailOf / widgetRowActivity).
   meta.push(row.phaseLabel, formatDuration(row.phaseMs), `Σ${formatDuration(row.elapsedMs)}`);
