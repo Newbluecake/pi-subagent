@@ -19,7 +19,7 @@ acknowledgeable delivery of results. Preserve these invariants when editing.
 ```sh
 npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # tsc -p tsconfig.build.json → dist/
-npm test             # vitest run — 1190+ tests; must stay green
+npm test             # vitest run — 1500+ tests; must stay green
 npm run typecheck    # tsc --noEmit (strict; see tsconfig flags)
 npm run format       # prettier --write .
 npm run format:check # CI gate

@@ -17,6 +17,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
 - **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 120s) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / wait / kill / list) — and the log is a plain file you can read/tail/grep directly. POSIX only — see below.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
+- **Scheduled tasks** — cron / interval / once schedules that spawn subagent runs when due (see "Scheduled tasks" below).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
 - **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
@@ -95,6 +96,29 @@ Behaviour notes:
 - **Adoption across restarts**: still-running jobs are re-adopted by the next session and still get their completion notice. A job whose pid ownership cannot be verified (possible pid reuse) is only marked, never killed — `kill` refuses it explicitly.
 - Like every non-`budget.*` setting, changes here take effect after `/reload`.
 
+## Scheduled tasks
+
+At session start, scheduled tasks are loaded from `~/.pi/agent/pi-subagent-schedules.json`; when one comes due, a subagent run is spawned through the normal slot queue (with the same anti-hang supervision). The file is a JSON array of entries like:
+
+```json
+[
+  {
+    "id": "nightly-review",
+    "schedule": { "kind": "cron", "expression": "0 3 * * *" },
+    "request": {
+      "type": "general",
+      "prompt": "Review last night's commits and report risks",
+      "label": "nightly-review"
+    }
+  }
+]
+```
+
+- `schedule.kind`: `"cron"` (five fields: minute hour day-of-month month day-of-week, with `*` `,` `-` `/` support) / `"interval"` (`intervalMs` milliseconds) / `"once"` (`at` as an ISO timestamp, fires once)
+- `request` mirrors the `Agent` tool's spawn parameters (minus `runId`): `type` and `prompt` are required; `label`, `modelOverride`, `budgetOverride`, `isolation`, etc. are optional
+- A task whose window passed while no session was running is **not** caught up — it is simply re-armed for the next occurrence; `once` tasks are removed after firing
+- Edit the file, then `/reload` (or start a new session) for changes to take effect
+
 ## Anti-hang architecture
 
 Every run is a pure state machine (`src/core/state-machine.ts`) driven by session events:
@@ -154,7 +178,7 @@ Alternatively download the zip from [GitHub Releases](https://github.com/Newblue
 ```sh
 npm install
 npm run build        # tsc → dist/
-npm test             # vitest: 970+ tests — state-machine transition matrix,
+npm test             # vitest: 1500+ tests — state-machine transition matrix,
                      # seeded property invariants, widget rendering, …
 npm run typecheck
 npm run format
@@ -166,7 +190,7 @@ Versioned pre-commit hook (prettier on staged files):
 git config core.hooksPath .githooks
 ```
 
-Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` the four LLM-facing tools · `ui/` agent-tree view-model + widget (pure, unit-tested) · `workflow/` sandboxed orchestrator · `adapters/` pi-facing glue.
+Layout: `core/` pure state machine + deadlines (no I/O) · `runtime/` watchdog, session driver, reaper · `service/` spawn/query/registry · `tools/` the eight LLM-facing tools · `ui/` agent-tree view-model + widget (pure, unit-tested) · `workflow/` sandboxed orchestrator · `adapters/` pi-facing glue.
 
 ## License
 

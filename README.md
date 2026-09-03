@@ -17,6 +17,7 @@
 - **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundS`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
 - **bash 自动转后台** —— 覆盖 pi 内置 `bash` 工具:命令跑过 `bashJobs.autoBackgroundS`(默认 120 秒)后调用提前返回 `job_id`,**进程不杀**、输出继续落日志,结束时推送完成通知;用 `bash_job`(status / wait / kill / list)管理,日志本身是普通文件,可以直接 read/tail/grep。仅 POSIX,详见下文。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
+- **定时任务** —— cron / interval / once 三种调度,到点自动发起 subagent run(见下文「定时任务」)。
 - **Agent tree 组件** —— run 活跃期间常驻编辑器上方(见下文)。
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
 - **成本核算** —— 每个 run 的用量汇入 pi 的会话总计;`/agent costs` 查看明细。后台 run 的用量在首次读取终态结果时附加。
@@ -93,6 +94,25 @@
 - **重启/reload 后收养**:仍在跑的 job 在下一个 session 里被重新接管并继续通知;pid 归属无法确认(可能被复用)的 job 只标记不杀,`kill` 会明确拒绝。
 - 设置改动与其他非 `budget.*` 键一样,`/reload` 后生效。
 
+## 定时任务
+
+session 启动时从 `~/.pi/agent/pi-subagent-schedules.json` 加载定时任务,到点自动发起 subagent run(走正常的 slot 队列与防卡死看管)。文件是一个 JSON 数组,每项形如:
+
+```json
+[
+  {
+    "id": "nightly-review",
+    "schedule": { "kind": "cron", "expression": "0 3 * * *" },
+    "request": { "type": "general", "prompt": "审查昨晚的提交并汇报风险", "label": "nightly-review" }
+  }
+]
+```
+
+- `schedule.kind`:`"cron"`(五段表达式:分 时 日 月 周,支持 `*` `,` `-` `/`)/ `"interval"`(`intervalMs` 毫秒间隔)/ `"once"`(`at` 为 ISO 时间,一次性)
+- `request` 与 `Agent` 工具的 spawn 参数同构(`runId` 除外):`type`、`prompt` 必填,可选 `label`、`modelOverride`、`budgetOverride`、`isolation` 等
+- 启动时已过期的任务不补跑,直接排到下一次;`once` 任务触发后自动移除
+- 编辑文件后 `/reload`(或新开 session)生效
+
 ## 防卡死架构
 
 每个 run 都是一条纯状态机(`src/core/state-machine.ts`),由会话事件驱动:
@@ -153,7 +173,7 @@ pi update --extension git:github.com/Newbluecake/pi-subagent
 ```sh
 npm install
 npm run build        # tsc → dist/
-npm test             # vitest:970+ 测试——状态机迁移矩阵、
+npm test             # vitest:1500+ 测试——状态机迁移矩阵、
                      # 带种子的属性不变量、组件渲染……
 npm run typecheck
 npm run format
@@ -165,7 +185,7 @@ npm run format
 git config core.hooksPath .githooks
 ```
 
-目录结构:`core/` 纯状态机 + deadline(无 I/O)· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 四个面向 LLM 的工具 · `ui/` agent-tree 视图模型 + 组件(纯函数,可单测)· `workflow/` 沙箱编排器 · `adapters/` 面向 pi 的胶水层。
+目录结构:`core/` 纯状态机 + deadline(无 I/O)· `runtime/` 看门狗、会话驱动、回收器 · `service/` spawn/query/registry · `tools/` 八个面向 LLM 的工具 · `ui/` agent-tree 视图模型 + 组件(纯函数,可单测)· `workflow/` 沙箱编排器 · `adapters/` 面向 pi 的胶水层。
 
 Node.js ≥ 22(用了 `fs.globSync`)。
 
