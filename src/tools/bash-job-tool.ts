@@ -276,7 +276,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       return component;
     },
 
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal) {
       const manager = requireManager();
 
       if (params.action === "list") {
@@ -314,9 +314,12 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         const requested = Number.isFinite(params.wait_ms ?? NaN) ? Math.trunc(params.wait_ms as number) : undefined;
         const waitMs = Math.min(MAX_WAIT_MS, Math.max(0, requested ?? DEFAULT_WAIT_MS));
         const before = await loadRecord(manager, jobId);
+        // The abort signal matters here: without it the wait outlasts Esc and
+        // session teardown (/exit) until wait_ms fires, wedging the turn.
         const record = isTerminalJobStatus(before.status)
           ? before
-          : ((await manager.waitExit(jobId, waitMs)) ?? (await loadRecord(manager, jobId)));
+          : ((await manager.waitExit(jobId, waitMs, { signal })) ?? (await loadRecord(manager, jobId)));
+        if (signal?.aborted) throw new Error("wait was aborted");
         const at = now();
         const finished = isTerminalJobStatus(record.status);
         const suffix = finished

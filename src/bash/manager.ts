@@ -208,8 +208,17 @@ export interface BashJobManager {
   noteTermination(jobId: JobId, reason: "killed" | "timed_out"): void;
   readOutput(jobId: JobId, options?: ReadOutputOptions): Promise<JobOutputRead>;
   kill(jobId: JobId, options?: { graceMs?: Millis }): Promise<KillJobResult>;
-  /** Bounded wait for a terminal state; resolves with the latest record. */
-  waitExit(jobId: JobId, timeoutMs: Millis): Promise<JobRecord | undefined>;
+  /**
+   * Bounded wait for a terminal state; resolves with the latest record. An
+   * abort signal settles the wait early (with the current record), so Esc /
+   * session teardown can interrupt a `bash_job wait` tool call instead of
+   * being stuck until the timeout fires.
+   */
+  waitExit(
+    jobId: JobId,
+    timeoutMs: Millis,
+    opts?: { signal?: AbortSignal | undefined },
+  ): Promise<JobRecord | undefined>;
   /** §3.8 — this host's `running` **and** backgrounded jobs. */
   backgroundJobCount(): number;
   hasBackgroundCapacity(): boolean;
@@ -957,19 +966,32 @@ export function createBashJobManager(options: BashJobManagerOptions): BashJobMan
       if (local) local.termination = reason;
     },
 
-    waitExit(jobId, timeoutMs) {
+    waitExit(jobId, timeoutMs, opts) {
       const entry = entries.get(jobId);
       if (!entry) return Promise.resolve(undefined);
       if (isTerminalJobStatus(entry.record.status)) return Promise.resolve(entry.record);
+      if (opts?.signal?.aborted) return Promise.resolve(entry.record);
       return new Promise<JobRecord | undefined>((resolve) => {
+        const onAbort = () => {
+          entry.waiters.delete(waiter);
+          clock.clearTimer(waiter.timer);
+          settle(entry.record);
+        };
+        // Every settlement path goes through settle(), which also drops the
+        // abort listener so it cannot accumulate on the tool-call signal.
+        const settle = (record: JobRecord | undefined) => {
+          opts?.signal?.removeEventListener("abort", onAbort);
+          resolve(record);
+        };
         const waiter: Waiter = {
-          resolve,
+          resolve: settle,
           timer: clock.setTimer(Math.max(0, timeoutMs), () => {
             entry.waiters.delete(waiter);
             // Z1: a wait never fails — the caller gets the current record.
-            resolve(entry.record);
+            settle(entry.record);
           }),
         };
+        opts?.signal?.addEventListener("abort", onAbort, { once: true });
         entry.waiters.add(waiter);
       });
     },

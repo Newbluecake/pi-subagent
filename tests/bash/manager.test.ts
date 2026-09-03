@@ -689,6 +689,27 @@ describe("bash job manager: waitExit", () => {
     expect((await waiting)?.status).toBe("running");
     expect(h.clock.pendingTimers).toBe(0);
   });
+
+  it("settles early when the abort signal fires, clearing the waiter's timer", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const controller = new AbortController();
+    const waiting = h.manager.waitExit(job.jobId, 60_000, { signal: controller.signal });
+    const armed = h.clock.pendingTimers;
+    controller.abort();
+    expect((await waiting)?.status).toBe("running");
+    // The waiter's timer is cleared eagerly on abort, not left to burn down
+    // to the wait_ms deadline.
+    expect(h.clock.pendingTimers).toBe(armed - 1);
+  });
+
+  it("returns immediately when the signal is already aborted", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const controller = new AbortController();
+    controller.abort();
+    expect((await h.manager.waitExit(job.jobId, 60_000, { signal: controller.signal }))?.status).toBe("running");
+  });
 });
 
 describe("bash job manager: handoff ownership (§3.6)", () => {

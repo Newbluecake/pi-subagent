@@ -161,12 +161,23 @@ function fakeManager(options: { waitResolvesImmediately?: boolean } = {}): FakeM
       records.set(jobId, killed);
       return { jobId, outcome: "signalled", alreadyTerminal: false, record: killed };
     },
-    waitExit(jobId, timeoutMs) {
+    waitExit(jobId, timeoutMs, opts) {
       calls.push(`waitExit:${jobId}:${timeoutMs}`);
       const record = records.get(jobId);
       if (!record) return Promise.resolve(undefined);
       if (isTerminalJobStatus(record.status) || options.waitResolvesImmediately) return Promise.resolve(record);
-      return new Promise((resolve) => waiters.set(jobId, resolve));
+      if (opts?.signal?.aborted) return Promise.resolve(record);
+      return new Promise((resolve) => {
+        waiters.set(jobId, resolve);
+        opts?.signal?.addEventListener(
+          "abort",
+          () => {
+            waiters.delete(jobId);
+            resolve(records.get(jobId));
+          },
+          { once: true },
+        );
+      });
     },
     backgroundJobCount() {
       return 0;
@@ -371,6 +382,26 @@ describe("bash_job — T13 bounded wait", () => {
     expect(response.content[0]!.text).toContain("completed (exit 0)");
     expect(response.content[0]!.text).toContain("Command exited with code 0");
     expect(response.details).toMatchObject({ finished: true });
+  });
+
+  it("interrupts the wait promptly when the tool-call signal aborts (Esc / teardown)", async () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_EEEE5555", pid: 31337 }));
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW });
+    const controller = new AbortController();
+    const pending = tool.execute(
+      "tc",
+      { action: "wait", job_id: "b_EEEE5555", wait_ms: 60_000 },
+      controller.signal,
+      undefined,
+      {} as never,
+    );
+    await waitForCall(manager, "waitExit:b_EEEE5555:60000");
+    controller.abort();
+    // pi's Esc / /exit path aborts in-flight tool calls and then waits for
+    // them to settle — the wait must not outlive the abort all the way to
+    // its wait_ms deadline, or the turn (and exit) stays wedged.
+    await expect(pending).rejects.toThrow("wait was aborted");
   });
 });
 
