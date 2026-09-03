@@ -64,6 +64,22 @@ describe("model-facing tool strings", () => {
   });
 
   /**
+   * A blocking wait (get_subagent_result wait:true, bash_job wait) occupies
+   * the agent loop for its whole duration — the user cannot type a new
+   * message or command until it returns. The descriptions must state that
+   * consequence, or models treat wait as a free default instead of the
+   * last-resort fallback it is.
+   */
+  it("states that a blocking wait prevents new user input", () => {
+    const [agent, result] = tools();
+    const bashJob = tools().find((tool) => tool.name === "bash_job")!;
+    expect(result.description).toMatch(/user cannot send new input/);
+    expect(collectDescriptions(result.parameters).join(" ")).toMatch(/user\s+cannot type a new message/);
+    expect(agent.description).toMatch(/monopolizes the agent loop/);
+    expect(bashJob.description).toMatch(/user cannot send new input/);
+  });
+
+  /**
    * The bash pair is generated from pi's own bash definition plus our own
    * wording; these guards cover what the T1 drift test in
    * `tests/tools/bash-tool.test.ts` does not: that the *model-visible*

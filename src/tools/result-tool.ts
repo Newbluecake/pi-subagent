@@ -23,7 +23,11 @@ export const ResultToolParams = Type.Object({
   wait: Type.Optional(
     Type.Boolean({
       description:
-        "If true, block until the run reaches a terminal state (bounded by wait_ms). Prefer waiting for the run's completion notification instead of blocking your turn; use wait only as a fallback when an expected notification never arrived.",
+        "If true, block until the run reaches a terminal state (bounded by wait_ms). Default false — and keep it " +
+        "false in almost all cases: a blocking wait occupies the agent loop for its whole duration, so the user " +
+        "cannot type a new message or command until it returns. Rely on the run's completion notification and " +
+        "call this tool without wait once it arrives; use wait only as a fallback when an expected notification " +
+        "never arrived and there is genuinely nothing else to do.",
     }),
   ),
   wait_ms: Type.Optional(
@@ -68,8 +72,9 @@ export function createResultTool(deps: {
       "Check on, or collect the result of, a subagent run started with the Agent tool (run_in_background: true). " +
       "Background runs push a completion notification on terminal state, so the normal flow is: continue other " +
       "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
-      "to block until the run finishes (up to wait_ms) — avoid it while anything else could proceed; it is a " +
-      "fallback for when an expected notification never arrived. Terminal results include the run's wall-clock " +
+      "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
+      "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
+      "expected notification never arrived. Terminal results include the run's wall-clock " +
       "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,

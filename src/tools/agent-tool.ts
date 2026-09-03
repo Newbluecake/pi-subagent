@@ -202,7 +202,8 @@ export function createAgentTool(deps: {
       "and cannot hang indefinitely: every run has a total wall-clock budget and always reaches a terminal state " +
       "(completed/failed/timed_out/aborted). A background run pushes a completion notification to you when it " +
       "reaches a terminal state: prefer continuing other work (or ending your turn) and collecting the result " +
-      "with get_subagent_result after that notification arrives, rather than blocking with wait: true. Use " +
+      "with get_subagent_result after that notification arrives, rather than blocking with wait: true — a " +
+      "blocking wait monopolizes the agent loop, so the user cannot enter a new command until it returns. Use " +
       "steer_subagent to send a follow-up instruction to a still-running one. A foreground call that exceeds the configured auto-background threshold returns early with a run_id (the run keeps going; you will be notified on completion). abort_subagent stops a running subagent. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
       "Set schema to require a structured (schema-validated) result instead of free text." +
       nestedNote,
