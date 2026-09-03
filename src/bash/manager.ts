@@ -18,7 +18,7 @@ import {
   type JobStatus,
   type JobTransitionPatch,
 } from "./types.js";
-import { formatDuration } from "../ui/fleet-panel.js";
+import { formatDuration } from "../core/format.js";
 
 /**
  * bash auto-background §3 — `BashJobManager`, the owner of a backgrounded

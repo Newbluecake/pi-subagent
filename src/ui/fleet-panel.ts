@@ -1,4 +1,10 @@
 import type { Millis, RunDiagnostics, RunId, RunPhase, RunSnapshot, RunStatus, UsageDelta } from "../core/types.js";
+import { formatDuration } from "../core/format.js";
+
+// Re-exported for the ~10 existing consumers (tools/, commands/, ui/, stack,
+// tests); the implementation moved to core/format.ts so non-UI layers (bash
+// job manager) can use it without a reverse dependency on the UI layer.
+export { formatDuration };
 
 /**
  * Fleet view-model (X7 origin): pure functions turning RunSnapshot lists into
@@ -155,17 +161,6 @@ export function escalationSummary(diag: RunDiagnostics): {
     text: diag.escalation.map((e) => `${e.level}${e.ok ? "✓" : "✗"}`).join("→"),
     max: diag.escalation[diag.escalation.length - 1]!.level,
   };
-}
-
-export function formatDuration(ms: Millis): string {
-  const clamped = Math.max(0, Math.round(ms));
-  if (clamped < 1000) return `${clamped}ms`;
-  const s = Math.floor(clamped / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h${String(m % 60).padStart(2, "0")}m`;
 }
 
 /** X9 usage, 4-decimal cost (same convention as /agent status: subagent runs are sub-cent). */
