@@ -7,6 +7,9 @@ import {
   formatUsage,
   highlightOf,
   idleOf,
+  phaseLabel,
+  THINKING_SPINNER_FRAMES,
+  thinkingSpinnerFrame,
 } from "../../src/ui/fleet-panel.js";
 
 function diag(overrides: Partial<RunDiagnostics> = {}): RunDiagnostics {
@@ -109,6 +112,32 @@ describe("view-model: highlightOf boundary rules", () => {
   it("without an idleBudgetMs there is no idle-based warn (wiring degrades gracefully)", () => {
     const s = snapshot({ diag: diag({ lastEventAt: 0 }) });
     expect(highlightOf(s, { now: 10_000 })).toBe("none");
+  });
+});
+
+describe("view-model: animated thinking label (braille spinner)", () => {
+  it("thinking phases render the spinner frame for the current wall second", () => {
+    expect(phaseLabel("model_turn", undefined, 10_000)).toBe("⠋思考"); // floor(10s/1s) % 10 = 0
+    expect(phaseLabel("model_turn", undefined, 11_000)).toBe("⠙思考");
+    expect(phaseLabel("prompt_dispatch", undefined, 42_000)).toBe("⠹思考"); // 42 % 10 = 2
+    // consecutive 1Hz ticks advance exactly one frame
+    const frames = [0, 1, 2, 3].map((s) => phaseLabel("model_turn", undefined, s * 1000));
+    expect(frames).toEqual(THINKING_SPINNER_FRAMES.slice(0, 4).map((f) => `${f}思考`));
+  });
+
+  it("without a wall clock the label stays the static 🧠思考 (backward compatible)", () => {
+    expect(phaseLabel("model_turn")).toBe("🧠思考");
+    expect(phaseLabel("prompt_dispatch", undefined)).toBe("🧠思考");
+  });
+
+  it("non-thinking phases never animate; negative now clamps to frame 0", () => {
+    expect(phaseLabel("tool_exec", undefined, 11_000)).toBe("🔧工具");
+    expect(thinkingSpinnerFrame(-5)).toBe("⠋");
+  });
+
+  it("buildFleetViewModel rows carry the animated label for the view's now", () => {
+    const model = buildFleetViewModel([snapshot()], { now: 13_000 });
+    expect(model.rows[0]!.phaseLabel).toBe("⠸思考"); // 13 % 10 = 3
   });
 });
 

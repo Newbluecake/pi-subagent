@@ -45,14 +45,17 @@ export interface FleetRow {
   streamLine: string | undefined;
   /** M-C: parent link for tree grouping in the widget (undefined = top-level). */
   parentRunId: RunId | undefined;
-  /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻重试2/3 …) for presentation surfaces. */
+  /** M11: human-friendly phase label (🧠思考 / 🔧工具 / ♻重试2/3 …) for presentation surfaces.
+   *  The thinking label is ANIMATED when built with a `now` (see phaseLabel): the static 🧠
+   *  is replaced by a braille spinner frame (⠋思考 → ⠙思考 → …) that advances once per
+   *  second of wall time, so the 1Hz widget/panel tick reads as a live spinner. */
   phaseLabel: string;
   status: RunStatus;
   phase: RunPhase;
   /** Total run age: now - diag.createdAt, clamped ≥ 0. Used for sorting and terminal rows. */
   elapsedMs: Millis;
   /** Current-phase age: now - diag.phaseEnteredAt, clamped ≥ 0. Active rows display this
-   *  next to the phase label, so 🧠思考 shows how long THIS model turn has been running
+   *  next to the phase label, so ⠋思考 12s shows how long THIS model turn has been running
    *  (resets on every phase transition) instead of the run's cumulative age. */
   phaseMs: Millis;
   /** now - (diag.lastEventAt ?? diag.phaseEnteredAt), clamped ≥ 0 — the hang signal. */
@@ -101,11 +104,29 @@ export function formatModelRef(model: { provider: string; id: string } | undefin
 }
 
 /**
+ * Animated thinking indicator: classic 10-frame braille spinner. The frame is
+ * derived from WALL TIME (1s quantum) rather than a render counter, so the
+ * pure view-model builders stay stateless and every 1Hz tick advances the
+ * spinner by exactly one frame — the widget and panel both animate without
+ * carrying any animation state of their own.
+ */
+export const THINKING_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+export function thinkingSpinnerFrame(now: Millis): string {
+  return THINKING_SPINNER_FRAMES[Math.floor(Math.max(0, now) / 1000) % THINKING_SPINNER_FRAMES.length]!;
+}
+
+/**
  * M11: human-friendly phase label for the presentation surfaces (tree rows,
  * foreground card). Diagnostic surfaces (/agent status) keep the raw
  * RunPhase. retry shows its attempt counter when known.
+ *
+ * `now` is optional for backward compatibility: when given, the thinking
+ * phases (prompt_dispatch/model_turn) render as an animated braille spinner
+ * (`⠋思考`, frame from thinkingSpinnerFrame(now)); when omitted they keep
+ * the static `🧠思考` form (snapshot exports, tests, one-off formatting).
  */
-export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">): string {
+export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">, now?: Millis): string {
   switch (phase) {
     case "queue_wait":
       return "⏸排队";
@@ -115,7 +136,7 @@ export function phaseLabel(phase: RunPhase, diag?: Pick<RunDiagnostics, "retry">
       return "⚡启动";
     case "prompt_dispatch":
     case "model_turn":
-      return "🧠思考";
+      return now === undefined ? "🧠思考" : `${thinkingSpinnerFrame(now)}思考`;
     case "tool_exec":
       return "🔧工具";
     case "retry_backoff":
@@ -292,7 +313,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
         ? (lastTextLine(snapshot.diag.thinkingText) ?? lastTextLine(snapshot.diag.text))
         : undefined,
     parentRunId: snapshot.parentRunId,
-    phaseLabel: phaseLabel(snapshot.phase, snapshot.diag),
+    phaseLabel: phaseLabel(snapshot.phase, snapshot.diag, opts.now),
     status: snapshot.status,
     phase: snapshot.phase,
     elapsedMs: Math.max(0, opts.now - snapshot.diag.createdAt),

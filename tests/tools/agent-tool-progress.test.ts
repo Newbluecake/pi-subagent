@@ -62,7 +62,7 @@ describe("M-B: buildProgressLines", () => {
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.0412 },
       }),
     });
-    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ p/kimi-k3 · 🧠思考 · turn 3 · 42s · $0.04");
+    expect(buildProgressLines(snap, 42_000)[0]).toBe("⏳ p/kimi-k3 · ⠹思考 · turn 3 · 42s · $0.04");
   });
 
   it("falls back to agentType then status when no model is known", () => {

@@ -84,7 +84,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
     expect(buildFleetWidgetLines(model)).toEqual([
       "● 1 active Agents · $1.05",
-      "  aaaaaaaa architect 🧠思考 8m32s Σ8m32s $1.05",
+      "  aaaaaaaa architect ⠋思考 8m32s Σ8m32s $1.05",
     ]);
   });
 
@@ -99,7 +99,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🧠思考 1s Σ1s");
+    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 ⠋思考 1s Σ1s");
   });
 
   it("tool trail: own continuation line; prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
@@ -115,7 +115,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  aaaaaaaa · ⠋思考 1s Σ1s",
       "  ╰ ✓ bash ×2 | ▸edit · 9s",
     ]);
     const withTool = snapshot({
@@ -126,7 +126,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  aaaaaaaa · ⠋思考 1s Σ1s",
       "  ╰ ▸bash · 100ms",
     ]);
   });
@@ -161,7 +161,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  aaaaaaaa · ⠋思考 1s Σ1s",
       "  ╰ » 然后看一下代码结构，重点关注调度模块",
     ]);
     // a long line is truncated with an ellipsis
@@ -200,7 +200,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: 0, phaseEnteredAt: 9_000, lastEventAt: 9_900 }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  aaaaaaaa · 🧠思考 1s Σ10s"); // 1s in this model turn, Σ10s total run age
+    expect(lines[1]).toBe("  aaaaaaaa · ⠋思考 1s Σ10s"); // 1s in this model turn, Σ10s total run age
   });
 
   it("tool trail: in-flight edit shows which file is being edited (path preview)", () => {
@@ -225,7 +225,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🧠思考 1s Σ1s",
+      "  aaaaaaaa · ⠋思考 1s Σ1s",
       "  ╰ ▸bash npm test -- --runInBand · 100ms",
     ]);
     const longPreview = snapshot({
@@ -295,16 +295,16 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
       "● 3 active Agents",
-      "  parent-0 · 🧠思考 9s Σ9s",
-      "  ↳ child-00 · 🧠思考 5s Σ5s",
-      "  other-00 · 🧠思考 8s Σ8s",
+      "  parent-0 · ⠋思考 9s Σ9s",
+      "  ↳ child-00 · ⠋思考 5s Σ5s",
+      "  other-00 · ⠋思考 8s Σ8s",
     ]);
   });
 
   it("nested run whose parent is NOT shown still gets the ↳ marker at top level", () => {
     const nested = snapshot({ parentRunId: "p", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     const lines = buildFleetWidgetLines(buildFleetViewModel([nested], OPTS))!;
-    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🧠思考 1s Σ1s");
+    expect(lines[1]).toBe("  ↳ aaaaaaaa · ⠋思考 1s Σ1s");
   });
 
   it("highlight-priority: crit run's row is first among roots and the bullet takes the worst tone", () => {
@@ -325,7 +325,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toContain("[crit]✗ stuck-00");
     // calm row: segment-colored (muted meta), never whole-line tone-wrapped
     expect(lines[2]).toContain("calm-000");
-    expect(lines[2]).toContain("[muted]· 🧠思考");
+    expect(lines[2]).toContain("[muted]· ⠋思考");
     expect(lines[2]).not.toContain("[crit]");
   });
 
@@ -592,7 +592,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · 🧠思考 1s Σ1s"]);
+    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · ⠋思考 1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -624,7 +624,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · 🧠思考 1s Σ1s"]);
+    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · ⠋思考 1s Σ1s"]);
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });

@@ -59,7 +59,7 @@ export function buildProgressLines(snap: RunSnapshot, now: number, maxTools = 3)
   const d = snap.diag;
   const header = `⏳ ${[
     formatModelRef(d.model) ?? d.agentType ?? snap.status,
-    phaseLabel(snap.phase, d),
+    phaseLabel(snap.phase, d, now),
     `turn ${d.turns + 1}`,
     formatDuration(Math.max(0, now - d.createdAt)),
     ...(d.usage ? [formatWidgetCost(d.usage.costUsd)] : []),
