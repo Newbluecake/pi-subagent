@@ -59,7 +59,7 @@ export interface WorkflowSettings {
  * default) exactly like `parseWorkflowSettings`.
  */
 export interface BashJobsSettings {
-  /** Foreground bash calls auto-background after this duration; 0 = whole feature off (no tool override registered). Default 120_000 (R2). */
+  /** Foreground bash calls auto-background after this duration; 0 = whole feature off (no tool override registered). Default 290_000 — 4m50s, just under the 5-minute prompt-cache TTL, so the early return rarely triggers a cache-miss price jump (R2). */
   autoBackgroundMs: number;
   /** Per-job log file cap in bytes; older output is truncated past this. Default 10 MiB. */
   maxLogBytes: number;
@@ -125,7 +125,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     runawayPolicy: "diagnose_only",
   },
   bashJobs: {
-    autoBackgroundMs: 120_000,
+    autoBackgroundMs: 290_000,
     maxLogBytes: 10_485_760,
     maxBackgroundJobs: 8,
     retentionMs: 24 * 60 * 60 * 1_000,

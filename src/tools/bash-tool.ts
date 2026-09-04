@@ -51,8 +51,11 @@ export const BashToolParams = Type.Object({
   run_in_background: Type.Optional(
     Type.Boolean({
       description:
-        "If true, the command is started in the background and the call returns immediately with a job_id " +
-        "instead of waiting. The process keeps running; check on it with the bash_job tool.",
+        "If true, the command is started in the background immediately and the call returns with a job_id; " +
+        "the process keeps running (check on it with the bash_job tool). Use this ONLY for fire-and-forget " +
+        "commands whose result you will never need. For a long command whose result you DO need, omit this " +
+        "and run it in the foreground — the call returns early on its own once it passes the auto-background " +
+        "threshold, so explicitly backgrounding and then blocking on bash_job wait wastes an extra request.",
     }),
   ),
 });
@@ -150,11 +153,14 @@ function capacityError(maxBackgroundJobs: number): Error {
 /** Threshold sentence appended to pi's own bash description (§2.1). */
 export function formatDescriptionSuffix(autoBackgroundMs: number): string {
   return (
-    ` If a command runs longer than ~${formatDuration(autoBackgroundMs)}, the call returns early with a job_id — ` +
-    `the process is NOT killed, it keeps running with its output captured to a log file, and you are notified when ` +
-    `it finishes. Manage it with the bash_job tool (status / wait / kill / list); the log is a plain file, so you ` +
-    `can also read it directly with the read tool or with tail/grep/awk. ` +
-    `Set run_in_background: true to background it immediately.`
+    ` If a command runs longer than ~${formatDuration(autoBackgroundMs)}, the call returns early on its own ` +
+    `with a job_id — the process is NOT killed, it keeps running with its output captured to a log file, and ` +
+    `you are notified when it finishes. So for a long-running command whose result you need, just run it in ` +
+    `the foreground and let this threshold move it to the background — do NOT set run_in_background: true and ` +
+    `then block on bash_job wait; that wastes an extra request for nothing. Reserve run_in_background: true ` +
+    `for fire-and-forget commands whose result you will never need. Manage a backgrounded job with the ` +
+    `bash_job tool (status / wait / kill / list); the log is a plain file, so you can also read it directly ` +
+    `with the read tool or with tail/grep/awk.`
   );
 }
 

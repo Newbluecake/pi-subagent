@@ -6,7 +6,7 @@ const defaults = DEFAULT_SETTINGS.bashJobs;
 describe("bashJobs settings block (§6)", () => {
   it("pins the documented defaults (R2/R4/R5)", () => {
     expect(defaults).toEqual({
-      autoBackgroundMs: 120_000,
+      autoBackgroundMs: 290_000,
       maxLogBytes: 10_485_760,
       maxBackgroundJobs: 8,
       retentionMs: 24 * 60 * 60 * 1_000,
@@ -29,7 +29,7 @@ describe("bashJobs settings block (§6)", () => {
     const parsed = parseBashJobsSettings({});
     expect(parsed).not.toBe(defaults);
     parsed.autoBackgroundMs = 1;
-    expect(defaults.autoBackgroundMs).toBe(120_000);
+    expect(defaults.autoBackgroundMs).toBe(290_000);
   });
 
   it("accepts 0 for autoBackgroundMs (whole feature off)", () => {

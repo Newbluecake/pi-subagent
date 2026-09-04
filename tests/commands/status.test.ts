@@ -381,8 +381,8 @@ describe("/agent settings subcommand", () => {
       expect(listing).toContain(key);
     }
     // defaults are shown in seconds, and dir/shellPath stay JSON-file-only in v1
-    expect(listing).toContain("120");
-    expect(listing).not.toContain("120000");
+    expect(listing).toContain("290");
+    expect(listing).not.toContain("290000");
     expect(listing).not.toContain("bashJobs.dir");
     expect(listing).not.toContain("bashJobs.shellPath");
 

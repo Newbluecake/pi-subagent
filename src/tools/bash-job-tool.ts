@@ -48,8 +48,9 @@ export const BashJobToolParams = Type.Object({
   action: Type.Union([Type.Literal("status"), Type.Literal("wait"), Type.Literal("kill"), Type.Literal("list")], {
     description:
       "status: state summary plus the tail of the job's log; " +
-      "wait: block (bounded) until the job exits — while it blocks, the user cannot send new input, so prefer " +
-      "status (or simply continuing other work) unless there is nothing else to do; " +
+      "wait: block (bounded) until the job exits — a completion notification is pushed automatically when the " +
+      "job finishes, and while wait blocks the user cannot send new input, so prefer status (or simply " +
+      "continuing other work) unless there is nothing else to do; " +
       "kill: terminate the process tree; list: all known jobs.",
   }),
   job_id: Type.Optional(
@@ -257,8 +258,9 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       "Manage bash commands that were moved to the background (a bash call that runs past the threshold returns a " +
       "job_id instead of blocking; the process keeps running with its output captured to a log file). " +
       "Actions: status (state summary plus the tail of the log), wait (block up to wait_ms, returns the current " +
-      "status on timeout; while it blocks the user cannot send new input, so prefer status or continuing other " +
-      "work unless there is nothing else to do), kill (terminate the process tree; safe to repeat), list (this " +
+      "status on timeout; a completion notification arrives on its own when the job finishes, and while " +
+      "wait blocks the user cannot send new input, so prefer status or continuing other work unless there is " +
+      "nothing else to do), kill (terminate the process tree; safe to repeat), list (this " +
       "session's jobs). " +
       "The log is a plain file: for the full or a targeted view, read its path directly with the read tool or with " +
       "tail/grep/awk instead of calling this tool (grep a large log rather than reading it whole). " +

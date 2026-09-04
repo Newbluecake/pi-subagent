@@ -15,7 +15,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`steer_subagent`** — send a follow-up instruction into a running subagent.
 - **`abort_subagent`** — stop a running subagent, including one auto-backgrounded from a foreground call; terminal runs are handled idempotently.
 - **Foreground auto-backgrounding** — after `foregroundAutoBackgroundS` (default 10 minutes), a foreground Agent call returns early while the run keeps running; collect it later with `get_subagent_result`.
-- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 120s) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / wait / kill / list) — and the log is a plain file you can read/tail/grep directly. POSIX only — see below.
+- **bash auto-backgrounding** — overrides pi's built-in `bash` tool: a command that outlives `bashJobs.autoBackgroundS` (default 290s = 4m50s — just under the 5-minute prompt-cache TTL, so the early return rarely costs a cache miss) returns early with a `job_id` while **the process keeps running** with its output captured to a log, and a completion notice arrives when it exits; manage it with `bash_job` (status / wait / kill / list) — and the log is a plain file you can read/tail/grep directly. POSIX only — see below.
 - **`SubagentWorkflow`** — sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()` / `phase()`) with its own wall-clock budget and optional replay journal. Disabled by default (`workflow.enabled`).
 - **Scheduled tasks** — cron / interval / once schedules that spawn subagent runs when due (see "Scheduled tasks" below).
 - **Agent tree widget** — always-on, pinned above the editor while runs are active (see below).
@@ -74,7 +74,7 @@ Settings (durations are whole seconds, like everywhere else):
 
 | Key                          | Default                         | Meaning                                                                                                            |
 | ---------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `bashJobs.autoBackgroundS`   | `120`                           | Background a foreground bash call after this; `0` turns the whole feature off (no override registered at all)      |
+| `bashJobs.autoBackgroundS`   | `290`                           | Background a foreground bash call after this; `0` turns the whole feature off (no override registered at all)      |
 | `bashJobs.maxLogBytes`       | `10485760`                      | Per-job log cap; once hit the log stops growing and is flagged truncated — **the process keeps running**           |
 | `bashJobs.maxBackgroundJobs` | `8`                             | Concurrent background jobs; when full the threshold keeps waiting in the foreground and an explicit request errors |
 | `bashJobs.retentionS`        | `86400`                         | How long terminal job records/logs are kept; expired files go in the root cleanup sweep (below); `<=0` disables it |
