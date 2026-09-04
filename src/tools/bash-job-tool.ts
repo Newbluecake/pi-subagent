@@ -5,6 +5,7 @@ import type { Millis } from "../core/types.js";
 import type { BashJobManager, JobOutputRead } from "../bash/manager.js";
 import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
+import { createPollGuard, type PollGuardOptions } from "./poll-guard.js";
 
 /**
  * "bash_job" — the management surface for bash commands that were moved to
@@ -28,8 +29,10 @@ import { formatDuration } from "../ui/fleet-panel.js";
  * - `kill` is idempotent — an already finished job is reported, not an error —
  *   and carries the pid-reuse / process-group safety checks (I-c), which is
  *   why it stays a tool rather than becoming "just run kill in bash";
- * - reads never consume a job: `status` never advances a cursor, so it can be
- *   polled freely.
+ * - reads never consume a job: `status` never advances a cursor, so it is a
+ *   side-effect-free view — but polling it in a tight loop trips the poll
+ *   guard (a warning is prepended telling the model to stop and await the
+ *   completion notification).
  *
  * Only genuine caller errors throw: an unresolvable `job_id`, a missing
  * `job_id`, a kill that had to be refused for safety, or no active session.
@@ -75,6 +78,13 @@ export interface BashJobToolDeps {
   manager: () => BashJobManager | undefined;
   /** Injectable clock for deterministic durations in tests. */
   now?: () => Millis;
+  /**
+   * Anti-polling-loop guard for `status` (the action a stuck model loops on).
+   * `wait` is excluded: each call blocks for seconds by design, so it cannot
+   * spin at "high frequency in a short window"; `list`/`kill` are not
+   * polling surfaces.
+   */
+  pollGuard?: PollGuardOptions;
 }
 
 // ── formatting helpers (model-facing text) ─────────────────────────────────
@@ -232,6 +242,20 @@ function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Mi
 
 export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof BashJobToolParams> {
   const now = deps.now ?? (() => Date.now());
+  const statusPollGuard = createPollGuard({
+    windowMs: deps.pollGuard?.windowMs,
+    maxCalls: deps.pollGuard?.maxCalls,
+    // The guard's clock defaults to the tool's own (test-injectable) clock.
+    now: deps.pollGuard?.now ?? now,
+    message:
+      deps.pollGuard?.message ??
+      ((key, count, window) =>
+        `⚠️ Polling too frequently: bash_job status has been called ${count} times for job "${key}" ` +
+        `within ${formatDuration(window)}. This looks like a polling loop — STOP polling. ` +
+        `End your turn and wait for the job's completion notification to arrive; to inspect output use ` +
+        `tail/grep on the log file directly; if you must block, make ONE final call with action: "wait" ` +
+        `instead of repeated status polls.`),
+  });
 
   function requireManager(): BashJobManager {
     const manager = deps.manager();
@@ -264,7 +288,8 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       "session's jobs). " +
       "The log is a plain file: for the full or a targeted view, read its path directly with the read tool or with " +
       "tail/grep/awk instead of calling this tool (grep a large log rather than reading it whole). " +
-      "list and status only expose jobs started by this session. Nothing here consumes the job, so status is safe to poll.",
+      "list and status only expose jobs started by this session. Nothing here consumes the job, so status is safe to poll " +
+      "— but rapid repeated polling of the same job returns a warning; await the completion notification instead.",
     promptSnippet:
       'bash_job(action: "status"|"wait"|"kill"|"list", job_id?, wait_ms?) - inspect, wait for, or stop a ' +
       "backgrounded bash command (job_id comes from the bash call that was moved to the background; a unique prefix " +
@@ -297,13 +322,15 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       const jobId = manager.resolve(requireJobId(params));
 
       if (params.action === "status") {
+        const pollWarning = statusPollGuard.record(jobId);
         const record = await loadRecord(manager, jobId);
         const at = now();
         // The tail read is side-effect free (advanceCursor: false), so status
         // stays a safe poll: it never hides output from a later read.
         const read = await readStatusTail(manager, record);
+        const statusText = formatStatus(record, read, at);
         return {
-          ...text(formatStatus(record, read, at)),
+          ...text(pollWarning ? `${pollWarning}\n\n${statusText}` : statusText),
           details: {
             ...jobDetails(record, at),
             tailBytes: read ? read.nextOffset - read.startOffset : 0,

@@ -7,6 +7,7 @@ import { deliveryKey, type Notifier } from "../delivery/notifier.js";
 import type { RunOutcome } from "../core/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines } from "./agent-tool.js";
+import { createPollGuard, type PollGuardOptions } from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
 
 /**
@@ -40,11 +41,15 @@ export const ResultToolParams = Type.Object({
 });
 export type ResultToolParams = Static<typeof ResultToolParams>;
 
+export type { PollGuardOptions } from "./poll-guard.js";
+
 export function createResultTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
   notifier?: Pick<Notifier, "ack">;
+  pollGuard?: PollGuardOptions;
 }): ToolDefinition<typeof ResultToolParams> {
+  const pollGuard = createPollGuard(deps.pollGuard);
   // pi usage accounting dedupe: a background run's spend is attached to the
   // FIRST tool result that reports its terminal outcome — get_subagent_result
   // can be called repeatedly for the same run, and re-attaching usage each
@@ -98,6 +103,8 @@ export function createResultTool(deps: {
       const resolved = deps.resolveRun?.(params.run_id);
       if (resolved && !resolved.ok) throw new Error(resolved.error);
       const runId = resolved?.ok ? resolved.runId : params.run_id;
+      const pollWarning = pollGuard.record(runId);
+      const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
       if (!params.wait) {
         const snapshot = deps.query.get(runId);
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
@@ -109,7 +116,7 @@ export function createResultTool(deps: {
             ].join("\n");
         if (snapshot.outcome) tryAck(runId, snapshot.generation, snapshot.outcome);
         return {
-          content: [{ type: "text" as const, text }],
+          content: [{ type: "text" as const, text: withWarning(text) }],
           ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
           details: {
             runId,
@@ -169,7 +176,7 @@ export function createResultTool(deps: {
       }
       tryAck(runId, waited.outcome.diag.generation, waited.outcome);
       return {
-        content: [{ type: "text" as const, text: formatOutcome(waited.outcome) }],
+        content: [{ type: "text" as const, text: withWarning(formatOutcome(waited.outcome)) }],
         ...usageOnce(runId, waited.outcome.usage),
         details: {
           runId,

@@ -429,3 +429,62 @@ describe("TUI visibility: renderCall + wait-path partial updates", () => {
     }
   });
 });
+
+describe("poll guard (anti-loop frequency warning)", () => {
+  const toolWithGuard = (pollGuard?: { windowMs?: number; maxCalls?: number; now?: () => number }) =>
+    createResultTool({ query: queryForSnapshot(completedSnapshot()), ...(pollGuard ? { pollGuard } : {}) });
+  const call = (tool: ReturnType<typeof createResultTool>, runId = "r1") =>
+    tool.execute("tc", { run_id: runId }, undefined, () => undefined, {} as never);
+  const textOf = (r: Awaited<ReturnType<typeof call>>) => (r.content[0] as { text: string }).text;
+
+  it("does not warn at or below the default threshold (3 calls per run within 10s)", async () => {
+    const tool = toolWithGuard();
+    for (let i = 0; i < 3; i++) {
+      expect(textOf(await call(tool))).not.toContain("Polling too frequently");
+    }
+  });
+
+  it("warns once a run is polled a 4th time within the window", async () => {
+    const tool = toolWithGuard();
+    for (let i = 0; i < 3; i++) await call(tool);
+    const text = textOf(await call(tool));
+    expect(text).toContain("Polling too frequently");
+    expect(text).toContain('"r1"');
+    expect(text).toContain("wait: true");
+    // The actual result payload survives the prepended warning.
+    expect(text).toContain("done");
+  });
+
+  it("tracks frequency per run_id, so fan-in collection of parallel runs does not warn", async () => {
+    const tool = toolWithGuard();
+    for (const runId of ["r1", "r2", "r3", "r4", "r5"]) {
+      expect(textOf(await call(tool, runId))).not.toContain("Polling too frequently");
+    }
+  });
+
+  it("stops warning after the window slides past the burst", async () => {
+    let now = 1_000;
+    const tool = toolWithGuard({ now: () => now });
+    for (let i = 0; i < 3; i++) await call(tool);
+    expect(textOf(await call(tool))).toContain("Polling too frequently");
+    now += 11_000; // beyond the default 10s window
+    expect(textOf(await call(tool))).not.toContain("Polling too frequently");
+  });
+
+  it("honours custom windowMs/maxCalls", async () => {
+    let now = 0;
+    const tool = toolWithGuard({ windowMs: 60_000, maxCalls: 1, now: () => now });
+    expect(textOf(await call(tool))).not.toContain("Polling too frequently");
+    now = 30_000; // inside the 60s window -> 2nd call exceeds maxCalls: 1
+    expect(textOf(await call(tool))).toContain("Polling too frequently");
+  });
+
+  it("warns on the wait path too", async () => {
+    const tool = toolWithGuard();
+    for (let i = 0; i < 3; i++) {
+      await tool.execute("tc", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    }
+    const result = await tool.execute("tc", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    expect(textOf(result)).toContain("Polling too frequently");
+  });
+});

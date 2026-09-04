@@ -538,3 +538,65 @@ describe("bash_job — exported formatters", () => {
     expect(formatJobSummary(record, NOW)).toContain("running for 0ms");
   });
 });
+
+describe("bash_job — status poll guard (anti-loop frequency warning)", () => {
+  const setup = () => {
+    const manager = fakeManager();
+    manager.put(makeRecord({ jobId: "b_AAAA1111", status: "running", pid: 23456 }), "line\n");
+    return manager;
+  };
+  const status = (tool: ReturnType<typeof createBashJobTool>, jobId = "b_AAAA1111") =>
+    tool.execute("tc", { action: "status", job_id: jobId }, undefined, undefined, {} as never);
+
+  it("does not warn at or below the default threshold (3 status calls per job within 10s)", async () => {
+    const tool = createBashJobTool({ manager: setup, now: () => NOW });
+    for (let i = 0; i < 3; i++) {
+      const r = await status(tool);
+      expect(r.content[0]!.text).not.toContain("Polling too frequently");
+    }
+  });
+
+  it("warns on the 4th status poll of the same job within the window, keeping the status payload", async () => {
+    const tool = createBashJobTool({ manager: setup, now: () => NOW });
+    for (let i = 0; i < 3; i++) await status(tool);
+    const r = await status(tool);
+    expect(r.content[0]!.text).toContain("Polling too frequently");
+    expect(r.content[0]!.text).toContain('"b_AAAA1111"');
+    expect(r.content[0]!.text).toContain('action: "wait"');
+    expect(r.content[0]!.text).toMatch(/running for 1m00s/); // status payload survives the warning
+  });
+
+  it("tracks frequency per job_id — listing/checking many different jobs does not warn", async () => {
+    const manager = setup();
+    for (const id of ["b_BBBB2222", "b_CCCC3333", "b_DDDD4444", "b_EEEE5555"]) {
+      manager.put(makeRecord({ jobId: id, status: "running" }));
+    }
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW });
+    for (const id of ["b_AAAA1111", "b_BBBB2222", "b_CCCC3333", "b_DDDD4444", "b_EEEE5555"]) {
+      const r = await status(tool, id);
+      expect(r.content[0]!.text).not.toContain("Polling too frequently");
+    }
+  });
+
+  it("does not count wait/kill/list actions toward the status poll budget", async () => {
+    const manager = setup();
+    manager.put(makeRecord({ jobId: "b_DONE0000", status: "completed", exitCode: 0, endedAt: NOW }));
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW });
+    await tool.execute("tc", { action: "list" }, undefined, undefined, {} as never);
+    // wait on an already-terminal job returns immediately without blocking.
+    await tool.execute("tc", { action: "wait", job_id: "b_DONE0000" }, undefined, undefined, {} as never);
+    for (let i = 0; i < 3; i++) {
+      const r = await status(tool);
+      expect(r.content[0]!.text).not.toContain("Polling too frequently");
+    }
+  });
+
+  it("stops warning after the window slides past the burst", async () => {
+    let now = NOW;
+    const tool = createBashJobTool({ manager: setup, now: () => now });
+    for (let i = 0; i < 3; i++) await status(tool);
+    expect((await status(tool)).content[0]!.text).toContain("Polling too frequently");
+    now += 11_000;
+    expect((await status(tool)).content[0]!.text).not.toContain("Polling too frequently");
+  });
+});
