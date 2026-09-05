@@ -112,6 +112,25 @@ function makeRouter(store: OutboxStore<FabricRecord>, now = 1, deadLetterQuota =
 }
 
 describe("fabric router", () => {
+  it("allows a nested child to send progress and findings to its parent by default", () => {
+    const { router, engine } = setup();
+    const progress = router.admit("r_ABCDEFGH", {
+      to: "root",
+      kind: "progress",
+      text: "progress",
+      generation: 1,
+    });
+    const finding = router.admit("r_ABCDEFGH", {
+      to: "root",
+      kind: "finding",
+      text: "finding",
+      generation: 1,
+    });
+    expect(progress.ok).toBe(true);
+    expect(finding.ok).toBe(true);
+    expect(engine.select((record) => record.state === "pending")).toHaveLength(2);
+  });
+
   it("consumes seq for root backpressure and does not consume quota", () => {
     const { router, engine } = setup();
     const first = router.admit("r_ABCDEFGH", {
@@ -119,14 +138,14 @@ describe("fabric router", () => {
       kind: "finding",
       text: "one",
       generation: 1,
-      canMessage: ["child"],
+      canMessage: ["parent"],
     });
     const second = router.admit("r_12345678", {
       to: "root",
       kind: "finding",
       text: "two",
       generation: 1,
-      canMessage: ["child"],
+      canMessage: ["parent"],
     });
     expect(first.ok).toBe(true);
     expect(second).toMatchObject({ ok: false, status: "target_backpressure", seq: 1 });
@@ -257,14 +276,14 @@ describe("fabric router", () => {
       kind: "progress",
       text: "a",
       generation: 1,
-      canMessage: ["child"],
+      canMessage: ["parent"],
     });
     const b = router.admit("r_ABCDEFGH", {
       to: "root",
       kind: "progress",
       text: "b",
       generation: 1,
-      canMessage: ["child"],
+      canMessage: ["parent"],
     });
     expect(a.ok && engine.get(a.key)?.state).toBe("consumed");
     expect(b.ok).toBe(true);

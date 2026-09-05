@@ -91,7 +91,10 @@ export class FabricRouter {
   admit(from: NodeRef, input: AdmissionInput): AdmissionResult {
     if (this.frozen) throw new Error("shutting down");
     if (this.tree.targetState(from, this.now()) !== "running") throw new Error("sender is not running");
-    const relation = this.tree.relation(from, input.to, this.now());
+    // canMessage describes the target relationship as seen by the sender.
+    // FabricTree.relation() is from the sender's perspective, so invert it
+    // before matching configurable progress/finding authorization.
+    const relation = this.tree.relation(input.to, from, this.now());
     const authorization =
       input.canMessage === undefined
         ? { kind: input.kind, relation, from }

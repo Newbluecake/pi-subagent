@@ -61,7 +61,7 @@ describe("fabric seeded properties", () => {
             kind: next() < 0.25 ? "progress" : "finding",
             text: `seed-${seed}-${i}`,
             generation: 1,
-            canMessage: ["child"],
+            canMessage: ["parent"],
           });
           if (result.ok && next() < 0.35) engine.claim(result.key, `${seed}:${i}`);
         } catch (error) {
@@ -145,7 +145,7 @@ describe("fabric seeded properties", () => {
           kind: "finding",
           text: String(next()),
           generation: 1,
-          canMessage: ["child"],
+          canMessage: ["parent"],
         });
         expect(result.seq).toBe(previous + 1);
         previous = result.seq;
