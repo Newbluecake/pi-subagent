@@ -34,15 +34,16 @@ export const ResultToolParams = Type.Object({
   ),
   wait_ms: Type.Optional(
     Type.Number({
-      description:
-        "Maximum time to wait in milliseconds when wait is true. Defaults to the awaited run's remaining " +
-        "time budget plus a short settlement grace, so a default wait normally outlives the run itself.",
+      description: "Maximum time to wait in milliseconds when wait is true. Defaults to 300000 (5 minutes).",
     }),
   ),
 });
 export type ResultToolParams = Static<typeof ResultToolParams>;
 
 export type { PollGuardOptions } from "./poll-guard.js";
+
+/** Default blocking-wait budget for get_subagent_result when wait:true and no explicit wait_ms (5 minutes). */
+export const DEFAULT_WAIT_MS = 300_000;
 
 export function createResultTool(deps: {
   query: QueryService;
@@ -142,7 +143,7 @@ export function createResultTool(deps: {
       const push = () => {
         if (!onUpdate) return;
         const now = Date.now();
-        const budget = params.wait_ms !== undefined ? formatDuration(params.wait_ms) : "default budget";
+        const budget = formatDuration(params.wait_ms ?? DEFAULT_WAIT_MS);
         const snap = deps.query.get(runId);
         const lines = [
           `⏳ waiting for ${runId} · ${formatDuration(now - startedAt)} / ${budget}`,
@@ -162,7 +163,7 @@ export function createResultTool(deps: {
       let waited;
       try {
         waited = await deps.query.wait(runId, {
-          ...(params.wait_ms === undefined ? {} : { waitMs: params.wait_ms }),
+          waitMs: params.wait_ms ?? DEFAULT_WAIT_MS,
           ...(signal ? { signal } : {}),
         });
       } finally {
@@ -174,9 +175,7 @@ export function createResultTool(deps: {
             ? `unknown run_id: ${params.run_id}`
             : waited.reason === "aborted"
               ? "wait was aborted"
-              : params.wait_ms !== undefined
-                ? `wait timed out after ${params.wait_ms}ms`
-                : "wait timed out after the default budget (the run's remaining deadline + grace)";
+              : `wait timed out after ${params.wait_ms ?? DEFAULT_WAIT_MS}ms`;
         throw new Error(reason);
       }
       tryAck(runId, waited.outcome.diag.generation, waited.outcome);
