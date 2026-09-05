@@ -17,6 +17,7 @@ import { createNotifier, type Notifier, type PersistedDelivery } from "./deliver
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack, bashJobsEnabled, type Stack } from "./stack.js";
 import { installMentionInput } from "./mention/mention.js";
+import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
@@ -200,6 +201,9 @@ export default function activate(pi: ExtensionAPI): void {
       notifier: forwardNotifier(holder),
       workflow: { activity: { list: () => forwardWorkflow(holder).activity.list() }, now: () => systemClock.now() },
       bashJobs: { list: () => holder.current?.bashJobs?.list() ?? [] },
+      mention: {
+        entries: () => mentionAutocompleteEntries(holder),
+      },
       settings: {
         // settings.budget is passed by reference into every session stack
         // (stack.ts) and read at spawn time (spawn-service mergeBudget), so
@@ -221,6 +225,7 @@ export default function activate(pi: ExtensionAPI): void {
       register: () => false, // registrations flow from spawn labels inside the stack
       resolve: (label) => holder.current?.mention.resolve(label),
       labels: () => holder.current?.mention.labels() ?? [],
+      reassign: () => undefined, // label re-pointing is driven by the stack's onLabel wiring
     },
     query: forwardQuery(holder),
     spawn: forwardSpawn(holder),
@@ -239,6 +244,13 @@ export default function activate(pi: ExtensionAPI): void {
     await types.reload();
     const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)]);
     holder.current = stack;
+    if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {
+      ctx.ui.addAutocompleteProvider((current) =>
+        createMentionAutocompleteProvider(current, {
+          entries: () => mentionAutocompleteEntries(holder),
+        }),
+      );
+    }
     stack.notifier.reconcile();
     stack.fabric?.pump(); // RC5: synchronous, never blocks startup
     await stack.scheduler.start(); // X5
@@ -295,6 +307,29 @@ async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): P
  * (not a Proxy) keeps `this` binding correct for methods like
  * QueryService.waitAll() that call other methods on `this` internally.
  */
+/** D-M7: live root-child mention view shared by the @ autocomplete wrapper
+ *  and `/agent status`. Reads through the holder at call time, so wrappers
+ *  registered on an earlier session_start keep seeing the rebuilt stack. */
+export function mentionAutocompleteEntries(holder: { current?: Stack }): readonly MentionAutocompleteEntry[] {
+  const stack = holder.current;
+  if (!stack) return [];
+  const terminal = new Set(["completed", "failed", "timed_out", "aborted"]);
+  return stack.mention.labels().flatMap((label) => {
+    const target = stack.mention.resolve(label);
+    // v2 hard constraint: only root-direct runs are mentionable (D-M7).
+    if (!target || target.parent !== "root") return [];
+    const status = stack.query.get(target.runId)?.status;
+    return [
+      {
+        label,
+        type: target.type,
+        runId: target.runId,
+        status: status === "running" ? "running" : status && terminal.has(status) ? "settled" : "other",
+      } satisfies MentionAutocompleteEntry,
+    ];
+  });
+}
+
 function requireStack(holder: { current?: Stack }): Stack {
   if (!holder.current) throw new Error("pi-subagent: no active session yet");
   return holder.current;

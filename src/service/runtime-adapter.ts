@@ -32,6 +32,10 @@ import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import type { FabricRouter } from "../fabric/router.js";
+import { createMentionChannel } from "../fabric/mention.js";
+import type { MentionRegistry } from "../mention/registry.js";
+import type { QueryService } from "./query-service.js";
+import type { SpawnService } from "./spawn-service.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
 
 export interface RuntimeAdapterDeps {
@@ -60,7 +64,14 @@ export interface RuntimeAdapterDeps {
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
   /** Optional fabric surface; absent means no message_agent injection. */
-  fabric?: { router: FabricRouter };
+  fabric?: {
+    router: FabricRouter;
+    mention?: {
+      registry: MentionRegistry;
+      query: () => QueryService | undefined;
+      spawn: () => SpawnService | undefined;
+    };
+  };
 }
 
 /**
@@ -325,6 +336,19 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           customTools.push(
             createMessageAgentTool({
               router: deps.fabric.router,
+              ...(deps.fabric.mention && deps.fabric.mention.query() && deps.fabric.mention.spawn()
+                ? {
+                    mention: createMentionChannel({
+                      router: deps.fabric.router,
+                      registry: deps.fabric.mention.registry,
+                      query: deps.fabric.mention.query()!,
+                      spawn: deps.fabric.mention.spawn()!,
+                      from: spec.runId,
+                      generation: () => runtime.getRunState(spec.runId)?.generation,
+                      ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
+                    }),
+                  }
+                : {}),
               from: spec.runId,
               // Why: read the LIVE generation from RuntimeRunner's in-memory
               // state, not deps.store — persist_snapshot is terminal-only, so

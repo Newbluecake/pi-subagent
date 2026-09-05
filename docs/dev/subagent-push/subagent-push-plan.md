@@ -121,7 +121,7 @@ D1–D16 见 §0.1；v4 新增 D17（claimed 仅内存）、D18（root ingress g
 
 ## 4. 协议设计
 
-### 4.1 envelope（`src/core/message.ts`；同 v3，零改动）
+### 4.1 envelope（`src/core/message.ts`；v3 基线；**v6（fabric-mention）扩展：`via` 增加 `mode` 字段**）
 
 ```ts
 export type NodeRef = RunId | "root" | "system";
@@ -136,7 +136,10 @@ export interface MessageEnvelope {
   generation: Generation; // 发送者 generation；system 恒 0
   payload: { text: string };
   ref?: { keys: MessageKey[]; omittedCount: number }; // 仅 dead_letter
-  via?: { lca: NodeRef; hops: NodeRef[] }; // 仅 from 为 run；编码见 v3 §4.1
+  via?: { mode: "tree" | "mention"; lca: NodeRef; hops: NodeRef[] }; // 仅 from 为 run；v6 起 mode 必填：
+  // mode="tree"：lca/hops 为树路径，编码同 v3 §4.1；
+  // mode="mention"（fabric @ 跨树直达，docs/dev/fabric-mention）：lca = 树 lca ?? "root"（审计用），hops 恒 []（直达，不经树路径）；
+  // 磁盘旧记录无 mode ⇒ 视为 "tree"（缺省兼容，无需迁移）。投递/显示一律读持久化 mode，不再用 relation 推断
   ttlMs: number; // progress = fabric.progressTtlMs；finding/directive/dead_letter = settings.reconcileTtlMs（既有键）
   createdAt: Millis;
 }
@@ -147,6 +150,8 @@ export interface MessageEnvelope {
 ### 4.3 持久化记录 `FabricRecord`（v4 新增：缺口 6/7 落点）
 
 envelope 是协议形状，record 是 envelope 加投递壳。**envelope 字段永不被投递壳改写**（`payload`/`seq`/`key` 只写一次）。
+
+**v6**：record 继承 envelope 的 `via.mode`（admission 时钉死，投递壳不改写）；`engine.hydrate`/reload 后完整保留——`formatMessage` 等显示层只读持久化 `via.mode`，不在投递时重新推断路由模式（fabric-mention B1）。
 
 ```ts
 export type FabricDeliveryState = "pending" | "claimed" | "delivered" | "consumed" | "dropped" | "abandoned";

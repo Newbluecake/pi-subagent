@@ -4,6 +4,8 @@ export type AgentTypeName = string;
 export type Generation = number;
 export type TimerId = string;
 
+import type { CanMessage } from "./message.js";
+
 export type RunPhase =
   | "queue_wait"
   | "resolve_config"
@@ -113,7 +115,7 @@ export interface AgentTypeConfig {
    */
   canSpawn?: string[];
   /** Frontmatter `can_message`: relations this run may address through fabric. */
-  canMessage?: Array<"parent" | "child" | "ancestor" | "descendant" | "sibling" | "self">;
+  canMessage?: CanMessage[];
 }
 export interface SpawnRequest {
   /** Assigned run identifier, used by lifecycle extensions for resource names. */

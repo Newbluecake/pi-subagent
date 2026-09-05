@@ -4,6 +4,7 @@ import {
   effectiveChannel,
   makeMessageKey,
   type FabricRecord,
+  type MentionRoute,
   type MessageChannel,
   type MessageKey,
   type MessageKind,
@@ -29,7 +30,8 @@ export interface AdmissionInput {
   kind: MessageKind;
   text: string;
   generation: number;
-  canMessage?: readonly ("parent" | "child" | "ancestor" | "descendant" | "sibling" | "self")[];
+  canMessage?: readonly ("parent" | "child" | "ancestor" | "descendant" | "sibling" | "self" | "mention")[];
+  route?: MentionRoute;
 }
 export type AdmissionResult =
   | { ok: true; status: "accepted"; key: MessageKey; seq: number; superseded?: MessageKey }
@@ -91,6 +93,10 @@ export class FabricRouter {
   admit(from: NodeRef, input: AdmissionInput): AdmissionResult {
     if (this.frozen) throw new Error("shutting down");
     if (this.tree.targetState(from, this.now()) !== "running") throw new Error("sender is not running");
+    const mention = input.route?.kind === "mention" ? input.route : undefined;
+    if (mention && mention.target !== input.to) throw new Error("mention route target mismatch");
+    if (mention && !this.tree.isRootChild(input.to)) throw new Error("mention target is not a root child");
+    if (mention && this.tree.targetState(input.to, this.now()) === "gone") throw new Error("mention target is gone");
     // canMessage describes the target relationship as seen by the sender.
     // Only configurable progress/finding messages use that inverse relation;
     // result/directive keep their protocol-defined direction checks.
@@ -98,8 +104,15 @@ export class FabricRouter {
       input.kind === "progress" || input.kind === "finding"
         ? this.tree.relation(input.to, from, this.now())
         : this.tree.relation(from, input.to, this.now());
-    const authorization =
-      input.canMessage === undefined
+    const authorization = mention
+      ? {
+          kind: input.kind,
+          relation: "unrelated" as const,
+          from,
+          mention,
+          ...(input.canMessage === undefined ? {} : { canMessage: input.canMessage }),
+        }
+      : input.canMessage === undefined
         ? { kind: input.kind, relation, from }
         : { kind: input.kind, relation, from, canMessage: input.canMessage };
     if (!authorize(authorization)) throw new Error("message not authorized");
@@ -135,7 +148,13 @@ export class FabricRouter {
         ? { rejected: { reason: rejection.status === "quota_exhausted" ? "quota_exhausted" : "target_backpressure" } }
         : {}),
       ...(from !== "system"
-        ? { via: { lca: this.tree.lca(from, input.to) ?? input.to, hops: this.tree.hops(from, input.to) } }
+        ? {
+            via: {
+              mode: mention ? "mention" : "tree",
+              lca: this.tree.lca(from, input.to) ?? (mention ? "root" : input.to),
+              hops: mention ? [] : this.tree.hops(from, input.to),
+            },
+          }
         : {}),
     };
     if (input.kind === "progress" && !rejection) {

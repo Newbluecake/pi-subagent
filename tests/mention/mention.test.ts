@@ -65,7 +65,12 @@ describe("X6 @handle mention", () => {
       spawn: { spawn: async (req) => ((request = req), { runId: "run-2" }) },
     });
     expect(result).toEqual({ handled: true, action: "resume", runId: "run-2" });
-    expect(request).toEqual({ type: "worker", prompt: "continue from the last checkpoint", resumeFrom: "run-1" });
+    expect(request).toEqual({
+      type: "worker",
+      prompt: "continue from the last checkpoint",
+      label: "builder",
+      resumeFrom: "run-1",
+    });
   });
 
   it("passes unknown handles and file paths through to pi", async () => {
@@ -90,6 +95,18 @@ describe("X6 @handle mention", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("label conflict"));
   });
 
+  it("reassigns only when explicitly requested and keeps first-wins registration", () => {
+    const warn = vi.fn();
+    const registry = createMentionRegistry(warn);
+    const first = { runId: "run-1", type: "worker" as const, parent: "root" as const };
+    const second = { runId: "run-2", type: "worker" as const, parent: "root" as const };
+    expect(registry.register("builder", first)).toBe(true);
+    expect(registry.register("builder", second)).toBe(false);
+    expect(registry.resolve("builder")).toEqual(first);
+    registry.reassign("builder", second);
+    expect(registry.resolve("builder")).toEqual(second);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
   it("reports route errors and consumes the known mention", async () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: "run-1", type: "worker" });

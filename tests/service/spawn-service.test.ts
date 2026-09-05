@@ -52,6 +52,39 @@ describe("SpawnService", () => {
     expect(started.runId).not.toBe(first);
   });
 
+  it("re-points a label only when it still names the resumed run", async () => {
+    const sessionFile = new URL("../../package.json", import.meta.url).pathname;
+    const runner: Runner = {
+      run: async (spec) => ({
+        ...outcome,
+        runId: spec.runId,
+        diag: { ...outcome.diag, sessionFile },
+      }),
+    };
+    const onLabel = vi.fn();
+    const service = createSpawnService({ ...deps(runner), onLabel });
+    const first = await service.spawn({ type: "worker", prompt: "one", label: "builder" });
+    if (!("runId" in first)) throw new Error("first spawn failed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const resumed = await service.spawn({ type: "worker", prompt: "again", label: "builder", resumeFrom: first.runId });
+    if (!("runId" in resumed)) throw new Error("resume failed");
+    expect(service.getLabel?.("builder")?.runId).toBe(resumed.runId);
+    expect(onLabel).toHaveBeenLastCalledWith("builder", expect.objectContaining({ runId: resumed.runId }), {
+      resumed: true,
+    });
+
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const other = await service.spawn({ type: "worker", prompt: "other", label: "other" });
+      if (!("runId" in other)) throw new Error("other spawn failed");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await service.spawn({ type: "worker", prompt: "conflict", label: "builder", resumeFrom: other.runId });
+      expect(service.getLabel?.("builder")?.runId).toBe(resumed.runId);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('label conflict for "builder"'));
+    } finally {
+      warning.mockRestore();
+    }
+  });
   it("does not create a timer for an unbounded wait", async () => {
     vi.useFakeTimers();
     try {
@@ -423,6 +456,6 @@ describe("SpawnService: CC4 CP1 (deadlineAt admission check)", () => {
 
     const real = await svc.spawn({ type: "worker", prompt: "x", label: "x" });
     if ("error" in real) throw new Error(real.error.message);
-    expect(svc.getLabel?.("x")).toEqual({ runId: real.runId, type: "worker" });
+    expect(svc.getLabel?.("x")).toEqual({ runId: real.runId, type: "worker", parent: "root" });
   });
 });

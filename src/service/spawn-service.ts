@@ -23,6 +23,7 @@ import {
 export interface SpawnLabelTarget {
   readonly runId: RunId;
   readonly type: SpawnRequest["type"];
+  readonly parent: RunId | "root";
 }
 export type BoundedWaitResult = { kind: "settled"; outcome: RunOutcome } | { kind: "pending" };
 export interface SpawnService {
@@ -63,7 +64,7 @@ export interface SpawnServiceDeps {
   onOutcomeAcked?: (outcome: RunOutcome) => void;
   notifyTerminalFailure?: (outcome: RunOutcome) => void;
   /** X6 bridge: fired when a label is first registered (mention registry feed). */
-  onLabel?: (label: string, target: SpawnLabelTarget) => void;
+  onLabel?: (label: string, target: SpawnLabelTarget, info: { resumed: boolean }) => void;
   tombstones?: TombstoneStore;
   /** X3: hard cap on nested-delegation depth (top-level run = depth 0). Default 3. */
   maxNestedDepth?: number;
@@ -354,11 +355,25 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         lockKeys = [targetId, resume.sessionFile];
       }
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
+      const parent = req.parentRunId ?? "root";
       if (req.label && isRunId(req.label)) {
         console.warn(`[pi-subagent] label "${req.label}" looks like a run id; not registering it as a label`);
+      } else if (req.label && req.resumeFrom) {
+        const prior = labels.get(req.label);
+        const resolvedTarget = resolveRun(req.resumeFrom);
+        if (prior && resolvedTarget.ok && prior.runId === resolvedTarget.runId) {
+          const target = { runId, type: req.type, parent };
+          labels.set(req.label, target);
+          deps.onLabel?.(req.label, target, { resumed: true });
+        } else if (!prior) {
+          const target = { runId, type: req.type, parent };
+          labels.set(req.label, target);
+          deps.onLabel?.(req.label, target, { resumed: false });
+        } else console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
       } else if (req.label && !labels.has(req.label)) {
-        labels.set(req.label, { runId, type: req.type });
-        deps.onLabel?.(req.label, { runId, type: req.type });
+        const target = { runId, type: req.type, parent };
+        labels.set(req.label, target);
+        deps.onLabel?.(req.label, target, { resumed: false });
       } else if (req.label) {
         console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
       }

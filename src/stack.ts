@@ -473,6 +473,9 @@ export function buildSessionStack(
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
   const spawnRef: { current?: SpawnService } = {};
+  const mention = createMentionRegistry();
+  const mentionRef = { current: mention };
+  let query: QueryService;
   const fabric = settings.fabric.enabled
     ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef)
     : undefined;
@@ -580,7 +583,14 @@ export function buildSessionStack(
     watchdog,
     reaper,
     notifier,
-    ...(fabric ? { fabric: { router: fabric.router } } : {}),
+    ...(fabric
+      ? {
+          fabric: {
+            router: fabric.router,
+            mention: { registry: mention, query: () => query, spawn: () => spawnRef.current },
+          },
+        }
+      : {}),
     extensions: [merged],
     onLifecycle: (event) =>
       pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
@@ -589,8 +599,6 @@ export function buildSessionStack(
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
-  const mention = createMentionRegistry();
-  const mentionRef = { current: mention };
   const spawn = createSpawnService({
     types,
     pool,
@@ -607,7 +615,8 @@ export function buildSessionStack(
         hint,
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
-    onLabel: (label, target) => mentionRef.current?.register(label, target),
+    onLabel: (label, target, info) =>
+      info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
     onOutcomeAcked: (outcome) => {
       try {
@@ -675,7 +684,7 @@ export function buildSessionStack(
   // Static fallback for the dynamic per-run wait default (only reached when a
   // snapshot has no deadlineAt yet): the configured run budget + abort grace +
   // settlement headroom, so it tracks `/agent settings` budget changes.
-  const query = createQueryService({
+  query = createQueryService({
     registry: createLiveRunRegistry(spawn, store),
     runner,
     clock: systemClock,

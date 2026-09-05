@@ -4,6 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { THINKING_LEVELS, type AgentTypeConfig, type AgentTypeName, type ThinkingLevel } from "../core/types.js";
 import { parseStrictModelRef } from "./model-hint.js";
+import type { CanMessage } from "../core/message.js";
 
 export interface AgentTypeRegistry {
   reload(): Promise<{ types: AgentTypeConfig[]; errors: Array<{ path: string; error: string }> }>;
@@ -104,8 +105,8 @@ function parseFile(text: string, path: string): AgentTypeConfig {
       ? fields.can_message
           .split(",")
           .map((x) => x.trim())
-          .filter((x): x is "parent" | "child" | "ancestor" | "descendant" | "sibling" | "self" =>
-            ["parent", "child", "ancestor", "descendant", "sibling", "self"].includes(x),
+          .filter((x): x is CanMessage =>
+            ["parent", "child", "ancestor", "descendant", "sibling", "self", "mention"].includes(x),
           )
       : undefined;
   // `model:` accepts a strict `provider/id` pair (used verbatim at spawn)

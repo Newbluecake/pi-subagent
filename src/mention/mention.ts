@@ -54,6 +54,7 @@ export async function routeMention(
     const result = await deps.spawn.spawn({
       type: target.type,
       prompt: parsed.message,
+      label: parsed.label,
       resumeFrom: target.runId,
     } satisfies SpawnRequest);
     if ("runId" in result) return { handled: true, action: "resume", runId: result.runId };

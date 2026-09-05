@@ -21,6 +21,22 @@ describe("agent config", () => {
     expect(result.errors[0]?.path).toContain("bad.md");
     expect(registry.get("good")?.tools).toEqual(["one", "two"]);
   });
+  it("parses can_message mention and rejects invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-subagent-can-message-"));
+    await mkdir(join(root, ".pi/agents"), { recursive: true });
+    await writeFile(
+      join(root, ".pi/agents/allowed.md"),
+      "---\nname: allowed\ndescription: d\ncan_message: mention, sibling, invalid\n---\nbody\n",
+    );
+    await writeFile(
+      join(root, ".pi/agents/invalid.md"),
+      "---\nname: invalid\ndescription: d\ncan_message: nope\n---\nbody\n",
+    );
+    const registry = createAgentTypeRegistry(root, join(root, "home"));
+    await registry.reload();
+    expect(registry.get("allowed")?.canMessage).toEqual(["mention", "sibling"]);
+    expect(registry.get("invalid")?.canMessage).toBeUndefined();
+  });
   it("merges request budget over agent and defaults", () => {
     expect(mergeBudget({ totalMs: 10 }, { idleMs: 20 })).toMatchObject({ totalMs: 10, idleMs: 20, startupMs: 30_000 });
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);

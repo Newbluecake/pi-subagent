@@ -1,13 +1,16 @@
+import type { NodeRef } from "../core/message.js";
 import type { AgentTypeName, RunId } from "../core/types.js";
 
 export interface MentionTarget {
   readonly runId: RunId;
   readonly type: AgentTypeName;
+  readonly parent: NodeRef;
 }
 
 export interface MentionRegistry {
   register(label: string, target: MentionTarget): boolean;
   resolve(label: string): MentionTarget | undefined;
+  reassign(label: string, target: MentionTarget): void;
   labels(): readonly string[];
 }
 
@@ -24,6 +27,7 @@ export function createMentionRegistry(warn: (message: string) => void = console.
       return true;
     },
     resolve: (label) => entries.get(label),
+    reassign: (label, target) => entries.set(label, target),
     labels: () => [...entries.keys()],
   };
 }

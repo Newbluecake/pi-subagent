@@ -70,6 +70,10 @@ export class FabricTree {
     return [...up, common, ...down.reverse()];
   }
 
+  isRootChild(node: NodeRef): boolean {
+    return this.edges.get(node) === "root";
+  }
+
   targetState(node: NodeRef, now = Number.POSITIVE_INFINITY): TreeTargetState {
     if (node === "root" || node === "system") return "running";
     if (this.goneNodes.has(node)) return "gone";

@@ -289,3 +289,121 @@ describe("fabric router", () => {
     expect(b.ok).toBe(true);
   });
 });
+
+describe("fabric router mention admission", () => {
+  it("rejects mismatched targets, nested targets, and gone targets", () => {
+    const { router, tree } = makeRouter(new MemoryOutboxStore<FabricRecord>());
+    expect(() =>
+      router.admit("r_ABCDEFGH", {
+        to: "r_12345678",
+        kind: "finding",
+        text: "x",
+        generation: 1,
+        canMessage: ["mention"],
+        route: { kind: "mention", label: "x", target: "r_ABCDEFGH" },
+      }),
+    ).toThrow("mention route target mismatch");
+    tree.append("r_12345678", "r_NESTED01");
+    tree.markRunning("r_NESTED01");
+    expect(() =>
+      router.admit("r_ABCDEFGH", {
+        to: "r_NESTED01",
+        kind: "finding",
+        text: "x",
+        generation: 1,
+        canMessage: ["mention"],
+        route: { kind: "mention", label: "x", target: "r_NESTED01" },
+      }),
+    ).toThrow("mention target is not a root child");
+    tree.tombstone("r_12345678", 1, 100);
+    expect(() =>
+      router.admit("r_ABCDEFGH", {
+        to: "r_12345678",
+        kind: "finding",
+        text: "x",
+        generation: 1,
+        canMessage: ["mention"],
+        route: { kind: "mention", label: "x", target: "r_12345678" },
+      }),
+    ).toThrow("mention target is gone");
+  });
+  it("rejects missing permission and directive/result/self mention routes", () => {
+    const { router } = setup();
+    for (const kind of ["finding", "directive", "result"] as const)
+      expect(() =>
+        router.admit("r_ABCDEFGH", {
+          to: "r_12345678",
+          kind,
+          text: "x",
+          generation: 1,
+          canMessage: kind === "finding" ? ["parent"] : ["mention"],
+          route: { kind: "mention", label: "x", target: "r_12345678" },
+        }),
+      ).toThrow("message not authorized");
+    expect(() =>
+      router.admit("r_12345678", {
+        to: "r_12345678",
+        kind: "finding",
+        text: "x",
+        generation: 1,
+        canMessage: ["mention"],
+        route: { kind: "mention", label: "x", target: "r_12345678" },
+      }),
+    ).toThrow("message not authorized");
+  });
+  it.each([
+    ["r_ABCDEFGH", "sibling"],
+    ["root", "parent"],
+    ["r_NESTED01", "descendant"],
+    ["r_PEER0001", "unrelated"],
+  ] as const)("allows mention regardless of sender relation (%s)", (sender, _relation) => {
+    const { router, tree } = makeRouter(new MemoryOutboxStore<FabricRecord>());
+    tree.append("r_12345678", "r_NESTED01");
+    tree.markRunning("r_NESTED01");
+    tree.append("root", "r_PEER0001");
+    tree.markRunning("r_PEER0001");
+    expect(
+      router.admit(sender, {
+        to: "r_12345678",
+        kind: "finding",
+        text: "x",
+        generation: 1,
+        canMessage: ["mention"],
+        route: { kind: "mention", label: "x", target: "r_12345678" },
+      }).ok,
+    ).toBe(true);
+  });
+  it("pins mention via.mode (hops [], lca default root) and survives a persistence roundtrip + hydrate", () => {
+    const { router, engine } = setup();
+    const result = router.admit("r_ABCDEFGH", {
+      to: "r_12345678",
+      kind: "finding",
+      text: "x",
+      generation: 1,
+      canMessage: ["mention"],
+      route: { kind: "mention", label: "builder", target: "r_12345678" },
+    });
+    expect(result.ok).toBe(true);
+    const record = engine.select(() => true)[0]!;
+    expect(record.via).toEqual({ mode: "mention", lca: "root", hops: [] });
+    // Simulate the append-only session-file boundary: JSON roundtrip into a
+    // fresh store, then a fresh engine + router.hydrate over reloaded records.
+    const persisted = JSON.parse(JSON.stringify(record)) as FabricRecord;
+    const reloaded = makeRouter(new MemoryOutboxStore<FabricRecord>());
+    reloaded.engine.put(persisted);
+    reloaded.router.hydrate([...reloaded.engine.select(() => true)]);
+    expect(reloaded.engine.get(record.key)?.via).toEqual({ mode: "mention", lca: "root", hops: [] });
+    // Legacy records without via.mode stay compatible and are treated as tree.
+    const legacy = {
+      ...persisted,
+      key: "r_ABCDEFGH:r_12345678:1:2" as FabricRecord["key"],
+      seq: 2,
+      via: { lca: "root" as const, hops: ["r_ABCDEFGH", "root", "r_12345678"] as FabricRecord["from"][] },
+    };
+    reloaded.engine.put(legacy);
+    reloaded.router.hydrate([legacy]);
+    const restored = reloaded.engine.get(legacy.key)!;
+    expect(restored.via?.mode).toBeUndefined();
+    expect(restored.via?.hops).toEqual(["r_ABCDEFGH", "root", "r_12345678"]);
+  });
+});

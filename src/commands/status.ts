@@ -22,6 +22,7 @@ import type { WorkflowActivitySnapshot } from "../workflow/activity.js";
 import { formatDuration, formatModelRef } from "../ui/fleet-panel.js";
 import { isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
 import { describeJobStatus } from "../tools/bash-job-tool.js";
+import type { MentionAutocompleteEntry } from "../mention/autocomplete.js";
 import { canOpenSettingsEditor, openSettingsEditor } from "../ui/settings-editor.js";
 
 /** Live settings object + persistence port (see config/setting-specs.ts). */
@@ -41,6 +42,8 @@ export interface StatusCommandDeps {
    * so hosts without the feature see the previous output byte-for-byte.
    */
   bashJobs?: { list(): readonly JobRecord[] };
+  /** `/agent status` and editor mention discovery share the live root-child view. */
+  mention?: { entries(): readonly MentionAutocompleteEntry[] };
   /** `/agent settings` (+ `/agent budget` alias) — absent only in tests/minimal hosts. */
   settings?: SettingsCommandDeps;
 }
@@ -392,6 +395,17 @@ export function renderStatus(deps: StatusCommandDeps): string {
     `Delivery: staged=${delivery.staged} pending=${delivery.pending} batched=${delivery.batched} delivered=${delivery.delivered} consumed=${delivery.consumed} dropped=${delivery.dropped} abandoned=${delivery.abandoned} acked=${deps.notifier.ackedSuppressions}`,
   );
   if (deps.notifier.degraded.length) lines.push(`Degraded deliveries: ${deps.notifier.degraded.length}`);
+  if (deps.mention) lines.push(...renderMentionableLabels(deps.mention));
   if (deps.bashJobs) lines.push(...renderBashJobsSection(deps.bashJobs, deps.workflow?.now?.() ?? Date.now()));
   return lines.join("\n");
+}
+
+function renderMentionableLabels(source: { entries(): readonly MentionAutocompleteEntry[] }): string[] {
+  const entries = source.entries();
+  const lines = [`Mentionable labels: ${entries.length}`];
+  for (const entry of entries) {
+    const status = entry.status === "running" ? "running" : entry.status === "settled" ? "已结束·@可resume" : "不可用";
+    lines.push(`  @${entry.label} status=${status} type=${entry.type} run=${entry.runId}`);
+  }
+  return lines;
 }

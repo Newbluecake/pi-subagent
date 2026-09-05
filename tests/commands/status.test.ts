@@ -60,6 +60,22 @@ function deps(runs: RunSnapshot[]) {
   };
 }
 
+describe("fabric mentionable labels status", () => {
+  it("renders label and lifecycle state when mention discovery is wired", () => {
+    const d = deps([snapshot()]) as Record<string, unknown>;
+    d.mention = {
+      entries: () => [
+        { label: "worker", type: "general", runId: "r1", status: "running" },
+        { label: "done", type: "general", runId: "r2", status: "settled" },
+      ],
+    };
+    const text = renderStatus(d as never);
+    expect(text).toContain("Mentionable labels: 2");
+    expect(text).toContain("@worker status=running");
+    expect(text).toContain("@done status=已结束·@可resume");
+  });
+});
+
 describe("X9 status usage rendering", () => {
   it("shows per-run usage for active runs", () => {
     const active = snapshot({

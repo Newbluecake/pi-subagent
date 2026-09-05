@@ -16,7 +16,7 @@ export interface MessageEnvelope {
   generation: Generation;
   payload: { text: string };
   ref?: { keys: MessageKey[]; omittedCount: number };
-  via?: { lca: NodeRef; hops: NodeRef[] };
+  via?: { mode?: "tree" | "mention"; lca: NodeRef; hops: NodeRef[] };
   ttlMs: number;
   createdAt: Millis;
 }
@@ -85,7 +85,12 @@ export function isMessageKey(value: string): value is MessageKey {
 }
 
 export type MessageRelation = "self" | "parent" | "child" | "ancestor" | "descendant" | "sibling" | "unrelated";
-export type CanMessage = "parent" | "child" | "ancestor" | "descendant" | "sibling" | "self";
+export type CanMessage = "parent" | "child" | "ancestor" | "descendant" | "sibling" | "self" | "mention";
+export interface MentionRoute {
+  kind: "mention";
+  label: string;
+  target: RunId;
+}
 
 export function effectiveCanMessage(value: readonly CanMessage[] | undefined): readonly CanMessage[] {
   return value === undefined ? ["parent"] : value;
@@ -96,11 +101,17 @@ export interface AuthorizationInput {
   relation: MessageRelation;
   canMessage?: readonly CanMessage[];
   from?: NodeRef;
+  mention?: MentionRoute;
 }
 
-export function authorize({ kind, relation, canMessage, from }: AuthorizationInput): boolean {
+export function authorize({ kind, relation, canMessage, from, mention }: AuthorizationInput): boolean {
   if (!MESSAGE_KINDS.includes(kind)) return false;
-  if (kind === "dead_letter") return from === "system";
+  if (kind === "dead_letter") return mention === undefined && from === "system";
+  if (mention) {
+    if (kind === "directive" || kind === "result") return false;
+    if (from !== undefined && mention.target === from) return false;
+    return effectiveCanMessage(canMessage).includes("mention");
+  }
   if (relation === "unrelated" || relation === "self") return false;
   if (kind === "result") return relation === "child";
   if (kind === "directive") return relation === "parent";
@@ -121,7 +132,8 @@ export function formatMessage(
   envelope: Pick<MessageEnvelope, "key" | "from" | "to" | "kind" | "seq" | "payload" | "via">,
   relation: MessageRelation,
 ): { header: string; text: string } {
-  const header = `[fabric ${envelope.kind} relation=${relation} ${envelope.key} seq=${envelope.seq}]${envelope.kind === "directive" ? " <fabric-directive>" : ""} 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
+  const shownRelation = envelope.via?.mode === "mention" ? "mention" : relation;
+  const header = `[fabric ${envelope.kind} relation=${shownRelation} ${envelope.key} seq=${envelope.seq}]${envelope.kind === "directive" ? " <fabric-directive>" : ""} 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
   return { header, text: `${header}\n${envelope.payload.text}` };
 }
 
