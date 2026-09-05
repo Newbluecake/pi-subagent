@@ -73,6 +73,68 @@ describe("X6 @handle mention", () => {
     });
   });
 
+  it("wraps steered text with the message_agent reply hint when fabric is enabled", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    const steers: [string, string][] = [];
+    const result = await routeMention("@builder inspect the failure", {
+      registry,
+      query: {
+        get: () => snapshot("run-1", "running"),
+        steer: async (id, text) => {
+          steers.push([id, text]);
+          return { ok: true as const };
+        },
+      },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+      fabricEnabled: () => true,
+    });
+    expect(result).toEqual({ handled: true, action: "steer", runId: "run-1" });
+    expect(steers).toHaveLength(1);
+    const [id, text] = steers[0]!;
+    expect(id).toBe("run-1");
+    expect(text).toContain("@builder");
+    expect(text).toContain("message_agent");
+    expect(text).toContain('to: "root"');
+    expect(text).toContain("用户消息：\ninspect the failure");
+  });
+
+  it("wraps the resume prompt with the message_agent reply hint when fabric is enabled", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    let request: { type: string; prompt: string; resumeFrom?: string } | undefined;
+    const result = await routeMention("@builder continue from the last checkpoint", {
+      registry,
+      query: { get: () => snapshot("run-1", "completed"), steer: async () => undefined },
+      spawn: { spawn: async (req) => ((request = req), { runId: "run-2" }) },
+      fabricEnabled: () => true,
+    });
+    expect(result).toEqual({ handled: true, action: "resume", runId: "run-2" });
+    expect(request?.type).toBe("worker");
+    expect(request?.resumeFrom).toBe("run-1");
+    expect(request?.prompt).toContain("message_agent");
+    expect(request?.prompt).toContain("用户消息：\ncontinue from the last checkpoint");
+  });
+
+  it("sends the raw message when fabric is disabled", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    const steers: [string, string][] = [];
+    await routeMention("@builder inspect the failure", {
+      registry,
+      query: {
+        get: () => snapshot("run-1", "running"),
+        steer: async (id, text) => {
+          steers.push([id, text]);
+          return { ok: true as const };
+        },
+      },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+      fabricEnabled: () => false,
+    });
+    expect(steers).toEqual([["run-1", "inspect the failure"]]);
+  });
+
   it("passes unknown handles and file paths through to pi", async () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: "run-1", type: "worker" });

@@ -245,6 +245,8 @@ export default function activate(pi: ExtensionAPI): void {
     },
     query: forwardQuery(holder),
     spawn: forwardSpawn(holder),
+    // message_agent reply hint only when fabric is on (subagents own the tool then)
+    fabricEnabled: () => holder.current?.fabric != null,
   });
 
   pi.on("session_start", async (_event, ctx) => {

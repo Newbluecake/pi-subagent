@@ -29,12 +29,28 @@ export type MentionRouteResult =
   | { handled: true; action: "steer" | "resume"; runId: string }
   | { handled: true; action: "error"; error: string };
 
+/**
+ * Wrap a user @mention with a reply-channel hint: when fabric is enabled the
+ * target owns a message_agent tool, so tell it to push the reply to root as a
+ * progress message (rendered directly to the user) instead of relying on run
+ * termination to deliver its final text.
+ */
+export function frameUserMentionReply(label: string, message: string): string {
+  return (
+    `[用户 @mention] 以下是用户通过 @${label} 直接发给你的消息。请用 message_agent 工具回复用户` +
+    `（to: "root", kind: "progress"）——该回复会直接展示给用户，不需要等 run 结束；回复后你可以继续当前任务。\n\n` +
+    `用户消息：\n${message}`
+  );
+}
+
 export async function routeMention(
   text: string,
   deps: {
     registry: MentionRegistry;
     query: Pick<QueryService, "get" | "steer">;
     spawn: Pick<SpawnService, "spawn">;
+    /** When true, wrap the user message with the message_agent reply hint (fabric on ⇒ targets own the tool). */
+    fabricEnabled?: () => boolean;
     reportError?: (message: string) => void;
   },
 ): Promise<MentionRouteResult> {
@@ -42,9 +58,10 @@ export async function routeMention(
   if (!parsed) return { handled: false };
   const target = deps.registry.resolve(parsed.label);
   if (!target) return { handled: false };
+  const message = deps.fabricEnabled?.() ? frameUserMentionReply(parsed.label, parsed.message) : parsed.message;
   const snapshot = deps.query.get(target.runId);
   if (snapshot?.status === "running") {
-    const result = await deps.query.steer(target.runId, parsed.message);
+    const result = await deps.query.steer(target.runId, message);
     if (result.ok) return { handled: true, action: "steer", runId: target.runId };
     const error = `cannot steer @${parsed.label}: ${result.detail ?? result.reason}`;
     deps.reportError?.(error);
@@ -53,7 +70,7 @@ export async function routeMention(
   if (snapshot && terminalStatuses.has(snapshot.status)) {
     const result = await deps.spawn.spawn({
       type: target.type,
-      prompt: parsed.message,
+      prompt: message,
       label: parsed.label,
       resumeFrom: target.runId,
     } satisfies SpawnRequest);
