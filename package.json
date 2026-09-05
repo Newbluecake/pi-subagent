@@ -1,6 +1,6 @@
 {
   "name": "pi-subagent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Anti-hang subagent extension for pi — drop-in replacement for @tintinweb/pi-subagents core (Agent / get_subagent_result / steer_subagent)",
   "license": "MIT",
   "repository": {

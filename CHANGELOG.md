@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-05
+
 ### Fixed
 
 - **subagent result text** — completed runs now use the final assistant message as their outcome text, including the value returned to workflow `agent()` calls, instead of concatenating all streamed narrative deltas.
