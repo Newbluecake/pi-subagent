@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
@@ -81,6 +81,11 @@ export interface CompactSettings {
   enabled: boolean;
 }
 
+export type CacheTtlMode = "auto" | "on" | "off";
+export interface CacheTtlSettings {
+  mode: CacheTtlMode;
+}
+
 export interface AgentSettings {
   concurrencyLimit: number;
   budget: DeadlineBudget;
@@ -110,6 +115,7 @@ export interface AgentSettings {
   compact: CompactSettings;
   /** Message fabric settings; disabled by default for the MVP gray rollout. */
   fabric: FabricSettings;
+  cacheTtl: CacheTtlSettings;
 }
 
 export interface FabricSettings {
@@ -171,6 +177,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     rootMinIntervalMs: 10_000,
     rootInboxCap: 12,
   },
+  cacheTtl: { mode: "auto" },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
   return { ...DEFAULT_BUDGET, ...overrides.reduce((out, value) => ({ ...out, ...value }), {}) };
@@ -301,6 +308,7 @@ export function loadSettings(source: unknown): AgentSettings {
     bashJobs: parseBashJobsSettings(value.bashJobs),
     compact: parseCompactSettings(value.compact),
     fabric: parseFabricSettings(value.fabric),
+    cacheTtl: parseCacheTtlSettings(value.cacheTtl),
   });
 }
 
@@ -330,6 +338,13 @@ function parseFabricSettings(input: unknown): FabricSettings {
   };
 }
 
+/** Parse the optional Anthropic prompt-cache TTL settings block. */
+export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
+  const defaults = DEFAULT_SETTINGS.cacheTtl;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const mode = (input as Record<string, unknown>).mode;
+  return mode === "auto" || mode === "on" || mode === "off" ? { mode } : { ...defaults };
+}
 /** Parse the optional model-triggered context compaction settings block. */
 export function parseCompactSettings(input: unknown): CompactSettings {
   const defaults = DEFAULT_SETTINGS.compact;
@@ -420,10 +435,32 @@ export function defaultSettingsPath(): string {
  */
 export function loadSettingsFromFile(path: string = defaultSettingsPath()): AgentSettings {
   try {
-    if (!existsSync(path)) return loadSettings(undefined);
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const parsed: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return loadSettings(parsed);
-    return loadSettings(migrateSettingsFileTimeUnits(parsed as Record<string, unknown>, path));
+    const timed = migrateSettingsFileTimeUnits(parsed as Record<string, unknown>, path);
+    const cache = migrateLegacyCacheTtlState(timed.value, path, join(dirname(path), "cache-ttl-state.json"));
+    const changed = timed.changed || cache.changed;
+    let writeSucceeded = true;
+    if (changed) {
+      try {
+        writeFileSync(path, JSON.stringify(cache.value, null, 2) + "\n", "utf8");
+      } catch (error) {
+        writeSucceeded = false;
+        console.warn(
+          `[pi-subagent] failed to write the migrated ${path}: ${error instanceof Error ? error.message : String(error)}; the migration will be retried next time.`,
+        );
+      }
+    }
+    if (cache.deleteLegacy && writeSucceeded) {
+      try {
+        rmSync(cache.legacyPath, { force: true });
+      } catch (error) {
+        console.warn(
+          `[pi-subagent] failed to remove legacy cache TTL state ${cache.legacyPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return loadSettings(cache.value);
   } catch (error) {
     console.warn(
       `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
@@ -438,22 +475,54 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
  * result. Returns the migrated object (used even when the write fails).
  * Never throws — same field-level tolerance as the rest of the loader.
  */
-function migrateSettingsFileTimeUnits(raw: Record<string, unknown>, path: string): Record<string, unknown> {
+function migrateSettingsFileTimeUnits(
+  raw: Record<string, unknown>,
+  path: string,
+): { value: Record<string, unknown>; changed: boolean } {
   const migration = migrateTimeUnitsToSeconds(raw, TIME_SETTING_MS_PATHS);
-  if (!migration.changed) return raw;
+  if (!migration.changed) return { value: raw, changed: false };
   if (migration.converted.length)
     console.warn(
       `[pi-subagent] ${path}: time settings are now stored in seconds; migrated ${migration.converted.length} key(s): ${migration.converted.join(", ")}`,
     );
   for (const warning of migration.warnings) console.warn(`[pi-subagent] ${path}: ${warning}`);
+  return { value: migration.value, changed: true };
+}
+
+function migrateLegacyCacheTtlState(
+  raw: Record<string, unknown>,
+  settingsPath: string,
+  legacyPath: string,
+): { value: Record<string, unknown>; changed: boolean; deleteLegacy: boolean; legacyPath: string } {
+  if (!existsSync(legacyPath)) return { value: raw, changed: false, deleteLegacy: false, legacyPath };
+  let parsed: unknown;
   try {
-    writeFileSync(path, JSON.stringify(migration.value, null, 2) + "\n", "utf8");
+    parsed = JSON.parse(readFileSync(legacyPath, "utf8"));
   } catch (error) {
     console.warn(
-      `[pi-subagent] failed to write the migrated ${path}: ${error instanceof Error ? error.message : String(error)}; the migration will be retried next time.`,
+      `[pi-subagent] failed to read legacy cache TTL state ${legacyPath}: ${error instanceof Error ? error.message : String(error)}`,
     );
+    return { value: raw, changed: false, deleteLegacy: false, legacyPath };
   }
-  return migration.value;
+  const mode =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).mode
+      : undefined;
+  if (mode !== "auto" && mode !== "on" && mode !== "off") {
+    console.warn(`[pi-subagent] invalid legacy cache TTL mode in ${legacyPath}; keeping the file for retry`);
+    return { value: raw, changed: false, deleteLegacy: false, legacyPath };
+  }
+  if (Object.hasOwn(raw, "cacheTtl")) {
+    const existing = raw.cacheTtl;
+    const existingMode =
+      existing && typeof existing === "object" && !Array.isArray(existing)
+        ? (existing as Record<string, unknown>).mode
+        : undefined;
+    if (existingMode !== "auto" && existingMode !== "on" && existingMode !== "off")
+      console.warn(`[pi-subagent] ${settingsPath}: invalid cacheTtl setting preserved; using auto`);
+    return { value: raw, changed: false, deleteLegacy: true, legacyPath };
+  }
+  return { value: { ...raw, cacheTtl: { mode } }, changed: true, deleteLegacy: true, legacyPath };
 }
 
 /**

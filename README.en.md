@@ -167,6 +167,12 @@ queue_wait → resolve_config → session_create → extension_bind
 
 Retries get their own backoff phase and don't trip the idle timer; parallel tool calls keep the run in `tool_exec` until the _last_ sibling settles.
 
+## Cache TTL
+
+`/cache-ttl on|off|auto` changes Anthropic prompt-cache handling immediately for the current process only. `on` forces `ttl: "1h"`, `off` removes explicit TTL so the provider default (currently 5 minutes) applies, and `auto` leaves the request unchanged. Run `/cache-ttl save` to persist the current mode in `~/.pi/agent/pi-subagent.json` as `cacheTtl.mode`; a failed save leaves the unsaved marker in place. The status bar shows `⏱ cache: 1h` or `⏱ cache: 5m`, with `*` for unsaved changes.
+
+`/agent settings set cacheTtl.mode on|off|auto` edits the persistent settings value and follows the normal `/reload` behavior; it is distinct from the session-level `/cache-ttl` switch. This feature is registered only in the main session, not child agents. Persistence is explicit via `/cache-ttl save`; no keyboard shortcut is used.
+
 ## Configuration
 
 User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, never throws).

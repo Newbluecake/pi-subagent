@@ -161,6 +161,12 @@ queue_wait → resolve_config → session_create → extension_bind
 
 重试有独立的 backoff 相位,不会误触 idle 计时器;并行工具调用会让 run 停留在 `tool_exec` 直到**最后一个**兄弟调用结束。
 
+## cache TTL
+
+`/cache-ttl on|off|auto` 会立即改变 Anthropic prompt cache 的处理方式,但只对当前进程生效。`on` 强制加入 `ttl: "1h"`,`off` 删除显式 TTL,使用 provider 默认值(当前为 5 分钟),`auto` 不改写请求。`/cache-ttl save` 将当前模式持久化到 `~/.pi/agent/pi-subagent.json` 的 `cacheTtl.mode`;写入失败时未保存标记会保留。状态栏显示 `⏱ cache: 1h` 或 `⏱ cache: 5m`,未保存时追加 `*`。
+
+`/agent settings set cacheTtl.mode on|off|auto` 修改持久化设置并遵循普通的 `/reload` 生效规则,与会话级 `/cache-ttl` 开关语义不同。该功能只在主会话注册,子 agent 不会注册。持久化需显式执行 `/cache-ttl save`,不占用任何快捷键。
+
 ## 配置
 
 用户配置:`~/.pi/agent/pi-subagent.json`(文件缺失/格式错误 → 用默认值,绝不抛错)。

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
+import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { RunSnapshot, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
@@ -89,6 +90,7 @@ export default function activate(pi: ExtensionAPI): void {
   });
 
   const settings = loadSettingsFromFile();
+  wireCacheTtl(pi, settings);
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
   // moduleCache:false). A module-level mutable array would accumulate
