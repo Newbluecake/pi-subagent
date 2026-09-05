@@ -70,7 +70,13 @@ export class FabricMailbox {
         break;
       }
     }
-    for (const record of gone) this.options.router.issueDeadLetter(record, "target_gone");
+    const goneBySender = new Map<string, FabricRecord[]>();
+    for (const record of gone) {
+      const batch = goneBySender.get(record.from) ?? [];
+      batch.push(record);
+      goneBySender.set(record.from, batch);
+    }
+    for (const batch of goneBySender.values()) this.options.router.issueDeadLetters(batch, "target_gone");
     this.rescheduleWake();
   }
 

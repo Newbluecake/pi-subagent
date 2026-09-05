@@ -57,6 +57,7 @@ export class FabricRouter {
   private readonly used = new Map<NodeRef, Record<"progress" | "finding" | "directive", number>>();
   private readonly deadLetterUsed = new Map<NodeRef, number>();
   private readonly dlRefs = new Map<MessageKey, DeadLetterOutcome>();
+  private readonly dlPlaceholders = new Set<MessageKey>();
   private seq = new Map<string, number>();
   private frozen = false;
   constructor(
@@ -184,6 +185,7 @@ export class FabricRouter {
     }
     if (!fresh.length) return;
     const sender = fresh[0]!.from;
+    for (const o of fresh) this.dlPlaceholders.add(o.key);
     let outcome: DeadLetterOutcome;
     if (this.targetState(sender) === "gone") outcome = { status: "suppressed_sender_gone" };
     else if ((this.deadLetterUsed.get(sender) ?? 0) >= this.config.deadLetterQuota)
@@ -208,12 +210,16 @@ export class FabricRouter {
       try {
         this.engine.put(env);
       } catch (error) {
+        for (const o of fresh) this.dlPlaceholders.delete(o.key);
         throw error;
       }
       this.deadLetterUsed.set(sender, (this.deadLetterUsed.get(sender) ?? 0) + 1);
       outcome = { status: "issued", key };
     }
-    for (const o of fresh) this.dlRefs.set(o.key, outcome);
+    for (const o of fresh) {
+      this.dlPlaceholders.delete(o.key);
+      this.dlRefs.set(o.key, outcome);
+    }
     for (const o of fresh)
       this.engine.transition(o.key, ["pending", "claimed"], terminalFor(reason), {
         terminalReason: reason,
