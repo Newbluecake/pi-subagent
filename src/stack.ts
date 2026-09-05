@@ -179,10 +179,6 @@ function buildFabric(
   readBack: boolean,
   runnerRef: { current?: Runner },
 ) {
-  const entries = prefetched
-    .filter((entry) => entry.type === "custom" && entry.customType === "subagent:fabric")
-    .map((entry) => entry.data)
-    .filter((data): data is FabricRecord => Boolean(data && typeof data === "object" && "key" in data));
   const store = readBack
     ? createPiOutboxStore<FabricRecord>(
         { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager },
@@ -220,12 +216,13 @@ function buildFabric(
         tree.tombstone(snapshot.runId, systemClock.now(), settings.reconcileTtlMs);
     }
   }
+  const capabilities = detectPiCapabilities(pi);
   const throttle = createFabricThrottle({
     minIntervalMs: settings.fabric.minIntervalMs,
     rootMinIntervalMs: settings.fabric.rootMinIntervalMs,
     backoffMs: settings.deliveryBackoffMs,
     progressChannel: settings.fabric.progressChannel,
-    canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+    canRenderEntries: capabilities.canRenderEntries,
     records: [...engine.select(() => true)],
   });
   const router = createFabricRouter(
@@ -235,7 +232,7 @@ function buildFabric(
     {
       ...settings.fabric,
       reconcileTtlMs: settings.reconcileTtlMs,
-      canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+      canRenderEntries: capabilities.canRenderEntries,
     },
     () => systemClock.now(),
     () => mailbox.pump(),
@@ -274,7 +271,7 @@ function buildFabric(
     clock: systemClock,
     fabricSteerTimeoutMs: settings.budget.steerMs,
     progressChannel: settings.fabric.progressChannel,
-    canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+    canRenderEntries: capabilities.canRenderEntries,
     maxAttempts: settings.deliveryAttempts,
   });
   return { engine, tree, router, mailbox };
@@ -665,7 +662,10 @@ export function buildSessionStack(
       }
       usageRef.current?.poke(); // M-E: start/refresh the 1Hz cost broadcast
       if (fabric) {
-        if (snapshot.status === "running") fabric.tree.markRunning(snapshot.runId);
+        if (snapshot.status === "running") {
+          fabric.tree.markRunning(snapshot.runId);
+          fabric.mailbox.pump(snapshot.runId);
+        }
         if (["completed", "failed", "timed_out", "aborted"].includes(snapshot.status))
           fabric.mailbox.onRunSettled(snapshot.runId);
       }

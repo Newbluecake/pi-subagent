@@ -192,8 +192,22 @@ export class FabricMailbox {
     this.wake = undefined;
     const now = this.options.clock.now();
     let due = Number.POSITIVE_INFINITY;
-    for (const record of this.options.engine.select((r) => r.state === "pending"))
-      due = Math.min(due, this.options.throttle.eligibleAt(record), record.createdAt + record.ttlMs);
+    for (const record of this.options.engine.select((r) => r.state === "pending")) {
+      const targetState = this.options.router.targetState(record.to);
+      // A target with an in-flight send cannot make progress from a timer;
+      // its verdict is the wake source for the next record on that target.
+      if (this.inFlight.has(record.to)) continue;
+      const ttlAt = record.createdAt + record.ttlMs;
+      if (targetState === "pending_start") {
+        // A pending_start target has no clock-based delivery opportunity. Its
+        // only non-TTL wake source is the running snapshot hint.
+        if (ttlAt > now) due = Math.min(due, ttlAt);
+        continue;
+      }
+      if (ttlAt > now) due = Math.min(due, ttlAt);
+      const eligibleAt = this.options.throttle.eligibleAt(record);
+      if (eligibleAt > now) due = Math.min(due, eligibleAt);
+    }
     if (Number.isFinite(due))
       this.wake = this.options.clock.setTimer(Math.max(0, due - now), () => {
         this.wake = undefined;

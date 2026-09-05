@@ -115,7 +115,7 @@ describe("fabric mailbox", () => {
     expect(sends).toBe(1);
     expect(mailbox.inFlightCount).toBe(1);
     expect(mailbox.pendingRaceTimers).toBe(1);
-    expect(clock.pendingTimers).toBe(2);
+    expect(clock.pendingTimers).toBe(1);
     resolvers[0]!({ ok: true });
     await Promise.resolve();
     await Promise.resolve();
