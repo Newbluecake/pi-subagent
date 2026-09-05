@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`compact_context` tool** — the model can proactively trigger context compaction (equivalent to `/compact`) instead of waiting for the automatic threshold. Registered only in the host session; an in-flight guard plus cooldown refuses back-to-back triggers, and an optional follow-up message resumes the task on the summarized context. Configured via `compact.enabled` (default on).
+
 - **message fabric** — an opt-in, fire-and-forget message protocol for subagent runs. The `message_agent` tool sends `progress`, `finding`, or `directive` messages through tree-edge routing with `canMessage` relationship gating; delivery is bounded by per-link quotas and throttling, with dead-letter handling for failed actionable messages and a root ingress gate for context traffic. Agent-type frontmatter can declare allowed relationships, and the 11-key `fabric.*` configuration surface is disabled by default for gradual rollout.
 
 ## [0.2.1] - 2026-09-05

@@ -30,6 +30,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
+import { createCompactTool } from "./tools/compact-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
 import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
@@ -154,6 +155,10 @@ export default function activate(pi: ExtensionAPI): void {
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // HOST_KEY guard above means this registration is visible only in the main session.
+  if (settings.compact.enabled) {
+    pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+  }
   // bash auto-background (§2.6/R6): the same-name `bash` override and its
   // `bash_job` management tool exist only when the feature is on — off means
   // pi's built-in bash stays in place with zero behaviour change.

@@ -161,6 +161,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Hold window suppressing caller-acked deliveries",
   }),
   "worktree.enabled": bool("worktree.enabled", "Isolate subagents in git worktrees"),
+  "compact.enabled": bool("compact.enabled", "Allow the model to trigger context compaction"),
   "worktree.gitTimeoutS": seconds("worktree.gitTimeoutMs", { description: "Git command timeout for worktree ops" }),
   "workflow.enabled": bool("workflow.enabled", "Master switch for SubagentWorkflow"),
   "workflow.replayTtlS": seconds("workflow.replayTtlMs", { description: "Journal replay retention; 0 = unlimited" }),
