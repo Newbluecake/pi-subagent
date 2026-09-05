@@ -259,7 +259,15 @@ function buildFabric(
       return { ok: true };
     },
     sendRootDisplay: async (record) => {
-      pi.appendEntry("subagent:fabric", record);
+      // The entry renderer displays only state === "delivered" records (one
+      // chat line per message despite the append-per-transition outbox). In
+      // readBack mode the delivered store update appends that record; with
+      // the degraded in-memory store it never reaches appendEntry, so stamp
+      // this display-only append as delivered to keep it visible exactly once.
+      pi.appendEntry(
+        "subagent:fabric",
+        readBack ? record : { ...record, state: "delivered" as const, deliveredAt: systemClock.now() },
+      );
       return { ok: true };
     },
   };

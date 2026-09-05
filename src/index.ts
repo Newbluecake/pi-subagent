@@ -5,6 +5,7 @@ import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { RunSnapshot, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
 import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./adapters/pi-compat.js";
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
+import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
 import {
@@ -28,7 +29,6 @@ import { createRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { createAgentTool } from "./tools/agent-tool.js";
-import { Text } from "@earendil-works/pi-tui";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
@@ -125,11 +125,23 @@ export default function activate(pi: ExtensionAPI): void {
   }
 
   if (caps.canRenderEntries) {
-    pi.registerEntryRenderer("subagent:fabric", (entry, _options, theme) => {
-      const data = entry.data as { payload?: { text?: string }; kind?: string } | undefined;
-      const text = data?.payload?.text ?? "";
-      return new Text(theme.fg("muted", `[fabric ${data?.kind ?? "message"}] ${text}`), 0, 0);
-    });
+    // Renderer lives in adapters/fabric-entry-renderer.ts and renders ONLY
+    // delivered records: the fabric outbox store appends one entry per state
+    // transition, and rendering each one duplicated every fabric message in
+    // the chat (pending/claimed appends + delivered append).
+    // Show the sender alongside kind: prefer the mention label (@name),
+    // falling back to the raw runId when no label is registered.
+    pi.registerEntryRenderer(
+      FABRIC_ENTRY_CUSTOM_TYPE,
+      createFabricEntryRenderer((runId) => {
+        const mention = holder.current?.mention;
+        if (!mention) return undefined;
+        for (const label of mention.labels()) {
+          if (mention.resolve(label)?.runId === runId) return label;
+        }
+        return undefined;
+      }),
+    );
   } else {
     console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
   }
