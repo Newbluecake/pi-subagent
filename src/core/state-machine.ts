@@ -380,6 +380,11 @@ export function reduce(
   budget: DeadlineBudget = DEFAULT_BUDGET,
 ): { state: RunState; effects: readonly EffectEnvelope[] } {
   const input = stamped.input;
+  // Context usage is a best-effort diagnostics snapshot. Accept it across
+  // terminal and stale-generation paths without changing lifecycle state or
+  // emitting a persistence effect.
+  if (input.kind === "session_event" && input.event.t === "context_usage")
+    return { state: { ...state, diag: { ...state.diag, contextUsage: input.event.usage } }, effects: [] };
   if (stamped.generation !== state.generation)
     return { state: { ...state, diag: { ...state.diag, staleInputs: state.diag.staleInputs + 1 } }, effects: [] };
   // effect_failed is a recovery protocol, including after settlement. It must

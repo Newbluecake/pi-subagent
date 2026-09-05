@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import type { LifecycleEvent, RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
-import { buildFleetViewModel, type FleetTone } from "../../src/ui/fleet-panel.js";
+import {
+  buildFleetViewModel,
+  formatContextTokens,
+  formatContextUsage,
+  type FleetTone,
+} from "../../src/ui/fleet-panel.js";
 import {
   buildFleetWidgetLines,
   FLEET_WIDGET_KEY,
@@ -56,6 +61,24 @@ const usage = (costUsd: number): UsageDelta => ({ input: 10, output: 2, cacheRea
 const NOW = 10_000;
 const OPTS = { now: NOW, idleBudgetMs: 1000 };
 
+describe("view-model: context usage formatting", () => {
+  it("formats context windows at every compact-unit boundary", () => {
+    expect(formatContextTokens(999)).toBe("999");
+    expect(formatContextTokens(1000)).toBe("1.0k");
+    expect(formatContextTokens(9999)).toBe("10.0k");
+    expect(formatContextTokens(10_000)).toBe("10k");
+    expect(formatContextTokens(999_999)).toBe("1000k");
+    expect(formatContextTokens(1_000_000)).toBe("1.0M");
+    expect(formatContextTokens(9_999_999)).toBe("10.0M");
+    expect(formatContextTokens(10_000_000)).toBe("10M");
+  });
+
+  it("renders unknown post-compaction usage with a compact window", () => {
+    expect(formatContextUsage({ tokens: null, contextWindow: 262_144, percent: null })).toBe("?/262k");
+    expect(formatContextUsage({ tokens: 32_000, contextWindow: 262_144, percent: 12.34 })).toBe("12.3%/262k");
+  });
+});
+
 describe("view-model: formatWidgetCost boundaries", () => {
   it("4 decimals below half a cent, 2 decimals at/above", () => {
     expect(formatWidgetCost(0)).toBe("$0.0000");
@@ -75,6 +98,21 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
   it("returns undefined when only terminal runs exist (history is panel material)", () => {
     const done = snapshot({ status: "completed", phase: "settled" });
     expect(buildFleetWidgetLines(buildFleetViewModel([done], OPTS))).toBeUndefined();
+  });
+
+  it("renders context usage before cost on active and terminal rows", () => {
+    const contextUsage = { tokens: 32_000, contextWindow: 262_144, percent: 12.34 };
+    const active = snapshot({ diag: diag({ usage: usage(0.0042), contextUsage }) });
+    const done = snapshot({
+      status: "completed",
+      phase: "settled",
+      updatedAt: NOW,
+      diag: diag({ usage: usage(0.0042), contextUsage }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([active, done], { ...OPTS, recentTerminal: 1 }))!;
+    expect(lines[1]).toContain("12.3%/262k $0.0042");
+    expect(lines[2]).toContain("12.3%/262k $0.0042");
+    expect(lines[1]!.indexOf("12.3%/262k")).toBeLessThan(lines[1]!.indexOf("$0.0042"));
   });
 
   it("single active run → header + one tree row with id-fallback, type, phase, elapsed, cost", () => {

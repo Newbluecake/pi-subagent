@@ -32,6 +32,65 @@ function runningState(): RunState {
   return s;
 }
 
+describe("context usage diagnostics", () => {
+  it("updates only the context snapshot in every phase, including terminal and stale inputs", () => {
+    const phases = [
+      "queue_wait",
+      "resolve_config",
+      "session_create",
+      "extension_bind",
+      "prompt_dispatch",
+      "model_turn",
+      "tool_exec",
+      "retry_backoff",
+      "compaction",
+      "abort_grace",
+      "reap",
+      "settled",
+    ] as const;
+    const usage = { tokens: null, contextWindow: 262_144, percent: null };
+    for (const phase of phases) {
+      const base = runningState();
+      const state: RunState = {
+        ...base,
+        phase,
+        status:
+          phase === "queue_wait"
+            ? "queued"
+            : phase === "abort_grace" || phase === "reap"
+              ? "stopping"
+              : phase === "settled"
+                ? "completed"
+                : "running",
+        diag: { ...base.diag, phase },
+      };
+      const before = { status: state.status, phase: state.phase, armedTimers: state.armedTimers };
+      const result = reduce(
+        state,
+        {
+          generation: state.generation,
+          input: { kind: "session_event", at: 50, event: { t: "context_usage", usage } },
+        },
+        budget,
+      );
+      expect(result.effects).toEqual([]);
+      expect(result.state.status).toBe(before.status);
+      expect(result.state.phase).toBe(before.phase);
+      expect(result.state.armedTimers).toEqual(before.armedTimers);
+      expect(result.state.diag.contextUsage).toEqual(usage);
+      expect(result.state.diag.lastWarn).toBeUndefined();
+    }
+    const stale = reduce(
+      runningState(),
+      { generation: 999, input: { kind: "session_event", at: 51, event: { t: "context_usage", usage } } },
+      budget,
+    );
+    expect(stale.effects).toEqual([]);
+    expect(stale.state.diag.contextUsage).toEqual(usage);
+    expect(stale.state.diag.staleInputs).toBe(0);
+  });
+});
+
 describe("X9 usage accumulation", () => {
   it("sums a single message_end delta into diag.usage", () => {
     const s = apply(

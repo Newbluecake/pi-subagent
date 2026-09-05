@@ -198,10 +198,16 @@ export interface UsageDelta {
   cacheWrite: number;
   costUsd: number;
 }
+export interface ContextUsageInfo {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
 export type DriverEvent =
   | { t: "turn_start" }
   | { t: "turn_end"; toolResults: number }
   | { t: "message_end"; usage?: UsageDelta }
+  | { t: "context_usage"; usage: ContextUsageInfo }
   | { t: "tool_start"; toolCallId: string; toolName: string; argsPreview?: string }
   | { t: "tool_end"; toolCallId: string; toolName: string; isError: boolean }
   | { t: "tool_update"; toolCallId: string }
@@ -258,6 +264,8 @@ export interface RunDiagnostics {
    * stats by design (architecture §7.2 X9).
    */
   usage?: UsageDelta;
+  /** Best-effort live context snapshot; trailing events after terminal only update memory and are not persisted again. */
+  contextUsage?: ContextUsageInfo;
   /** M-A: display-only spawn metadata (model/label/type), set once at enqueue. */
   model?: { provider: string; id: string };
   label?: string;

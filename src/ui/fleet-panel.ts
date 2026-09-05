@@ -1,4 +1,13 @@
-import type { Millis, RunDiagnostics, RunId, RunPhase, RunSnapshot, RunStatus, UsageDelta } from "../core/types.js";
+import type {
+  ContextUsageInfo,
+  Millis,
+  RunDiagnostics,
+  RunId,
+  RunPhase,
+  RunSnapshot,
+  RunStatus,
+  UsageDelta,
+} from "../core/types.js";
 import { formatDuration } from "../core/format.js";
 
 // Re-exported for the ~10 existing consumers (tools/, commands/, ui/, stack,
@@ -67,6 +76,7 @@ export interface FleetRow {
   escalation: string | undefined;
   maxEscalation: EscalationLevel | undefined;
   usage: UsageDelta | undefined;
+  contextUsage: ContextUsageInfo | undefined;
   /** Run was moved from foreground to background by the timeout threshold. */
   autoBackgrounded?: boolean;
   /** X3 nested run (spawned with parentRunId). */
@@ -188,6 +198,20 @@ export function escalationSummary(diag: RunDiagnostics): {
     text: diag.escalation.map((e) => `${e.level}${e.ok ? "✓" : "✗"}`).join("→"),
     max: diag.escalation[diag.escalation.length - 1]!.level,
   };
+}
+
+/** Compact context-window formatting for the fleet widget. */
+export function formatContextTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 10_000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1e6) return `${Math.round(count / 1000)}k`;
+  if (count < 1e7) return `${(count / 1e6).toFixed(1)}M`;
+  return `${Math.round(count / 1e6)}M`;
+}
+
+export function formatContextUsage(u: ContextUsageInfo): string {
+  const window = formatContextTokens(u.contextWindow);
+  return `${u.percent === null ? "?" : `${u.percent.toFixed(1)}%`}/${window}`;
 }
 
 /** X9 usage, 4-decimal cost (same convention as /agent status: subagent runs are sub-cent). */
@@ -333,6 +357,7 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     escalation: esc.text,
     maxEscalation: esc.max,
     usage: snapshot.diag.usage,
+    contextUsage: snapshot.diag.contextUsage,
     autoBackgrounded: snapshot.diag.autoBackgroundedAt !== undefined,
     nested: snapshot.parentRunId !== undefined,
     terminal,

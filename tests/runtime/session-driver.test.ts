@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { mapEvent } from "../../src/runtime/session-driver.js";
+import { describe, expect, it, vi } from "vitest";
+import { mapContextUsage, mapEvent, PiSessionDriver } from "../../src/runtime/session-driver.js";
 
 /**
  * Regression: pi's Usage carries cost as nested `cost.total`, not a flat
@@ -60,6 +60,71 @@ describe("session-driver mapEvent: usage mapping (pi Usage → UsageDelta)", () 
       const ev = mapEvent(raw);
       expect(ev).toEqual({ t: "message_end" });
       expect(ev && "usage" in ev).toBe(false);
+    }
+  });
+});
+
+describe("session-driver context usage mapping", () => {
+  it("validates and normalizes context usage", () => {
+    expect(mapContextUsage({ tokens: 12, contextWindow: 262_144, percent: 12.34 })).toEqual({
+      tokens: 12,
+      contextWindow: 262_144,
+      percent: 12.34,
+    });
+    expect(mapContextUsage({ tokens: null, contextWindow: 262_144, percent: null })).toEqual({
+      tokens: null,
+      contextWindow: 262_144,
+      percent: null,
+    });
+    expect(mapContextUsage({ tokens: -1, contextWindow: 262_144, percent: 120 })).toEqual({
+      tokens: null,
+      contextWindow: 262_144,
+      percent: 100,
+    });
+    expect(mapContextUsage({ tokens: Number.NaN, contextWindow: 262_144, percent: -5 })).toEqual({
+      tokens: null,
+      contextWindow: 262_144,
+      percent: 0,
+    });
+    for (const value of [0, -1, Number.NaN, undefined])
+      expect(mapContextUsage({ tokens: 1, contextWindow: value, percent: 1 })).toBeUndefined();
+  });
+
+  it("samples after message_end and compaction_end", async () => {
+    let subscribe: ((event: unknown) => void) | undefined;
+    const getContextUsage = vi.fn(() => ({ tokens: 32_768, contextWindow: 262_144, percent: 12.5 }));
+    const handle = { session: { subscribe: (cb: (event: unknown) => void) => (subscribe = cb), getContextUsage } };
+    const events: unknown[] = [];
+    await new PiSessionDriver().bind(handle as never, (event) => events.push(event));
+    subscribe?.({ type: "message_end" });
+    subscribe?.({ type: "compaction_end", aborted: false });
+    expect(getContextUsage).toHaveBeenCalledTimes(2);
+    expect(events).toEqual([
+      { t: "message_end" },
+      { t: "context_usage", usage: { tokens: 32_768, contextWindow: 262_144, percent: 12.5 } },
+      { t: "compaction_end", aborted: false },
+      { t: "context_usage", usage: { tokens: 32_768, contextWindow: 262_144, percent: 12.5 } },
+    ]);
+  });
+
+  it("disables sampling once capability is absent or throws", async () => {
+    for (const hasCapability of [false, true]) {
+      let subscribe: ((event: unknown) => void) | undefined;
+      const getContextUsage = hasCapability
+        ? vi.fn(() => {
+            throw new Error("x");
+          })
+        : undefined;
+      const session = {
+        subscribe: (cb: (event: unknown) => void) => (subscribe = cb),
+        ...(getContextUsage === undefined ? {} : { getContextUsage }),
+      };
+      const events: unknown[] = [];
+      await new PiSessionDriver().bind({ session } as never, (event) => events.push(event));
+      subscribe?.({ type: "message_end" });
+      subscribe?.({ type: "compaction_end", aborted: false });
+      expect(events.map((event) => (event as { t: string }).t)).toEqual(["message_end", "compaction_end"]);
+      if (getContextUsage) expect(getContextUsage).toHaveBeenCalledTimes(1);
     }
   });
 });

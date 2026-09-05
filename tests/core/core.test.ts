@@ -1367,6 +1367,7 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
           "turn_start",
           "turn_end",
           "message_end",
+          "context_usage",
           "tool_start",
           "tool_end",
           "tool_update",
@@ -1384,6 +1385,12 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
             return { kind, at, event: { t: "turn_end", toolResults: Math.floor(next() * 3) } };
           case "message_end":
             return { kind, at, event: { t: "message_end" } };
+          case "context_usage":
+            return {
+              kind,
+              at,
+              event: { t: "context_usage", usage: { tokens: null, contextWindow: 262_144, percent: null } },
+            };
           case "tool_start":
             return { kind, at, event: { t: "tool_start", toolCallId: "a", toolName: "bash" } };
           case "tool_end":

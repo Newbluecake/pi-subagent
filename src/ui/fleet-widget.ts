@@ -7,6 +7,7 @@ import type { QueryService } from "../service/query-service.js";
 import {
   buildFleetViewModel,
   colorizeToolTrail,
+  formatContextUsage,
   formatDuration,
   type FleetColorize,
   type FleetHighlight,
@@ -152,6 +153,7 @@ function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): stri
   // the 1Hz tick animates it. Tool-call timing lives
   // on the activity line's ▸ segment (see toolTrailOf / widgetRowActivity).
   meta.push(row.phaseLabel, formatDuration(row.phaseMs), `Σ${formatDuration(row.elapsedMs)}`);
+  if (row.contextUsage) meta.push(formatContextUsage(row.contextUsage));
   const parts = [name, color("muted", meta.join(" "))];
   if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
   if (row.autoBackgrounded) parts.push(color("muted", "⇣后台"));
@@ -183,6 +185,7 @@ function widgetTerminalDetail(row: FleetRow): string {
   const parts = [row.label ? `${row.label} #${row.shortRunId}` : row.shortRunId, row.type ?? "·"];
   if (row.model) parts.push(row.model);
   parts.push(row.status, formatDuration(row.elapsedMs));
+  if (row.contextUsage) parts.push(formatContextUsage(row.contextUsage));
   if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
   return parts.join(" ");
 }

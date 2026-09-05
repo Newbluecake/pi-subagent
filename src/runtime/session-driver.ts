@@ -1,7 +1,14 @@
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { DriverEvent, KillableHandle, RunOutcome, SessionSpec, UsageDelta } from "../core/types.js";
+import type {
+  ContextUsageInfo,
+  DriverEvent,
+  KillableHandle,
+  RunOutcome,
+  SessionSpec,
+  UsageDelta,
+} from "../core/types.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
 export interface DisposeReport {
@@ -54,6 +61,24 @@ function mapUsage(u: unknown): UsageDelta | undefined {
     cacheRead: num(r["cacheRead"]),
     cacheWrite: num(r["cacheWrite"]),
     costUsd: num(cost?.total),
+  };
+}
+
+export function mapContextUsage(u: unknown): ContextUsageInfo | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const r = u as Record<string, unknown>;
+  const contextWindow = r["contextWindow"];
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+  const nullableNumber = (value: unknown, predicate: (n: number) => boolean): number | null =>
+    value === null || (typeof value === "number" && Number.isFinite(value) && predicate(value))
+      ? (value as number | null)
+      : null;
+  const tokens = nullableNumber(r["tokens"], (n) => n >= 0);
+  const rawPercent = nullableNumber(r["percent"], () => true);
+  return {
+    contextWindow,
+    tokens,
+    percent: rawPercent === null ? null : Math.min(100, Math.max(0, rawPercent)),
   };
 }
 
@@ -252,9 +277,23 @@ export class PiSessionDriver implements SessionDriver {
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];
     if (!session) return Promise.reject(new Error("invalid pi session handle"));
+    let contextSamplingDisabled = false;
     session.subscribe((event: unknown) => {
       const mapped = mapEvent(event);
-      if (mapped) onEvent(mapped);
+      if (!mapped) return;
+      onEvent(mapped);
+      if ((mapped.t !== "message_end" && mapped.t !== "compaction_end") || contextSamplingDisabled) return;
+      const getContextUsage = (session as { getContextUsage?: unknown }).getContextUsage;
+      if (typeof getContextUsage !== "function") {
+        contextSamplingDisabled = true;
+        return;
+      }
+      try {
+        const usage = mapContextUsage(getContextUsage.call(session));
+        if (usage) onEvent({ t: "context_usage", usage });
+      } catch {
+        contextSamplingDisabled = true;
+      }
     });
     return Promise.resolve();
   }
