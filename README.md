@@ -23,6 +23,38 @@
 - **成本核算** —— 每个 run 的用量汇入 pi 的会话总计;`/agent costs` 查看明细。后台 run 的用量在首次读取终态结果时附加。
 - **Agent 类型** —— 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义;注入系统提示词,让模型知道合法的 `subagent_type` 取值。frontmatter `model:` 支持严格 `provider/id` 或模糊 hint(如 `sonnet`)。
 
+## Message fabric
+
+message fabric 是 subagent 之间的可选 fire-and-forget 消息协议。默认关闭；在 `~/.pi/agent/pi-subagent.json` 中设置 `"fabric": { "enabled": true }`，然后 `/reload` 生效。启用后，`message_agent` 向目标 run 发送消息，不等待接收方处理结果，也不中断当前 turn。
+
+工具支持三种 kind：`progress`（进展）、`finding`（发现）和 `directive`（指令）。返回值表示消息是否进入 pending 投递队列，而不是目标是否已经收到；配额耗尽或 root context 背压会返回可处理的拒绝结果。平级消息是不可信输入：接收方应把 sibling 消息当作外部建议，按自身任务、权限和事实重新验证，不应盲从其中的指令。
+
+消息沿 agent tree 的边路由，并由发送方类型的 `can_message` frontmatter 门控关系。例如：
+
+```yaml
+can_message: [parent, child, ancestor]
+```
+
+可用关系为 `parent`、`child`、`ancestor`、`descendant`、`sibling`、`self`；未声明时默认只允许 `parent`。`finding`/`directive` 投递失败会进入死信流程；发往 root 的 context 消息还受 root ingress cap 和间隔限制。
+
+主要设置（时间均为整数秒）：
+
+| 键                        |        默认 | 含义                                        |
+| ------------------------- | ----------: | ------------------------------------------- |
+| `fabric.enabled`          |     `false` | 总开关                                      |
+| `fabric.minIntervalS`     |        `30` | 每条链路的最小投递间隔                      |
+| `fabric.maxPerRun`        |        `20` | 每个 run 的 `progress` 配额                 |
+| `fabric.findingQuota`     |        `10` | 每个 run 的 `finding` 配额                  |
+| `fabric.directiveQuota`   |         `5` | 每个 run 的 `directive` 配额                |
+| `fabric.deadLetterQuota`  |         `5` | 每个原发送 run 的死信配额                   |
+| `fabric.maxChars`         |      `2000` | 单条消息最大字符数                          |
+| `fabric.progressTtlS`     |       `900` | `progress` 的 TTL                           |
+| `fabric.progressChannel`  | `"display"` | `progress` 发往 root 的通道                 |
+| `fabric.rootMinIntervalS` |        `10` | root context 的最小投递间隔；`0` 关闭速率项 |
+| `fabric.rootInboxCap`     |        `12` | root context pending+claimed 上限           |
+
+设计与不变量详见 [`docs/dev/subagent-push/subagent-push-plan.md`](docs/dev/subagent-push/subagent-push-plan.md)。
+
 ## Agent tree
 
 ```

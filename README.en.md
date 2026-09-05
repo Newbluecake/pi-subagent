@@ -23,6 +23,38 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
 - **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
 
+## Message fabric
+
+Message fabric is an optional fire-and-forget protocol for communication between subagent runs. It is disabled by default; enable it with `"fabric": { "enabled": true }` in `~/.pi/agent/pi-subagent.json`, then `/reload`. The `message_agent` tool queues a message without waiting for the recipient or interrupting the sender's turn.
+
+The tool accepts three kinds: `progress` (progress updates), `finding` (findings), and `directive` (instructions). Its result says whether a pending delivery record was created, not whether the recipient has already received the message. Quota exhaustion and root-context backpressure are returned as actionable soft results. Sibling messages are untrusted input: recipients should re-check them against their own task, permissions, and evidence rather than blindly following instructions.
+
+Messages route along the agent tree and are gated by the sender type's `can_message` frontmatter, for example:
+
+```yaml
+can_message: [parent, child, ancestor]
+```
+
+The available relationships are `parent`, `child`, `ancestor`, `descendant`, `sibling`, and `self`; when omitted, only `parent` is allowed. Failed `finding`/`directive` deliveries create dead-letter records. Messages to root on the context channel also pass through a root ingress cap and minimum interval.
+
+Main settings (durations are whole seconds):
+
+| Key                       |     Default | Meaning                                                   |
+| ------------------------- | ----------: | --------------------------------------------------------- |
+| `fabric.enabled`          |     `false` | Master switch                                             |
+| `fabric.minIntervalS`     |        `30` | Minimum interval per tree link                            |
+| `fabric.maxPerRun`        |        `20` | Per-run `progress` quota                                  |
+| `fabric.findingQuota`     |        `10` | Per-run `finding` quota                                   |
+| `fabric.directiveQuota`   |         `5` | Per-run `directive` quota                                 |
+| `fabric.deadLetterQuota`  |         `5` | Dead-letter quota per original sender run                 |
+| `fabric.maxChars`         |      `2000` | Maximum characters per message                            |
+| `fabric.progressTtlS`     |       `900` | TTL for `progress` messages                               |
+| `fabric.progressChannel`  | `"display"` | Channel for `progress` sent to root                       |
+| `fabric.rootMinIntervalS` |        `10` | Minimum root-context interval; `0` disables rate limiting |
+| `fabric.rootInboxCap`     |        `12` | Root-context pending+claimed cap                          |
+
+The design and invariants are documented in [`docs/dev/subagent-push/subagent-push-plan.md`](docs/dev/subagent-push/subagent-push-plan.md).
+
 ## The agent tree
 
 ```

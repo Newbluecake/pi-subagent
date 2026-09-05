@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **message fabric** — an opt-in, fire-and-forget message protocol for subagent runs. The `message_agent` tool sends `progress`, `finding`, or `directive` messages through tree-edge routing with `canMessage` relationship gating; delivery is bounded by per-link quotas and throttling, with dead-letter handling for failed actionable messages and a root ingress gate for context traffic. Agent-type frontmatter can declare allowed relationships, and the 11-key `fabric.*` configuration surface is disabled by default for gradual rollout.
+
 ## [0.2.1] - 2026-09-05
 
 ### Fixed
