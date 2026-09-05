@@ -16,7 +16,13 @@ import {
 } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
-import { buildSessionStack, bashJobsEnabled, createNotificationReceiptHook, type Stack } from "./stack.js";
+import {
+  buildSessionStack,
+  bashJobsEnabled,
+  createCompactHintHook,
+  createNotificationReceiptHook,
+  type Stack,
+} from "./stack.js";
 import { installMentionInput } from "./mention/mention.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
@@ -33,6 +39,7 @@ import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
+import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
 import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
@@ -114,6 +121,13 @@ export default function activate(pi: ExtensionAPI): void {
   // rebuilt per session_start and would accumulate duplicate handlers).
   // Handler lives in stack.ts so integration tests cover the real filter path.
   pi.on("message_start", createNotificationReceiptHook(holder));
+  pi.on(
+    "turn_end",
+    createCompactHintHook(holder, {
+      sendMessage: (message, options) => pi.sendMessage(message, options),
+      sendUserMessage: (text) => pi.sendUserMessage(text),
+    }),
+  );
 
   if (!compat.ok) {
     pi.registerTool({
@@ -177,6 +191,12 @@ export default function activate(pi: ExtensionAPI): void {
   // HOST_KEY guard above means this registration is visible only in the main session.
   if (settings.compact.enabled) {
     pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+    pi.registerTool(
+      createSetCompactThresholdTool({
+        getState: () => holder.current?.compactHint,
+        compactToolEnabled: () => settings.compact.enabled,
+      }),
+    );
   }
   // bash auto-background (§2.6/R6): the same-name `bash` override and its
   // `bash_job` management tool exist only when the feature is on — off means
@@ -247,6 +267,8 @@ export default function activate(pi: ExtensionAPI): void {
     spawn: forwardSpawn(holder),
     // message_agent reply hint only when fabric is on (subagents own the tool then)
     fabricEnabled: () => holder.current?.fabric != null,
+    // X6b: surface the user's raw @ message in the fleet widget under the target run
+    noteMention: (runId, message) => holder.current?.mentionNotes.set(runId, message),
   });
 
   pi.on("session_start", async (_event, ctx) => {

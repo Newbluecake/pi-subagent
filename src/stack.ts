@@ -1,5 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { resolveReserveTokens } from "./compact-hint/pi-settings.js";
+import {
+  COMPACT_HINT_COOLDOWN_MS,
+  COMPACT_HINT_CUSTOM_TYPE,
+  buildCompactHintText,
+  effectiveThresholdPercent,
+  maxThresholdPercent,
+} from "./compact-hint/threshold.js";
 import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -26,6 +34,7 @@ import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-st
 import { detectPiCapabilities } from "./adapters/pi-compat.js";
 import { createDeliveryEngine } from "./delivery/engine.js";
 import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
+import { RESUME_TEXT } from "./tools/compact-tool.js";
 import { createFabricRouter } from "./fabric/router.js";
 import { createFabricThrottle } from "./fabric/throttle.js";
 import { createFabricTree } from "./fabric/tree.js";
@@ -384,13 +393,30 @@ export interface WorkflowSupport {
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
 }
 
+/** X6b: latest raw user @ message per run (session-scoped), surfaced by the fleet widget. */
+export interface MentionNotes {
+  set(runId: string, message: string): void;
+  get(runId: string): string | undefined;
+}
+
+export interface CompactHintState {
+  thresholdPercent: number;
+  forceAtPercent: number;
+  reserveTokens: number;
+  lastHintAt: number;
+  hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
+}
+
 export interface Stack {
+  compactHint: CompactHintState;
   spawn: SpawnService;
   query: QueryService;
   orphans: OrphanRegistry;
   notifier: Notifier;
   contextReceipt: ContextReceiptTracker;
   mention: MentionRegistry;
+  /** X6b: latest raw user @ message per run, shown in the fleet widget under the run. */
+  mentionNotes: MentionNotes;
   scheduler: Scheduler;
   rpc: RPCServer;
   workflow: WorkflowSupport;
@@ -417,6 +443,111 @@ export interface Stack {
  * forwarding path (customType literal, event shape) — index.ts stays
  * assembly-only (I7) and just registers this once per activate().
  */
+export function createCompactHintHook(
+  holder: { current?: Stack },
+  deps: {
+    sendMessage: (
+      message: { customType: string; content: string; display: false; details: unknown },
+      options: { triggerTurn: false },
+    ) => void;
+    now?: () => number;
+    sendUserMessage?: (text: string) => void;
+  },
+): (event: unknown, ctx: ExtensionContext) => void {
+  const now = deps.now ?? (() => Date.now());
+  let forcing = false;
+  let lastForcedAt = 0;
+  return (_event, ctx) => {
+    if (ctx.mode === "print" || ctx.mode === "json") return;
+    const state = holder.current?.compactHint;
+    if (!state || (state.thresholdPercent <= 0 && state.forceAtPercent <= 0)) return;
+    const usage = ctx.getContextUsage();
+    const percent = usage?.percent;
+    const debug = process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1";
+    if (debug)
+      console.warn(
+        `[pi-subagent] compact-hint usage=${JSON.stringify(usage)} hintedAt=${JSON.stringify(state.hintedAt)}`,
+      );
+    if (!usage || percent == null) {
+      state.hintedAt = undefined;
+      return;
+    }
+    const effective = effectiveThresholdPercent(state.thresholdPercent, usage.contextWindow, state.reserveTokens);
+    const effectiveForce = Math.min(
+      state.forceAtPercent,
+      maxThresholdPercent(usage.contextWindow, state.reserveTokens),
+    );
+    if (effectiveForce > 0 && percent >= effectiveForce) {
+      const timestamp = now();
+      if (forcing || (lastForcedAt > 0 && timestamp - lastForcedAt < COMPACT_HINT_COOLDOWN_MS)) {
+        if (debug) console.warn(`[pi-subagent] compact-hint force skipped: ${forcing ? "in-flight" : "cooldown"}`);
+        return;
+      }
+      forcing = true;
+      lastForcedAt = timestamp;
+      if (debug)
+        console.warn(`[pi-subagent] compact-hint force triggered percent=${percent} effective=${effectiveForce}`);
+      if (ctx.hasUI) {
+        try {
+          ctx.ui.notify(`Context ${Math.round(percent)}% ≥ ${effectiveForce}% — forcing compaction`, "warning");
+        } catch {}
+      }
+      try {
+        ctx.compact({
+          onComplete: () => {
+            forcing = false;
+            try {
+              deps.sendUserMessage?.(RESUME_TEXT);
+            } catch {}
+          },
+          onError: (error) => {
+            forcing = false;
+            if (debug) console.warn(`[pi-subagent] compact-hint force failed: ${error.message}`);
+          },
+        });
+      } catch (error) {
+        forcing = false;
+        if (debug) console.warn(`[pi-subagent] compact-hint force failed synchronously: ${String(error)}`);
+      }
+      return;
+    }
+    if (effective <= 0 || percent < effective) {
+      state.hintedAt = undefined;
+      return;
+    }
+    if (state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow) return;
+    const timestamp = now();
+    if (state.lastHintAt > 0 && timestamp - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) return;
+    try {
+      deps.sendMessage(
+        {
+          customType: COMPACT_HINT_CUSTOM_TYPE,
+          content: buildCompactHintText(percent, effective, effectiveForce),
+          display: false,
+          details: { percent, thresholdPercent: effective },
+        },
+        { triggerTurn: false },
+      );
+    } catch (error) {
+      console.warn(`[pi-subagent] compact-hint send failed: ${String(error)}`);
+      return;
+    }
+    state.hintedAt = { effectivePercent: effective, contextWindow: usage.contextWindow };
+    state.lastHintAt = timestamp;
+    if (debug)
+      console.warn(
+        `[pi-subagent] compact-hint sent percent=${percent} effective=${effective} contextWindow=${usage.contextWindow}`,
+      );
+    if (ctx.hasUI) {
+      try {
+        ctx.ui.notify(`Context ${Math.round(percent)}% ≥ ${effective}% — hinted model to compact`, "info");
+      } catch {
+        // UI notification is best effort.
+      }
+    }
+  };
+}
+
 export function createNotificationReceiptHook(holder: {
   current?: Stack;
 }): (event: { message: { role?: string; customType?: string; details?: unknown } }) => void {
@@ -456,6 +587,13 @@ export function buildSessionStack(
   // its H1 onLifecycle must be part of the merged extension points *before*
   // the runner is built — hence a late-bound ref (same pattern as spawnRef).
   const contextReceipt = createContextReceiptTracker();
+  const compactHint: CompactHintState = {
+    thresholdPercent: settings.compact.enabled ? settings.compact.hintThresholdPercent : 0,
+    forceAtPercent: settings.compact.enabled ? settings.compact.forceAtPercent : 0,
+    reserveTokens: resolveReserveTokens(settings.compact.assumedReserveTokens, ctx.cwd),
+    lastHintAt: 0,
+    hintedAt: undefined,
+  };
   const widgetRef: { current?: FleetWidgetController } = {};
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
   const receiptPoints: SubagentExtensionPoints = {
@@ -527,6 +665,15 @@ export function buildSessionStack(
   }
   const spawnRef: { current?: SpawnService } = {};
   const mention = createMentionRegistry();
+  // X6b: session-scoped, capped FIFO — notes are one-line previews, never read back into context.
+  const mentionNotesMap = new Map<string, string>();
+  const mentionNotes: MentionNotes = {
+    set(runId, message) {
+      if (mentionNotesMap.size >= 200) mentionNotesMap.delete(mentionNotesMap.keys().next().value!);
+      mentionNotesMap.set(runId, message);
+    },
+    get: (runId) => mentionNotesMap.get(runId),
+  };
   const mentionRef = { current: mention };
   let query: QueryService;
   const fabric = settings.fabric.enabled
@@ -771,6 +918,7 @@ export function buildSessionStack(
       clock: systemClock,
       idleBudgetMs: settings.budget.idleMs,
       receiptOf: (runId) => contextReceipt.receiptOf(runId),
+      mentionNoteOf: (runId) => mentionNotes.get(runId),
       terminalLingerMs: settings.fleetTerminalLingerMs,
       awaitNotificationMs: settings.fleetAwaitNotificationMs,
       pruneReceipts: (keep, now) =>
@@ -898,12 +1046,14 @@ export function buildSessionStack(
     },
   };
   return {
+    compactHint,
     spawn,
     query,
     contextReceipt,
     orphans: reaper.registry,
     notifier,
     mention,
+    mentionNotes,
     scheduler,
     rpc,
     workflow,

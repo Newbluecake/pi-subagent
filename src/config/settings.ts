@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
+import { DEFAULT_FORCE_THRESHOLD_PERCENT, DEFAULT_HINT_THRESHOLD_PERCENT } from "../compact-hint/threshold.js";
 
 /**
  * CC3 (workflow design §3.2/§8.2): forward-declared budget shape for the
@@ -79,6 +80,9 @@ export interface BashJobsSettings {
 
 export interface CompactSettings {
   enabled: boolean;
+  hintThresholdPercent: number;
+  forceAtPercent: number;
+  assumedReserveTokens?: number;
 }
 
 export type CacheTtlMode = "auto" | "on" | "off";
@@ -169,7 +173,11 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     drainTimeoutMs: 30_000,
     shutdownPolicy: "keep",
   },
-  compact: { enabled: true },
+  compact: {
+    enabled: true,
+    hintThresholdPercent: DEFAULT_HINT_THRESHOLD_PERCENT,
+    forceAtPercent: DEFAULT_FORCE_THRESHOLD_PERCENT,
+  },
   fabric: {
     enabled: false,
     minIntervalMs: 30_000,
@@ -370,7 +378,31 @@ export function parseCompactSettings(input: unknown): CompactSettings {
   const defaults = DEFAULT_SETTINGS.compact;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const value = input as Record<string, unknown>;
-  return { enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled };
+  const threshold = value.hintThresholdPercent;
+  const hintThresholdPercent =
+    typeof threshold === "number" && Number.isFinite(threshold) && threshold >= 1 && threshold <= 100
+      ? Math.floor(threshold)
+      : threshold === 0
+        ? 0
+        : defaults.hintThresholdPercent;
+  const force = value.forceAtPercent;
+  const forceAtPercent =
+    typeof force === "number" &&
+    Number.isFinite(force) &&
+    force >= 0 &&
+    force <= 100 &&
+    (force === 0 || Math.floor(force) > hintThresholdPercent)
+      ? Math.floor(force)
+      : defaults.forceAtPercent;
+  const reserve = value.assumedReserveTokens;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    hintThresholdPercent,
+    forceAtPercent,
+    ...(typeof reserve === "number" && Number.isFinite(reserve) && reserve > 0
+      ? { assumedReserveTokens: Math.floor(reserve) }
+      : {}),
+  };
 }
 
 /**

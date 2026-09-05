@@ -52,7 +52,7 @@ export interface CompactToolDeps {
   now?: () => number;
 }
 
-const RESUME_TEXT =
+export const RESUME_TEXT =
   "[compact_context] Context compaction completed successfully. " +
   "The earlier conversation has been replaced by the summary above. " +
   "Continue your task based on the summary and the retained recent messages. " +
