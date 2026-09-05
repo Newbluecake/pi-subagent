@@ -326,7 +326,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             createMessageAgentTool({
               router: deps.fabric.router,
               from: spec.runId,
-              generation: () => deps.store.get(spec.runId)?.generation,
+              // Why: read the LIVE generation from RuntimeRunner's in-memory
+              // state, not deps.store — persist_snapshot is terminal-only, so
+              // a mid-run store.get(runId) is always undefined and every
+              // message_agent call failed with "cannot determine generation".
+              generation: () => runtime.getRunState(spec.runId)?.generation,
               ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
             }),
           );

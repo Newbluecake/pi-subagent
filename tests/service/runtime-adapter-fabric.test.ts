@@ -150,3 +150,40 @@ describe("service/runtime-adapter fabric wiring", () => {
     expect(active).toEqual(["custom"]);
   });
 });
+
+describe("message_agent generation probe (regression)", () => {
+  it("resolves the live generation mid-run — persist_snapshot is terminal-only, so the store must NOT be the probe source", async () => {
+    const admitted: Array<{ generation?: unknown }> = [];
+    const router = {
+      admit: (_from: unknown, msg: { generation?: unknown }) => {
+        admitted.push(msg);
+        return { accepted: true };
+      },
+    };
+    let tool: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+    let toolError: unknown;
+    const driver: SessionDriver = {
+      create: async (spec: SessionSpec) => {
+        tool = spec.customTools?.find((t) => (t as { name: string }).name === "message_agent") as never;
+        const handle = makeHandle();
+        // Execute the tool while the run is genuinely in-flight (prompt dispatch),
+        // when the store is guaranteed to hold no snapshot for this run.
+        handle.prompt = async () => {
+          try {
+            await tool!.execute("tc1", { to: "root", kind: "finding", text: "mid-run hello" });
+          } catch (err) {
+            toolError = err;
+          }
+        };
+        return handle;
+      },
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    await runWith(driver, { router });
+    expect(toolError).toBeUndefined();
+    expect(admitted).toHaveLength(1);
+    expect(Number.isInteger(admitted[0]!.generation)).toBe(true);
+    expect(admitted[0]!.generation).toBe(1);
+  });
+});
