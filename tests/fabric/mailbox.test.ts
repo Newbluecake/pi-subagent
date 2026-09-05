@@ -102,6 +102,65 @@ describe("fabric mailbox", () => {
     expect(sends).toBe(1);
     expect(engine.get(rec().key)?.state).toBe("claimed");
   });
+  it("serializes sends to one target and keeps one wake timer for repeated hints", async () => {
+    const resolvers: Array<(v: Verdict) => void> = [];
+    let sends = 0;
+    const { mailbox, engine, clock } = setup(() => {
+      sends++;
+      return new Promise<Verdict>((resolve) => resolvers.push(resolve));
+    });
+    engine.put({ ...rec(), key: "r_ABCDEFGH:root:1:2" as FabricRecord["key"], seq: 2 });
+    mailbox.pump();
+    mailbox.pump();
+    expect(sends).toBe(1);
+    expect(mailbox.inFlightCount).toBe(1);
+    expect(mailbox.pendingRaceTimers).toBe(1);
+    expect(clock.pendingTimers).toBe(2);
+    resolvers[0]!({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sends).toBe(2);
+    expect(mailbox.inFlightCount).toBe(1);
+    mailbox.pump("root");
+    expect(clock.pendingTimers).toBe(1);
+    resolvers[1]!({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(engine.select((r) => r.state === "delivered")).toHaveLength(2);
+  });
+
+  it("isolates claim epochs between mailbox instances", async () => {
+    let resolveA!: (v: Verdict) => void;
+    let resolveB!: (v: Verdict) => void;
+    const first = setup(
+      () =>
+        new Promise<Verdict>((resolve) => {
+          resolveA = resolve;
+        }),
+    );
+    const second = setup(
+      () =>
+        new Promise<Verdict>((resolve) => {
+          resolveB = resolve;
+        }),
+    );
+    first.mailbox.pump();
+    const aToken = first.engine.get(rec().key)?.claimToken;
+    expect(aToken).toContain(first.mailbox.mailboxInstanceId);
+    first.mailbox.dispose();
+    second.mailbox.pump();
+    const bToken = second.engine.get(rec().key)?.claimToken;
+    expect(bToken).toContain(second.mailbox.mailboxInstanceId);
+    resolveA!({ ok: true });
+    await Promise.resolve();
+    expect(second.engine.get(rec().key)?.state).toBe("claimed");
+    resolveB!({ ok: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(second.engine.get(rec().key)?.state).toBe("delivered");
+    expect(aToken).not.toBe(bToken);
+  });
+
   it("turns a hung send into one retryable attempt and clears its timer", async () => {
     let sends = 0;
     const { mailbox, engine, clock } = setup(() => {
@@ -131,6 +190,55 @@ describe("fabric mailbox", () => {
     await Promise.resolve();
     expect(engine.get(progress.key)?.state).toBe("consumed");
   });
+  it("ignores a sender resolve that arrives after timeout", async () => {
+    let resolve!: (v: Verdict) => void;
+    const { mailbox, engine, clock } = setup(
+      () =>
+        new Promise<Verdict>((r) => {
+          resolve = r;
+        }),
+    );
+    mailbox.pump();
+    clock.advance(10);
+    await Promise.resolve();
+    expect(engine.get(rec().key)).toMatchObject({ state: "pending", attempts: 1 });
+    const before = engine.get(rec().key);
+    resolve({ ok: true });
+    await Promise.resolve();
+    expect(engine.get(rec().key)).toEqual(before);
+    expect(engine.get(rec().key)?.deliveredAt).toBeUndefined();
+    expect(mailbox.inFlightCount).toBe(0);
+  });
+
+  it("aggregates gone records by sender and truncates refs", () => {
+    // A direct fixture with two senders and six records exercises the pump's
+    // per-sender grouping and the five-key reference bound.
+    const records = [
+      ...Array.from({ length: 6 }, (_, i) => ({
+        ...rec(),
+        key: `r_ABCDEFGH:r_GONE001:1:${i + 1}` as FabricRecord["key"],
+        to: "r_GONE001" as FabricRecord["to"],
+        seq: i + 1,
+      })),
+      {
+        ...rec(),
+        key: "r_12345678:r_GONE001:1:1" as FabricRecord["key"],
+        from: "r_12345678",
+        to: "r_GONE001" as FabricRecord["to"],
+      },
+    ];
+    const h = setup(() => Promise.resolve({ ok: true }));
+    // The setup helper's tree has the first sender but not the gone target.
+    h.tree.append("root", "r_12345678");
+    h.tree.markRunning("r_12345678");
+    for (const record of records) h.engine.put(record);
+    h.mailbox.pump();
+    const dead = h.engine.select((r) => r.kind === "dead_letter");
+    expect(dead).toHaveLength(2);
+    expect(dead.map((r) => r.ref?.keys.length)).toEqual([5, 1]);
+    expect(dead[0]?.ref?.omittedCount).toBe(1);
+  });
+
   it("drops late verdicts after dispose", async () => {
     let resolve!: (v: Verdict) => void;
     const { mailbox, engine } = setup(
