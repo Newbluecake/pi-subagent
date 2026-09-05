@@ -149,6 +149,7 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
   "fleetWidget": true, // the agent tree above the editor
   "maxNestedDepth": 2, // subagent spawning subagents
   "foregroundAutoBackgroundS": 600, // foreground auto-background threshold; 0 disables
+  "resultMaxChars": 8000, // result text cap; 0 means unlimited, live-effective
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {

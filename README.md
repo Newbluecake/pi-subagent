@@ -143,6 +143,7 @@ queue_wait → resolve_config → session_create → extension_bind
   "fleetWidget": true, // 编辑器上方的 agent tree
   "maxNestedDepth": 2, // 子 agent 再 spawn 子 agent 的深度上限
   "foregroundAutoBackgroundS": 600, // 前台调用自动转后台；0 关闭
+  "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
   "budget": {
