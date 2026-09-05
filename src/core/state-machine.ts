@@ -46,6 +46,9 @@ function accumulateUsage(prev: UsageDelta | undefined, delta: UsageDelta | undef
  */
 export const TOOL_HISTORY_CAP = 30;
 
+/** Maximum persisted dispatch prompt used by agent-tree previews and /agent status. */
+export const TASK_PROMPT_CAP = 4096;
+
 /**
  * Display-only cap for RunDiagnostics.thinkingText (the agent tree's `»`
  * thinking preview). Thinking streams can run to thousands of tokens; only
@@ -437,6 +440,7 @@ export function reduce(
         ...(input.meta?.model === undefined ? {} : { model: input.meta.model }),
         ...(input.meta?.label === undefined ? {} : { label: input.meta.label }),
         ...(input.meta?.agentType === undefined ? {} : { agentType: input.meta.agentType }),
+        ...(input.meta?.taskPrompt === undefined ? {} : { taskPrompt: input.meta.taskPrompt }),
       },
       armedTimers,
     };

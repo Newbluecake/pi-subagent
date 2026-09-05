@@ -228,6 +228,10 @@ export function renderRunDetail(
     .filter(Boolean)
     .join(" · ");
   const lines = [head];
+  if (d.taskPrompt !== undefined) {
+    lines.push("  Task prompt:");
+    lines.push(d.taskPrompt);
+  }
   if (d.toolHistory?.length) {
     lines.push("  Timeline:");
     for (const r of d.toolHistory) {

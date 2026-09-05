@@ -79,10 +79,11 @@ function makeHandle(active: string[] = []): SessionHandle {
 }
 async function runWith(driver: SessionDriver, fabric?: { router: unknown }) {
   const clock = new FakeClock();
+  const store = new MemoryRunStore();
   const runner = createRuntimeRunnerAdapter({
     clock,
     pool: new SingleSlotPool(clock, 1),
-    store: new MemoryRunStore(),
+    store,
     watchdog: new EventWatchdog({ clock, budget, getState: () => undefined, dispatch: () => undefined }),
     reaper: new EscalatingReaper(clock),
     notifier,
@@ -95,7 +96,43 @@ async function runWith(driver: SessionDriver, fabric?: { router: unknown }) {
     clock.advance(1);
   }
   await promise;
+  return store;
 }
+
+describe("service/runtime-adapter prompt diagnostics", () => {
+  it("persists a capped dispatch prompt for fresh and resumed runs", async () => {
+    const driver: SessionDriver = {
+      create: async () => makeHandle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const store = await runWith(driver);
+    expect(store.get("r_CHILD01")?.diag.taskPrompt).toBe("hi");
+
+    const longPrompt = "x".repeat(5000);
+    const clock = new FakeClock();
+    const longStore = new MemoryRunStore();
+    const runner = createRuntimeRunnerAdapter({
+      clock,
+      pool: new SingleSlotPool(clock, 1),
+      store: longStore,
+      watchdog: new EventWatchdog({ clock, budget, getState: () => undefined, dispatch: () => undefined }),
+      reaper: new EscalatingReaper(clock),
+      notifier,
+      driver,
+    });
+    await runner.run({ runId: "r_LONG", type: type(), request: { type: "worker", prompt: longPrompt }, budget });
+    expect(longStore.get("r_LONG")?.diag.taskPrompt).toHaveLength(4096);
+
+    await runner.run({
+      runId: "r_RESUMED",
+      type: type(),
+      request: { type: "worker", prompt: "new resume prompt", resumeFrom: "old-session.json" },
+      budget,
+    });
+    expect(longStore.get("r_RESUMED")?.diag.taskPrompt).toBe("new resume prompt");
+  });
+});
 
 describe("service/runtime-adapter fabric wiring", () => {
   it("injects message_agent only when fabric is enabled", async () => {

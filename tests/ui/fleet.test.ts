@@ -188,6 +188,23 @@ describe("view-model: buildFleetViewModel", () => {
     expect(model.totalCount).toBe(4);
   });
 
+  it("retains matching terminal rows beyond the recent cap and projects a folded prompt", () => {
+    const old = snapshot({
+      runId: "old-terminal",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 1,
+      diag: diag({ taskPrompt: "  inspect\n\tthese   files  " }),
+    });
+    const model = buildFleetViewModel([old], {
+      ...opts,
+      recentTerminal: 0,
+      retainTerminal: () => true,
+    });
+    expect(model.rows).toHaveLength(1);
+    expect(model.rows[0]!.taskPreview).toBe("inspect these files");
+  });
+
   it("carries tool / escalation / usage / nested / type into the row", () => {
     const s = snapshot({
       parentRunId: "parent-1",

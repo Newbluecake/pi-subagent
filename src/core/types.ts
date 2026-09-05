@@ -193,6 +193,8 @@ export interface RunDisplayMeta {
   model?: { provider: string; id: string };
   label?: string;
   agentType?: string;
+  /** Truncated dispatch prompt for agent-tree previews and /agent status. */
+  taskPrompt?: string;
 }
 
 export interface UsageDelta {
@@ -274,6 +276,8 @@ export interface RunDiagnostics {
   model?: { provider: string; id: string };
   label?: string;
   agentType?: string;
+  /** Truncated dispatch prompt for agent-tree pending-row previews and /agent status. */
+  taskPrompt?: string;
   /** M-A: bounded ring of observed tool calls (cap: state-machine TOOL_HISTORY_CAP). */
   toolHistory?: ToolCallRecord[];
   /** M-A: lifetime per-tool-name counters — unaffected by toolHistory ring eviction. */

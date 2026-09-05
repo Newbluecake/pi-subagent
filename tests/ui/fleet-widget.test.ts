@@ -573,6 +573,148 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[0]).toContain(`+${12 - WIDGET_MAX_ROWS} more`);
   });
 
+  it("pending terminal notifications stay beyond old linger and show a folded prompt", () => {
+    const done = snapshot({
+      status: "completed",
+      phase: "settled",
+      updatedAt: 0,
+      diag: diag({ taskPrompt: "do\n  this   carefully" }),
+    });
+    const model = buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 });
+    const lines = buildFleetWidgetLines(model, {
+      terminalLingerMs: 5_000,
+      awaitNotificationMs: 600_000,
+      receiptOf: () => ({ kind: "pending", at: 0 }),
+    });
+    expect(lines?.join("\n")).toContain("· 待处理");
+    expect(lines?.join("\n")).toContain("╰ » do this carefully");
+  });
+
+  it("pending terminal notifications disappear after the await hard bound", () => {
+    const done = snapshot({ status: "completed", phase: "settled", updatedAt: 0 });
+    const model = buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 });
+    expect(
+      buildFleetWidgetLines(model, {
+        awaitNotificationMs: 1_000,
+        receiptOf: () => ({ kind: "pending", at: 0 }),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("entered receipts linger from enteredAt, not from settle time", () => {
+    const done = snapshot({ status: "completed", phase: "settled", updatedAt: 0 }); // settled 10s ago
+    const model = buildFleetViewModel([done], { ...OPTS, recentTerminal: 1 });
+    // Entered 1s ago → visible even though settledAgoMs (10s) is way past lingerMs.
+    const recent = buildFleetWidgetLines(model, {
+      terminalLingerMs: 5_000,
+      receiptOf: () => ({ kind: "entered", at: NOW - 1_000 }),
+    });
+    expect(recent?.join("\n")).toContain("completed");
+    expect(recent?.join("\n")).not.toContain("待处理");
+    // Entered 9s ago → past linger from enteredAt → gone.
+    expect(
+      buildFleetWidgetLines(model, {
+        terminalLingerMs: 5_000,
+        receiptOf: () => ({ kind: "entered", at: NOW - 9_000 }),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("undeliverable receipts fall back to the old settledAgoMs linger semantics", () => {
+    const fresh = snapshot({ status: "failed", phase: "settled", updatedAt: NOW - 100 });
+    const old = snapshot({ runId: "old-00000", status: "failed", phase: "settled", updatedAt: NOW - 9_000 });
+    const receiptOf = () => ({ kind: "undeliverable" as const });
+    const shown = buildFleetWidgetLines(buildFleetViewModel([fresh], { ...OPTS, recentTerminal: 1 }), {
+      terminalLingerMs: 5_000,
+      receiptOf,
+    });
+    expect(shown?.join("\n")).toContain("failed");
+    expect(
+      buildFleetWidgetLines(buildFleetViewModel([old], { ...OPTS, recentTerminal: 1 }), {
+        terminalLingerMs: 5_000,
+        receiptOf,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("awaiting rows win budget over lingering rows; hidden awaiting still counted in header", () => {
+    const active = snapshot({ runId: "live-0000", diag: diag({ lastEventAt: 9_900 }) });
+    const awaiting = snapshot({ runId: "wait-0000", status: "completed", phase: "settled", updatedAt: 9_000 });
+    const lingering = snapshot({
+      runId: "ling-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_999,
+      diag: diag({ label: "旧完成" }),
+    });
+    const model = buildFleetViewModel([active, awaiting, lingering], { ...OPTS, recentTerminal: 3 });
+    const lines = buildFleetWidgetLines(model, {
+      maxRows: 2,
+      receiptOf: (runId) => (runId === "wait-0000" ? { kind: "pending", at: 9_000 } : { kind: "untracked" }),
+    })!;
+    expect(lines.join("\n")).toContain("· 待处理");
+    expect(lines.join("\n")).not.toContain("旧完成"); // lingering starved by budget
+    expect(lines[0]).toContain("1 待处理");
+  });
+
+  it("header +N more counts awaiting rows hidden by the budget (no double-count)", () => {
+    const runs = [
+      ...[0, 1].map((i) => snapshot({ runId: `live-${i}000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) })),
+      ...[0, 1].map((i) =>
+        snapshot({ runId: `wait-${i}000`, status: "completed" as const, phase: "settled" as const, updatedAt: 9_000 }),
+      ),
+    ];
+    const model = buildFleetViewModel(runs, { ...OPTS, recentTerminal: 3 });
+    const lines = buildFleetWidgetLines(model, {
+      maxRows: 3,
+      receiptOf: (runId) =>
+        runId.startsWith("wait-") ? { kind: "pending" as const, at: 9_000 } : { kind: "untracked" as const },
+    })!;
+    expect(lines[0]).toContain("2 待处理"); // total awaiting, shown or not
+    expect(lines[0]).toContain("+1 more"); // 1 awaiting main hidden behind the budget
+    expect(lines.filter((l) => l.includes("· 待处理"))).toHaveLength(1);
+  });
+
+  it("preview lines never render without their awaiting main row", () => {
+    const actives = Array.from({ length: 6 }, (_, i) =>
+      snapshot({ runId: `live-${i}000`, diag: diag({ createdAt: i, lastEventAt: 9_900 }) }),
+    );
+    const awaiting = snapshot({
+      runId: "wait-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ taskPrompt: "some task prompt" }),
+    });
+    const model = buildFleetViewModel([...actives, awaiting], { ...OPTS, recentTerminal: 3 });
+    const lines = buildFleetWidgetLines(model, {
+      maxRows: 6,
+      receiptOf: (runId) =>
+        runId === "wait-0000" ? { kind: "pending" as const, at: 9_000 } : { kind: "untracked" as const },
+    })!;
+    expect(lines.join("\n")).not.toContain("· 待处理"); // main row hidden by budget
+    expect(lines.join("\n")).not.toContain("╰ »"); // preview must not orphan
+    expect(lines[0]).toContain("1 待处理");
+    expect(lines[0]).toContain("+1 more");
+  });
+
+  it("elastic expansion wraps the newest awaiting preview to at most 4 lines", () => {
+    const long = "word ".repeat(80).trim(); // wraps to many lines at width 40
+    const awaiting = snapshot({
+      runId: "wait-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ taskPrompt: long }),
+    });
+    const model = buildFleetViewModel([awaiting], { ...OPTS, recentTerminal: 1 });
+    const lines = buildFleetWidgetLines(model, {
+      width: 40,
+      receiptOf: () => ({ kind: "pending" as const, at: 9_000 }),
+    })!;
+    expect(lines.filter((l) => l.includes("╰ »"))).toHaveLength(4); // capped, not 1 and not 5+
+  });
+
   it("M6: just-finished runs linger dimmed (✓/✗) within terminalLingerMs, then vanish", () => {
     const active = snapshot({ runId: "live-0000", diag: diag({ lastEventAt: 9_900 }) });
     const done = snapshot({

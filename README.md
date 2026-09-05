@@ -72,7 +72,7 @@ can_message: [parent, child, ancestor]
 - 头部:bullet 取全场最严重的高亮色,活跃数、实时花费、`+N more` 溢出。
 - 每个 run 一行主行:标签、`#id`、类型、`provider/id` 模型、人性化相位(`🧠思考` / `🔧工具` / `♻重试2/3` / `⏸排队` / `🗜压缩` / `⏹停止中`)、耗时、费用。嵌套 run 缩进在父级下方(`↳`);进行中的 workflow 渲染为 `⚙` 组头。
 - run 处于工具调用或思考中时,追加一行**活动行**:近期工具轨迹(`bash×3→read`)+ 高亮的在途 `▸工具` 及参数预览,或模型流式文本的一行 `»` 尾部。工具调用 vs 模型请求的状态始终准确——包括并行工具调用。
-- 高亮:`!` 黄 = 空闲超过 idle 预算一半(可疑地安静);`✗` 红 = 停止中或超过总 deadline。刚结束的 run 暗色驻留几秒。
+- 高亮:`!` 黄 = 空闲超过 idle 预算一半(可疑地安静);`✗` 红 = 停止中或超过总 deadline。终态 run 分三段处理:通知待进入上下文时保留待处理行并预览派单 prompt;通知进入上下文后按短暂驻留时间淡出;通知发不出去时最多保留 10 分钟硬兜底后淡出。
 
 ## 命令
 
@@ -179,6 +179,8 @@ queue_wait → resolve_config → session_create → extension_bind
 {
   "concurrencyLimit": 6,
   "fleetWidget": true, // 编辑器上方的 agent tree
+  "fleetTerminalLingerS": 5, // 通知进入上下文后的终态行驻留秒数
+  "fleetAwaitNotificationS": 600, // 通知待进入上下文的硬兜底秒数
   "maxNestedDepth": 2, // 子 agent 再 spawn 子 agent 的深度上限
   "foregroundAutoBackgroundS": 600, // 前台调用自动转后台；0 关闭
   "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效

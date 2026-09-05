@@ -79,11 +79,15 @@ export interface FleetRow {
   contextUsage: ContextUsageInfo | undefined;
   /** Run was moved from foreground to background by the timeout threshold. */
   autoBackgrounded?: boolean;
+  /** Prompt preview for a terminal run awaiting notification context entry. */
+  taskPreview?: string;
   /** X3 nested run (spawned with parentRunId). */
   nested: boolean;
   terminal: boolean;
   /** M6: for terminal rows, how long ago the run settled (now - updatedAt); undefined for active rows. */
   settledAgoMs: Millis | undefined;
+  /** Settlement timestamp, used to calculate receipt-based linger. */
+  settledAt: Millis | undefined;
   highlight: FleetHighlight;
 }
 
@@ -106,6 +110,8 @@ export interface FleetViewOptions {
   recentTerminal?: number;
   /** Optional runId → agent-type resolver (RunSnapshot doesn't carry the type; see file header). */
   typeOf?: (runId: RunId) => string | undefined;
+  /** Retain matching terminal snapshots beyond the recentTerminal cap. */
+  retainTerminal?: (snapshot: RunSnapshot) => boolean;
 }
 
 /** M12: canonical display form for a model reference — always `provider/id` (the id alone is ambiguous: the same model is often served by several providers with different pricing/quota). */
@@ -359,9 +365,13 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     usage: snapshot.diag.usage,
     contextUsage: snapshot.diag.contextUsage,
     autoBackgrounded: snapshot.diag.autoBackgroundedAt !== undefined,
+    ...(snapshot.diag.taskPrompt?.replace(/\s+/g, " ").trim()
+      ? { taskPreview: snapshot.diag.taskPrompt.replace(/\s+/g, " ").trim() }
+      : {}),
     nested: snapshot.parentRunId !== undefined,
     terminal,
     settledAgoMs: terminal ? Math.max(0, opts.now - snapshot.updatedAt) : undefined,
+    settledAt: terminal ? snapshot.updatedAt : undefined,
     highlight: highlightOf(snapshot, opts),
   };
 }
@@ -376,10 +386,12 @@ export function buildFleetViewModel(snapshots: readonly RunSnapshot[], opts: Fle
     .map((s) => toRow(s, opts))
     .sort((a, b) => SEVERITY[a.highlight] - SEVERITY[b.highlight] || b.elapsedMs - a.elapsedMs)
     .slice(0, Math.max(0, maxActiveRows));
-  const terminalRows = snapshots
+  const terminalSnapshots = snapshots
     .filter((s) => isTerminalStatus(s.status))
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, Math.max(0, recentTerminal))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const retained = new Set(terminalSnapshots.filter((s) => opts.retainTerminal?.(s) === true).map((s) => s.runId));
+  const terminalRows = terminalSnapshots
+    .filter((s, index) => index < Math.max(0, recentTerminal) || retained.has(s.runId))
     .map((s) => toRow(s, opts));
   return {
     rows: [...activeRows, ...terminalRows],

@@ -72,7 +72,7 @@ The design and invariants are documented in [`docs/dev/subagent-push/subagent-pu
 - Header: bullet colored by the worst highlight, active count, live spend, `+N more` overflow.
 - One main row per run: label, `#id`, type, `provider/id` model, human-friendly phase (`🧠思考` / `🔧工具` / `♻重试2/3` / `⏸排队` / `🗜压缩` / `⏹停止中`), elapsed, cost. Nested runs indent under their parent (`↳`); in-flight workflows render as `⚙` group headers.
 - A second **activity line** when the run is mid-tool or mid-thought: the recent tool trail (`bash×3→read`) with the in-flight `▸tool` + args preview highlighted, or a one-line `»` tail of the model's streaming text. Tool-call vs model-request state is always accurate, including parallel tool calls.
-- Highlights: `!` yellow = idle past half the idle budget (suspiciously quiet); `✗` red = stopping or past the total deadline. Just-finished runs linger dimmed for a few seconds.
+- Highlights: `!` yellow = idle past half the idle budget (suspiciously quiet); `✗` red = stopping or past the total deadline. Terminal runs follow three stages: while a notification awaits context entry, the muted row remains with a task-prompt preview; after it enters context, the row fades after the short linger; if delivery cannot complete, a hard 10-minute fallback prevents it from remaining forever.
 
 ## Commands
 
@@ -185,6 +185,8 @@ User settings: `~/.pi/agent/pi-subagent.json` (missing/malformed → defaults, n
 {
   "concurrencyLimit": 6,
   "fleetWidget": true, // the agent tree above the editor
+  "fleetTerminalLingerS": 5, // terminal-row linger after context entry
+  "fleetAwaitNotificationS": 600, // hard fallback while notification awaits context entry
   "maxNestedDepth": 2, // subagent spawning subagents
   "foregroundAutoBackgroundS": 600, // foreground auto-background threshold; 0 disables
   "resultMaxChars": 8000, // result text cap; 0 means unlimited, live-effective

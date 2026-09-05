@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createStatusCommand, renderStatus } from "../../src/commands/status.js";
+import { createStatusCommand, renderRunDetail, renderStatus } from "../../src/commands/status.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import type { RunSnapshot } from "../../src/core/types.js";
@@ -192,6 +192,15 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
     twin.runId = "223b8f1e-aaaa-bbbb-cccc-111111111111";
     const q2 = deps([a, twin]).query as never;
     expect(renderRunDetail(q2, "223b8f1e")).toContain("Ambiguous");
+  });
+
+  it("renders the complete persisted task prompt and omits it for legacy runs", () => {
+    const withPrompt = detailed();
+    withPrompt.diag.taskPrompt = "Inspect the repository, then implement the fix.\nKeep the change scoped.";
+    const text = renderRunDetail(deps([withPrompt]).query as never, "223b8f1e");
+    expect(text).toContain("Task prompt:");
+    expect(text).toContain("Inspect the repository, then implement the fix.\nKeep the change scoped.");
+    expect(renderRunDetail(deps([detailed()]).query as never, "223b8f1e")).not.toContain("Task prompt:");
   });
 
   it("shows the error and timeout reason for failed runs", async () => {

@@ -16,7 +16,7 @@ import {
 } from "./config/settings.js";
 import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
-import { buildSessionStack, bashJobsEnabled, type Stack } from "./stack.js";
+import { buildSessionStack, bashJobsEnabled, createNotificationReceiptHook, type Stack } from "./stack.js";
 import { installMentionInput } from "./mention/mention.js";
 import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
@@ -110,6 +110,10 @@ export default function activate(pi: ExtensionAPI): void {
   const caps = detectPiCapabilities(pi);
   const compat = assertCompatible(caps);
   const holder: { current?: Stack } = {};
+  // Registered once per activate() (never inside buildSessionStack, which is
+  // rebuilt per session_start and would accumulate duplicate handlers).
+  // Handler lives in stack.ts so integration tests cover the real filter path.
+  pi.on("message_start", createNotificationReceiptHook(holder));
 
   if (!compat.ok) {
     pi.registerTool({

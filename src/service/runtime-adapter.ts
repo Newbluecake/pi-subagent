@@ -16,6 +16,7 @@ import type {
 import { deliveryKey } from "../core/delivery-key.js";
 import type { Notifier } from "../delivery/notifier.js";
 import { mergeExtensionPoints } from "../extensions/registry.js";
+import { TASK_PROMPT_CAP } from "../core/state-machine.js";
 import {
   BasicEffectInterpreter,
   RuntimeRunner,
@@ -444,6 +445,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             ...(spec.model === undefined ? {} : { model: spec.model }),
             ...(spec.request.label === undefined ? {} : { label: spec.request.label }),
             agentType: spec.type.name,
+            taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
           },
         };
         let outcome = await runtime.run(req, spec.budget);

@@ -1,6 +1,7 @@
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
+import type { ContextReceipt } from "../delivery/context-receipt.js";
 import type { JobRecord, JobStatus } from "../bash/types.js";
 import { isTerminalJobStatus, previewCommand } from "../bash/types.js";
 import type { QueryService } from "../service/query-service.js";
@@ -119,6 +120,10 @@ export interface FleetWidgetRenderOptions {
   maxRows?: number;
   /** M6: keep just-finished runs visible (dimmed, ✓/✗) for this long. Default 5000ms; 0 disables. */
   terminalLingerMs?: number;
+  /** Context receipt lookup for terminal notification visibility. */
+  receiptOf?: (runId: string) => ContextReceipt;
+  /** Hard upper bound for pending notification rows. Default 10 minutes. */
+  awaitNotificationMs?: number;
   /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. */
   workflows?: readonly WorkflowGroupInput[];
   /** D1/M3: background bash jobs share the main-row budget with runs. */
@@ -321,6 +326,8 @@ export function buildFleetWidgetLines(
   const width = Math.max(20, opts.width ?? 120);
   const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
   const lingerMs = opts.terminalLingerMs ?? 5000;
+  const awaitMs = opts.awaitNotificationMs ?? 600_000;
+  const receiptOf = opts.receiptOf ?? (() => ({ kind: "untracked" as const }));
   const workflows = (opts.workflows ?? []).slice(0, 3);
   const bashJobs = opts.bashJobs ?? [];
   const activeRows = model.rows.filter((r) => !r.terminal);
@@ -331,10 +338,30 @@ export function buildFleetWidgetLines(
   const visibleBash = [...activeBash, ...recentBash];
   // M6: just-finished runs linger dimmed for a few seconds so a completion is
   // perceivable instead of vanishing between two ticks.
-  const recentTerminal = model.rows.filter(
-    (r) => r.terminal && r.settledAgoMs !== undefined && r.settledAgoMs <= lingerMs,
-  );
-  if (model.activeCount === 0 && recentTerminal.length === 0 && workflows.length === 0 && visibleBash.length === 0)
+  const terminalRows = model.rows.filter((r) => r.terminal);
+  const awaitingTerminal = terminalRows.filter((r) => {
+    const receipt = receiptOf(r.runId);
+    return receipt.kind === "pending" && (r.settledAgoMs ?? Infinity) <= awaitMs;
+  });
+  const recentTerminal = terminalRows.filter((r) => {
+    const receipt = receiptOf(r.runId);
+    if (receipt.kind === "pending") return false;
+    const age =
+      receipt.kind === "entered" &&
+      receipt.at !== undefined &&
+      r.settledAt !== undefined &&
+      r.settledAgoMs !== undefined
+        ? Math.max(0, r.settledAt + r.settledAgoMs - receipt.at)
+        : r.settledAgoMs;
+    return age !== undefined && age <= lingerMs;
+  });
+  if (
+    model.activeCount === 0 &&
+    awaitingTerminal.length === 0 &&
+    recentTerminal.length === 0 &&
+    workflows.length === 0 &&
+    visibleBash.length === 0
+  )
     return undefined;
   const worst = activeRows[0]?.highlight ?? "none";
   // M9: workflow children (parentRunId === workflowId) are claimed by their
@@ -352,7 +379,8 @@ export function buildFleetWidgetLines(
   const activeCost = activeRows.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
   // Ordered entries: workflow ⚙ group headers interleaved with their claimed
   // runs, then the general run forest. ⚙ headers don't consume the line budget.
-  type Entry = { header: string } | { row: FleetRow; indent: string } | { bash: BashJobViewInput };
+  type Entry =
+    { header: string } | { row: FleetRow; indent: string } | { bash: BashJobViewInput } | { awaiting: FleetRow };
   const entries: Entry[] = [];
   for (const wf of workflows) {
     entries.push({ header: color("header", `⚙ ${wf.name} · ${wf.phase ?? "-"} · ${formatDuration(wf.elapsedMs)}`) });
@@ -366,6 +394,9 @@ export function buildFleetWidgetLines(
   // lets bash be hidden only after the same maxRows worth of runs, preserving
   // one simple budget and truthful "+N more" accounting.
   for (const bash of activeBash) entries.push({ bash });
+  // Awaiting terminal identities are allocated with active identities so their
+  // prompt context cannot be separated from the row it describes.
+  for (const row of awaitingTerminal) entries.push({ awaiting: row });
   // Fair line budget: deal every run its main row first, then hand the
   // leftover lines to activity continuations in display order. (Greedy
   // 2-lines-per-run allocation starved the LAST visible run of its tool
@@ -378,10 +409,21 @@ export function buildFleetWidgetLines(
     const rendered =
       "bash" in entry
         ? { main: widgetBashRowMain(entry.bash, color), activity: widgetBashRowActivity(entry.bash, color) }
-        : (() => {
-            const [main, activity] = renderRunLines(entry.row, entry.indent, color, width);
-            return { main: main!, activity };
-          })();
+        : "awaiting" in entry
+          ? {
+              main: color(
+                "muted",
+                `${entry.awaiting.status === "completed" ? "✓" : "✗"} ${widgetTerminalDetail(entry.awaiting, width)} · 待处理`,
+              ),
+              activity:
+                entry.awaiting.taskPreview === undefined
+                  ? undefined
+                  : color("muted", `╰ » ${truncateToWidth(entry.awaiting.taskPreview, Math.max(1, width - 4))}`),
+            }
+          : (() => {
+              const [main, activity] = renderRunLines(entry.row, entry.indent, color, width);
+              return { main: main!, activity };
+            })();
     budget -= 1;
     shownRuns++;
     return { ...rendered, show: false };
@@ -394,26 +436,50 @@ export function buildFleetWidgetLines(
     }
   }
   const lines: string[] = [];
-  for (const r of rendered) {
+  const latestAwaiting = awaitingTerminal[0]?.runId;
+  let expandedAwaiting = false;
+  for (let i = 0; i < rendered.length; i++) {
+    const r = rendered[i];
     if (!r) continue;
     lines.push(r.main);
-    if (r.show && r.activity !== undefined) lines.push(r.activity);
+    if (r.show && r.activity !== undefined) {
+      const entry = entries[i];
+      if (
+        !expandedAwaiting &&
+        entry !== undefined &&
+        "awaiting" in entry &&
+        entry.awaiting.runId === latestAwaiting &&
+        entry.awaiting.taskPreview
+      ) {
+        const wrapped = wrapTextWithAnsi(entry.awaiting.taskPreview, Math.max(1, width - 4)).slice(
+          0,
+          Math.min(4, budget + 1),
+        );
+        lines.push(...wrapped.map((line) => color("muted", `╰ » ${line}`)));
+        budget -= Math.max(0, wrapped.length - 1);
+        expandedAwaiting = true;
+      } else {
+        lines.push(r.activity);
+      }
+    }
   }
   // M4: only active identities contribute to hidden; workflow headers and
-  // terminal linger rows are transient and intentionally excluded.
-  const hidden = model.activeCount + activeBash.length - shownRuns;
+  // terminal linger rows are transient and intentionally excluded. Awaiting
+  // mains live in the same shownRuns pool, so they join the identity total
+  // rather than being adjusted for separately (which would double-count them).
+  const hidden = model.activeCount + activeBash.length + awaitingTerminal.length - shownRuns;
   const header =
     `${color(worst, "●")} ${model.activeCount} active Agents` +
     (activeBash.length > 0 ? ` · ${activeBash.length} bash` : "") +
     (activeCost > 0 ? ` · ${formatWidgetCost(activeCost)}` : "") +
+    (awaitingTerminal.length > 0 ? ` · ${awaitingTerminal.length} 待处理` : "") +
     (hidden > 0 ? ` · +${hidden} more` : "");
   lines.unshift(
-    model.activeCount === 0 && activeBash.length > 0
+    model.activeCount === 0 && activeBash.length > 0 && awaitingTerminal.length === 0
       ? `${color("none", "●")} ${activeBash.length} background bash${hidden > 0 ? ` · +${hidden} more` : ""}`
       : header,
   );
-  // M6/F1: linger rows use the same remaining line budget as active rows;
-  // retaining completion visibility must never grow the widget beyond maxRows.
+  // M6/F1: lingering rows are lowest priority and use only the remaining budget.
   for (const row of recentTerminal) {
     if (budget <= 0) break;
     const mark = row.status === "completed" ? "✓" : "✗";
@@ -470,6 +536,11 @@ export interface FleetWidgetDeps {
   ) => Promise<{ text: string | undefined; logBytes: number } | undefined>;
   typeOf?: (runId: RunId) => string | undefined;
   color?: FleetColorize;
+  /** Receipt lookup for terminal notification visibility. */
+  receiptOf?: (runId: string) => ContextReceipt;
+  terminalLingerMs?: number;
+  awaitNotificationMs?: number;
+  pruneReceipts?: (keepRunIds: ReadonlySet<string>, now: number) => void;
 }
 
 export class FleetWidgetController {
@@ -561,10 +632,24 @@ export class FleetWidgetController {
       maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
       ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
       ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
+      ...(this.deps.receiptOf
+        ? {
+            retainTerminal: (snapshot: import("../core/types.js").RunSnapshot) => {
+              const receipt = this.deps.receiptOf!(snapshot.runId);
+              return (
+                receipt.kind === "pending" && now - snapshot.updatedAt <= (this.deps.awaitNotificationMs ?? 600_000)
+              );
+            },
+          }
+        : {}),
     });
+    this.deps.pruneReceipts?.(new Set(this.deps.query.list().map((run) => run.runId)), now);
     const lines = buildFleetWidgetLines(model, {
       width: this.widgetWidth(),
       ...(this.deps.maxRows !== undefined ? { maxRows: this.deps.maxRows } : {}),
+      ...(this.deps.terminalLingerMs !== undefined ? { terminalLingerMs: this.deps.terminalLingerMs } : {}),
+      ...(this.deps.awaitNotificationMs !== undefined ? { awaitNotificationMs: this.deps.awaitNotificationMs } : {}),
+      ...(this.deps.receiptOf ? { receiptOf: this.deps.receiptOf } : {}),
       ...(this.deps.color ? { color: this.deps.color } : {}),
       ...(this.deps.workflows
         ? {

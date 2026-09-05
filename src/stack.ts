@@ -35,7 +35,18 @@ import type { AgentTypeRegistry } from "./config/agent-types.js";
 import { resolveModelHint } from "./config/model-hint.js";
 import type { AgentSettings } from "./config/settings.js";
 import type { Runner } from "./service/ports.js";
-import { createNotifier, deliveryKey, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
+import {
+  createNotifier,
+  deliveryKey,
+  type Notifier,
+  type PersistedDelivery,
+  type DeliveryState,
+} from "./delivery/notifier.js";
+import {
+  createContextReceiptTracker,
+  runIdsFromNotificationDetails,
+  type ContextReceiptTracker,
+} from "./delivery/context-receipt.js";
 import { createCoalescer, isCoalescible, type Coalescer } from "./delivery/coalescer.js";
 import { formatDigest, formatSingle } from "./delivery/format.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
@@ -378,6 +389,7 @@ export interface Stack {
   query: QueryService;
   orphans: OrphanRegistry;
   notifier: Notifier;
+  contextReceipt: ContextReceiptTracker;
   mention: MentionRegistry;
   scheduler: Scheduler;
   rpc: RPCServer;
@@ -399,6 +411,22 @@ export interface Stack {
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
  *  assembly-only, D7). Rebuilt on every session_start: ctx.sessionManager is
  *  only available there. */
+/**
+ * Production `message_start` → context-receipt hook. Lives here instead of
+ * inline in index.ts so integration tests exercise the real filter +
+ * forwarding path (customType literal, event shape) — index.ts stays
+ * assembly-only (I7) and just registers this once per activate().
+ */
+export function createNotificationReceiptHook(holder: {
+  current?: Stack;
+}): (event: { message: { role?: string; customType?: string; details?: unknown } }) => void {
+  return (event) => {
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== "subagent:notification") return;
+    holder.current?.contextReceipt.noteEntered(runIdsFromNotificationDetails(message.details), Date.now());
+  };
+}
+
 export function buildSessionStack(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -427,19 +455,36 @@ export function buildSessionStack(
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
   // the runner is built — hence a late-bound ref (same pattern as spawnRef).
+  const contextReceipt = createContextReceiptTracker();
   const widgetRef: { current?: FleetWidgetController } = {};
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };
+  const receiptPoints: SubagentExtensionPoints = {
+    onDelivery: (payload, state) =>
+      contextReceipt.noteDelivery(payload.runId, payload.generation, state as DeliveryState, systemClock.now()),
+  };
   // M-E: real-time cost broadcast — poked on run start (onSnapshot below) and
   // every lifecycle event so the final terminal frame is always emitted.
   const usageRef: { current?: UsageBroadcaster } = {};
   const usagePoints: SubagentExtensionPoints = { onLifecycle: () => usageRef.current?.poke() };
-  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints, usagePoints]);
+  const merged = mergeExtensionPoints([...mergedExtensions, widgetPoints, usagePoints, receiptPoints]);
 
   // G5a degradation: ctx.sessionManager is part of pi's session ctx contract
   // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
   // stores + WARN instead of throwing inside the session_start handler.
   const readBack = probeReadBackEntries(ctx);
   const prefetchedEntries = readBack ? ctx.sessionManager.getEntries() : [];
+  // Rehydrate only notifications on the current branch. A missing read-back probe
+  // deliberately skips seeding because the session history cannot be trusted then.
+  if (readBack) {
+    const branch = (ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [];
+    for (const entry of branch) {
+      const candidate = entry as { type?: string; customType?: string; details?: unknown };
+      if (candidate.type === "custom_message" && candidate.customType === "subagent:notification") {
+        const at = Date.parse((entry as { timestamp?: string }).timestamp ?? "");
+        if (Number.isFinite(at)) contextReceipt.noteEntered(runIdsFromNotificationDetails(candidate.details), at);
+      }
+    }
+  }
   if (!readBack)
     console.warn(
       "[pi-subagent] ctx.sessionManager.getEntries unavailable; run-log/outbox degrade to in-memory (G5a read-back verification off).",
@@ -725,6 +770,14 @@ export function buildSessionStack(
       query,
       clock: systemClock,
       idleBudgetMs: settings.budget.idleMs,
+      receiptOf: (runId) => contextReceipt.receiptOf(runId),
+      terminalLingerMs: settings.fleetTerminalLingerMs,
+      awaitNotificationMs: settings.fleetAwaitNotificationMs,
+      pruneReceipts: (keep, now) =>
+        contextReceipt.prune(keep, now, {
+          lingerMs: settings.fleetTerminalLingerMs,
+          awaitMs: settings.fleetAwaitNotificationMs,
+        }),
       ...(uiTheme
         ? {
             color: (tone, text) => {
@@ -847,6 +900,7 @@ export function buildSessionStack(
   return {
     spawn,
     query,
+    contextReceipt,
     orphans: reaper.registry,
     notifier,
     mention,

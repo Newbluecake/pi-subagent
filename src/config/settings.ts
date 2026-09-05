@@ -105,6 +105,10 @@ export interface AgentSettings {
   maxNestedDepth: number;
   /** X7b: always-on agent-tree widget pinned above the editor while subagent runs are active. Default true. */
   fleetWidget: boolean;
+  /** How long entered/undeliverable terminal rows linger in the fleet tree. */
+  fleetTerminalLingerMs: number;
+  /** Hard fallback while a delivered notification awaits context entry. */
+  fleetAwaitNotificationMs: number;
   /** Max chars of a subagent result body returned to callers; 0 = unlimited. */
   resultMaxChars: number;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
@@ -147,6 +151,8 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   worktree: { enabled: false, gitTimeoutMs: 30_000 },
   maxNestedDepth: 3,
   fleetWidget: true,
+  fleetTerminalLingerMs: 5_000,
+  fleetAwaitNotificationMs: 600_000,
   resultMaxChars: 8_000,
   workflow: {
     enabled: false,
@@ -209,6 +215,8 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "reconcileTtlMs",
   "coalesceWindowMs",
   "ackWindowMs",
+  "fleetTerminalLingerMs",
+  "fleetAwaitNotificationMs",
   "worktree.gitTimeoutMs",
   "workflow.replayTtlMs",
   ...Object.keys(DEFAULT_WORKFLOW_BUDGET)
@@ -290,6 +298,18 @@ export function loadSettings(source: unknown): AgentSettings {
         ? Math.floor(value.maxNestedDepth)
         : DEFAULT_SETTINGS.maxNestedDepth,
     fleetWidget: typeof value.fleetWidget === "boolean" ? value.fleetWidget : DEFAULT_SETTINGS.fleetWidget,
+    fleetTerminalLingerMs:
+      typeof value.fleetTerminalLingerMs === "number" &&
+      Number.isFinite(value.fleetTerminalLingerMs) &&
+      value.fleetTerminalLingerMs >= 0
+        ? value.fleetTerminalLingerMs
+        : DEFAULT_SETTINGS.fleetTerminalLingerMs,
+    fleetAwaitNotificationMs:
+      typeof value.fleetAwaitNotificationMs === "number" &&
+      Number.isFinite(value.fleetAwaitNotificationMs) &&
+      value.fleetAwaitNotificationMs >= 0
+        ? value.fleetAwaitNotificationMs
+        : DEFAULT_SETTINGS.fleetAwaitNotificationMs,
     resultMaxChars:
       typeof value.resultMaxChars === "number" && Number.isFinite(value.resultMaxChars) && value.resultMaxChars >= 0
         ? Math.floor(value.resultMaxChars)

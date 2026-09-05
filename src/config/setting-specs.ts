@@ -136,6 +136,14 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   maxNestedDepth: count("maxNestedDepth", 0, "Max nested delegation depth"),
   rememberAgents: bool("rememberAgents", "Remember the agent registry across sessions"),
   fleetWidget: bool("fleetWidget", "Pin the live agent tree above the editor"),
+  fleetTerminalLingerS: seconds("fleetTerminalLingerMs", {
+    hint: "How long entered or undeliverable terminal rows remain visible",
+    description: "Terminal row linger after context entry",
+  }),
+  fleetAwaitNotificationS: seconds("fleetAwaitNotificationMs", {
+    hint: "Hard fallback while a notification awaits context entry; 0 = hide pending rows immediately",
+    description: "Maximum wait for notification context entry",
+  }),
   resultMaxChars: {
     ...count("resultMaxChars", 0, "Max chars of subagent result text returned; 0 = no cap"),
     live: true,
