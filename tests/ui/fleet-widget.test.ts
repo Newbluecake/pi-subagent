@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { FakeClock } from "../../src/core/clock.js";
 import type { LifecycleEvent, RunDiagnostics, RunSnapshot, UsageDelta } from "../../src/core/types.js";
 import type { QueryService } from "../../src/service/query-service.js";
@@ -10,6 +11,7 @@ import {
 } from "../../src/ui/fleet-panel.js";
 import {
   buildFleetWidgetLines,
+  compactPhaseLabel,
   FLEET_WIDGET_KEY,
   FleetWidgetController,
   formatWidgetCost,
@@ -122,7 +124,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const model = buildFleetViewModel([run], { ...OPTS, typeOf: () => "architect" });
     expect(buildFleetWidgetLines(model)).toEqual([
       "● 1 active Agents · $1.05",
-      "  aaaaaaaa architect 🤔思考 8m32s Σ8m32s $1.05",
+      "  aaaaaaaa architect 🤔 8m32s $1.05 Σ8m32s",
     ]);
   });
 
@@ -137,7 +139,128 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  重构用户模块 #aaaaaaaa architect copilot-completion/kimi-k3 🤔思考 1s Σ1s");
+    expect(lines[1]).toBe("  重构用户模块 architect copilot-completion/kimi-k3 🤔 1s Σ1s");
+  });
+
+  it("model uses full name, basename, then omission as width tightens", () => {
+    const run = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        phaseEnteredAt: 9_000,
+        lastEventAt: 9_900,
+        model: { provider: "droid-completion", id: "very-long-model-name" },
+      }),
+    });
+    const model = buildFleetViewModel([run], OPTS);
+    const full = buildFleetWidgetLines(model, { width: 120 })![1]!;
+    expect(full).toContain("droid-completion/very-long-model-name");
+
+    const medium = buildFleetWidgetLines(model, { width: 45 })![1]!;
+    expect(medium).toContain("very-long-model-name");
+    expect(medium).not.toContain("droid-completion/very-long-model-name");
+
+    const narrow = buildFleetWidgetLines(model, { width: 20 })![1]!;
+    expect(narrow).not.toContain("very-long-model-name");
+    expect(visibleWidth(narrow)).toBeLessThanOrEqual(20);
+  });
+
+  it("drops fields by priority while retaining label and phase", () => {
+    const run = snapshot({
+      diag: diag({
+        createdAt: 9_000,
+        phaseEnteredAt: 9_000,
+        lastEventAt: 9_900,
+        label: "任务标签",
+        agentType: "architect",
+        model: { provider: "droid-completion", id: "long-model-name" },
+        contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
+        usage: usage(1.05),
+        autoBackgroundedAt: 9_000,
+      }),
+    });
+    const model = buildFleetViewModel([run], OPTS);
+    const at = (width: number) => buildFleetWidgetLines(model, { width })![1]!;
+    expect(at(120)).toContain("任务标签 architect droid-completion/long-model-name");
+    expect(at(120)).toContain("⇣后台");
+    expect(at(70)).not.toContain("architect");
+    expect(at(70)).toContain("long-model-name");
+    expect(at(50)).not.toContain("long-model-name");
+    expect(at(50)).toContain("12.3%/262k");
+    expect(at(35)).not.toContain("12.3%/262k");
+    expect(at(35)).toContain("$1.05");
+    // Last drop tier: ⇣后台 goes before Σ (buildFleetWidgetLines clamps
+    // width to >= 20, at which label+phase+Σ still fit, so the Σ-drop tier
+    // is unreachable through this entry point).
+    expect(at(26)).toContain("⇣后台");
+    expect(at(26)).toContain("Σ1s");
+    expect(at(24)).not.toContain("⇣后台");
+    expect(at(24)).toContain("Σ1s");
+    // The label is never truncated while droppable fields remain.
+    expect(at(20)).toContain("任务标签");
+    expect(at(20)).not.toContain("...");
+    for (const width of [120, 70, 50, 35, 26, 24, 20]) {
+      const line = at(width);
+      expect(line).toContain("任务标签");
+      expect(line).toMatch(/(?:🤔|💭|🧠|🤔) 1s/);
+    }
+  });
+
+  it("truncates label only when label plus phase cannot fit", () => {
+    const run = snapshot({ diag: diag({ label: "这是一个非常长的任务标签", lastEventAt: 9_900 }) });
+    const model = buildFleetViewModel([run], OPTS);
+    const wide = buildFleetWidgetLines(model, { width: 60 })![1]!;
+    expect(wide).toContain("这是一个非常长的任务标签");
+    const narrow = buildFleetWidgetLines(model, { width: 20 })![1]!;
+    expect(narrow).toContain("...");
+    expect(narrow).toMatch(/🤔 10s/);
+  });
+
+  it("compacts BMP and retry phase labels without leaving text fragments", () => {
+    const cases = [
+      ["queue_wait", "⏸ 1s"],
+      ["resolve_config", "⚡ 1s"],
+      ["retry_backoff", "♻2/3 1s"],
+      ["reap", "⏹ 1s"],
+    ] as const;
+    for (const [phase, expected] of cases) {
+      const run = snapshot({
+        phase,
+        diag: diag({
+          createdAt: 9_000,
+          phaseEnteredAt: 9_000,
+          phase,
+
+          ...(phase === "retry_backoff"
+            ? { retry: { attempt: 2, maxAttempts: 3, delayMs: 100, startedAt: 9_000 } }
+            : {}),
+        }),
+      });
+      const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).toContain(expected);
+      expect(line).not.toContain("排队");
+      expect(line).not.toContain("启动");
+      expect(line).not.toContain("重试");
+      expect(line).not.toContain("停止");
+    }
+  });
+
+  it("compactPhaseLabel: variation-selector (U+FE0F) inputs stay fragment-free", () => {
+    // VS16-bearing emoji are unreachable via FleetRow (phase labels are
+    // generated without it) but compactPhaseLabel must not leave the
+    // selector or the text remnant behind if one ever shows up.
+    expect(compactPhaseLabel("⏸️排队")).toBe("⏸️");
+    expect(compactPhaseLabel("⚡️启动")).toBe("⚡️");
+    expect(compactPhaseLabel("⏹️停止中")).toBe("⏹️");
+    expect(compactPhaseLabel("♻️重试2/3")).toBe("♻️2/3");
+    expect(compactPhaseLabel("♻重试1/5")).toBe("♻1/5");
+    expect(compactPhaseLabel("🤔思考")).toBe("🤔");
+    // Non-emoji phase labels pass through untouched.
+    expect(compactPhaseLabel("等待中")).toBe("等待中");
+  });
+
+  it("shows the auto-background indicator on the main row", () => {
+    const run = snapshot({ diag: diag({ autoBackgroundedAt: 9_000, lastEventAt: 9_900 }) });
+    expect(buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]).toContain("⇣后台");
   });
 
   it("tool trail: own continuation line; prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
@@ -153,7 +276,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withHistory], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔思考 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s Σ1s",
       "  ╰ ✓ bash ×2 | ▸edit · 9s",
     ]);
     const withTool = snapshot({
@@ -164,7 +287,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withTool], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔思考 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s Σ1s",
       "  ╰ ▸bash · 100ms",
     ]);
   });
@@ -199,7 +322,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([thinking], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔思考 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s Σ1s",
       "  ╰ » 然后看一下代码结构，重点关注调度模块",
     ]);
     // a long line is truncated with an ellipsis
@@ -219,7 +342,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([tooling], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🔧工具 1s Σ1s",
+      "  aaaaaaaa · 🔧 1s Σ1s",
       "  ╰ ▸bash · 100ms",
     ]);
     // terminal rows never stream
@@ -238,7 +361,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       diag: diag({ createdAt: 0, phaseEnteredAt: 9_000, lastEventAt: 9_900 }),
     });
     const lines = buildFleetWidgetLines(buildFleetViewModel([run], OPTS))!;
-    expect(lines[1]).toBe("  aaaaaaaa · 🤔思考 1s Σ10s"); // 1s in this model turn, Σ10s total run age
+    expect(lines[1]).toBe("  aaaaaaaa · 🤔 1s Σ10s"); // 1s in this model turn, Σ10s total run age
   });
 
   it("tool trail: in-flight edit shows which file is being edited (path preview)", () => {
@@ -263,7 +386,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       }),
     });
     expect(buildFleetWidgetLines(buildFleetViewModel([withPreview], OPTS))!.slice(1)).toEqual([
-      "  aaaaaaaa · 🤔思考 1s Σ1s",
+      "  aaaaaaaa · 🤔 1s Σ1s",
       "  ╰ ▸bash npm test -- --runInBand · 100ms",
     ]);
     const longPreview = snapshot({
@@ -333,16 +456,16 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const lines = buildFleetWidgetLines(buildFleetViewModel([parent, child, other], OPTS))!;
     expect(lines).toEqual([
       "● 3 active Agents",
-      "  parent-0 · 🤔思考 9s Σ9s",
-      "  ↳ child-00 · 🤔思考 5s Σ5s",
-      "  other-00 · 🤔思考 8s Σ8s",
+      "  parent-0 · 🤔 9s Σ9s",
+      "  ↳ child-00 · 🤔 5s Σ5s",
+      "  other-00 · 🤔 8s Σ8s",
     ]);
   });
 
   it("nested run whose parent is NOT shown still gets the ↳ marker at top level", () => {
     const nested = snapshot({ parentRunId: "p", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) });
     const lines = buildFleetWidgetLines(buildFleetViewModel([nested], OPTS))!;
-    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🤔思考 1s Σ1s");
+    expect(lines[1]).toBe("  ↳ aaaaaaaa · 🤔 1s Σ1s");
   });
 
   it("highlight-priority: crit run's row is first among roots and the bullet takes the worst tone", () => {
@@ -363,7 +486,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[1]).toContain("[crit]✗ stuck-00");
     // calm row: segment-colored (muted meta), never whole-line tone-wrapped
     expect(lines[2]).toContain("calm-000");
-    expect(lines[2]).toContain("[muted]· 🤔思考");
+    expect(lines[2]).toContain("[muted]🤔");
     expect(lines[2]).not.toContain("[crit]");
   });
 
@@ -466,7 +589,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[0]).toContain("1 active Agents");
     expect(lines[1]).toContain("live-000");
     expect(
-      lines.some((l) => l.startsWith("✓ 刚完成 #done-000") && l.includes("completed") && l.includes("$0.11")),
+      lines.some(
+        (l) => l.startsWith("✓ 刚完成 ") && !l.includes("#done-000") && l.includes("completed") && l.includes("$0.11"),
+      ),
     ).toBe(true);
     expect(lines.some((l) => l.startsWith("✗ fail-000") && l.includes("failed"))).toBe(true);
     expect(lines.join("\n")).not.toContain("old-0000"); // 9s ago → expired
@@ -630,7 +755,7 @@ describe("FleetWidgetController (fake ui)", () => {
     expect(ui.calls).toHaveLength(1);
     expect(ui.calls[0]!.key).toBe(FLEET_WIDGET_KEY);
     expect(ui.calls[0]!.options?.placement).toBe("aboveEditor");
-    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔思考 1s Σ1s"]);
+    expect(ui.calls[0]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔 1s Σ1s"]);
     expect(clock.pendingTimers).toBe(1); // 1s tick armed
   });
 
@@ -662,7 +787,7 @@ describe("FleetWidgetController (fake ui)", () => {
 
     query.runs.push(snapshot({ runId: "live-0000", diag: diag({ createdAt: 9_000, lastEventAt: 9_900 }) }));
     widget.lifecycle.onLifecycle!(lifecycleEvent("live-0000"));
-    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔思考 1s Σ1s"]);
+    expect(ui.calls[ui.calls.length - 1]!.content).toEqual(["● 1 active Agents", "  live-000 · 🤔 1s Σ1s"]);
 
     query.runs.length = 0;
     widget.lifecycle.onLifecycle!({ ...lifecycleEvent("live-0000"), status: "completed" });
@@ -829,8 +954,8 @@ describe("M9: workflow group headers in the tree", () => {
     })!;
     expect(lines[0]).toContain("3 active Agents");
     expect(lines[1]).toBe("⚙ plan-review · review · 2m01s");
-    expect(lines[2]).toContain("↳ 评审A #child-a0");
-    expect(lines[3]).toContain("↳ 评审B #child-b0");
+    expect(lines[2]).toContain("↳ 评审A");
+    expect(lines[3]).toContain("↳ 评审B");
     expect(lines[4]).toContain("loner-00");
     expect(lines[4]).not.toContain("↳");
   });

@@ -1,5 +1,5 @@
 import { systemClock, type Clock, type TimerHandle } from "../core/clock.js";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Millis, RunId, SubagentExtensionPoints } from "../core/types.js";
 import type { JobRecord, JobStatus } from "../bash/types.js";
 import { isTerminalJobStatus, previewCommand } from "../bash/types.js";
@@ -125,6 +125,8 @@ export interface FleetWidgetRenderOptions {
   bashJobs?: readonly BashJobViewInput[];
   /** Color injector, same tones as the panel (warn/crit/muted); default plain text. */
   color?: FleetColorize;
+  /** Available visible columns for main-row field assembly. */
+  width?: number;
 }
 
 /** M9: one in-flight workflow's header data (from WorkflowActivityRegistry, elapsed precomputed by the controller). */
@@ -136,28 +138,67 @@ export interface WorkflowGroupInput {
 }
 
 /** M-C: one run's main tree-row line. M10: segment-colored when a colorizer is
- *  provided — label plain (the eye-catcher), #id/type/model/phase/phase-age/Σ-total/cost
+ *  provided — label plain (the eye-catcher), type/model/phase/phase-age/Σ-total/cost
  *  muted — so rows have visual depth instead of a uniform white line.
  *  warn/crit rows pass the identity colorizer here and get whole-line tone
  *  coloring from the caller instead (nesting SGR sequences would reset the
  *  outer color mid-line). Live activity (tool trail / thinking stream) is NOT
  *  on this line — see widgetRowActivity. */
-function widgetRowMain(row: FleetRow, color: FleetColorize = (_t, s) => s): string {
-  const name = row.label ? `${row.label} ${color("muted", `#${row.shortRunId}`)}` : row.shortRunId;
-  const meta: string[] = [row.type ?? "·"];
-  if (row.model) meta.push(row.model);
-  // Active rows show the current phase's age (phaseMs) AND the run's total
-  // elapsed (Σ): 💭思考 12s Σ1m05s reads as "this model turn has been
-  // generating for 12s; the whole run is 1m05s old". The thinking label's
-  // emoji frame is derived from wall time (see thinkingFrame), so
-  // the 1Hz tick animates it. Tool-call timing lives
-  // on the activity line's ▸ segment (see toolTrailOf / widgetRowActivity).
-  meta.push(row.phaseLabel, formatDuration(row.phaseMs), `Σ${formatDuration(row.elapsedMs)}`);
-  if (row.contextUsage) meta.push(formatContextUsage(row.contextUsage));
-  const parts = [name, color("muted", meta.join(" "))];
-  if (row.usage) parts.push(color("muted", formatWidgetCost(row.usage.costUsd)));
-  if (row.autoBackgrounded) parts.push(color("muted", "⇣后台"));
-  return parts.join(" ");
+/** Exported for unit tests (VS16-bearing inputs are unreachable via FleetRow). */
+export function compactPhaseLabel(label: string): string {
+  // Codepoint-aware first cluster (keeps a trailing U+FE0F variation
+  // selector): astral emoji like 🤔 are one spread element, BMP emoji like
+  // ⏸/⚡/♻ may be followed by \uFE0F, which must travel with the emoji or the
+  // rest-slicing below misfires (♻️重试2/3 would keep the 重试 remnant).
+  const codePoints = [...label];
+  const emoji = `${codePoints[0] ?? ""}${codePoints[1] === "\uFE0F" ? codePoints[1] : ""}`;
+  if (emoji.startsWith("♻")) return `${emoji}${label.slice(emoji.length).replace(/^重试/, "")}`;
+  if (!/^(?:🧠|💭|🤔|💡|⏸|⚡|🔧|🗜|⏹)/u.test(label)) return label;
+  return emoji;
+}
+
+function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t, s) => s): string {
+  const modelFull = row.model;
+  const modelBase = modelFull?.slice(modelFull.lastIndexOf("/") + 1);
+  const fixed = `${compactPhaseLabel(row.phaseLabel)} ${formatDuration(row.phaseMs)}`;
+  const label = row.label ?? row.shortRunId;
+  const fields: Array<{ name: string; value: string }> = [
+    { name: "type", value: row.type ?? "·" },
+    ...(modelFull ? [{ name: "model", value: modelFull }] : []),
+    { name: "phase", value: fixed },
+    { name: "context", value: row.contextUsage ? formatContextUsage(row.contextUsage) : "" },
+    ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd) }] : []),
+    { name: "total", value: `Σ${formatDuration(row.elapsedMs)}` },
+    ...(row.autoBackgrounded ? [{ name: "background", value: "⇣后台" }] : []),
+  ];
+  const shown = new Map(fields.map((field) => [field.name, field.value]));
+  const compose = (labelText: string): string =>
+    [labelText, ...fields.map((field) => shown.get(field.name)).filter((value) => value)].join(" ");
+  const fits = () => visibleWidth(compose(label)) <= width;
+  const drop = (name: string) => shown.delete(name);
+  const modelField = fields.find((field) => field.name === "model");
+  const modelCanShorten = modelField !== undefined && modelBase !== undefined && modelField.value !== modelBase;
+
+  // Try the complete row first. Only after each field tier is exhausted may
+  // the label be shortened; label and phase are the final identity signal.
+  if (!fits()) {
+    drop("type");
+    if (!fits() && modelField) {
+      if (modelCanShorten) shown.set("model", modelBase!);
+      if (!fits()) drop("model");
+    }
+    if (!fits()) drop("context");
+    if (!fits()) drop("cost");
+    if (!fits()) drop("background");
+    if (!fits()) drop("total");
+  }
+  // compose("") already contains the label↔fields separator (its leading
+  // empty element contributes exactly one space), so no extra column reserve.
+  const nonLabelWidth = visibleWidth(compose(""));
+  const labelWidth = Math.max(1, width - nonLabelWidth);
+  const finalLabel = visibleWidth(compose(label)) <= width ? label : truncateToWidth(label, labelWidth);
+  const values = [finalLabel, ...fields.map((field) => shown.get(field.name)).filter((value) => value)];
+  return values.map((value, index) => (index === 0 ? value : color("muted", value!))).join(" ");
 }
 
 /** The run's live-activity line (rendered on its own indented continuation
@@ -180,14 +221,23 @@ function widgetRowActivity(row: FleetRow, color: FleetColorize = (_t, s) => s): 
   return parts.length ? parts.join(" ") : undefined;
 }
 
-/** M6: a just-finished run's dimmed row: "✓ 任务名 #id type model completed 39s $0.11". */
-function widgetTerminalDetail(row: FleetRow): string {
-  const parts = [row.label ? `${row.label} #${row.shortRunId}` : row.shortRunId, row.type ?? "·"];
-  if (row.model) parts.push(row.model);
-  parts.push(row.status, formatDuration(row.elapsedMs));
-  if (row.contextUsage) parts.push(formatContextUsage(row.contextUsage));
-  if (row.usage) parts.push(formatWidgetCost(row.usage.costUsd));
-  return parts.join(" ");
+/** M6: a just-finished run's dimmed row: "✓ 任务名 type model completed 39s $0.11". */
+function widgetTerminalDetail(row: FleetRow, width: number): string {
+  const label = row.label ?? row.shortRunId;
+  const type = row.type ?? "·";
+  const model = row.model;
+  const modelBase = model?.slice(model.lastIndexOf("/") + 1);
+  const suffix = [row.status, formatDuration(row.elapsedMs)];
+  if (row.contextUsage) suffix.push(formatContextUsage(row.contextUsage));
+  if (row.usage) suffix.push(formatWidgetCost(row.usage.costUsd));
+  const candidates = [model, modelBase, undefined];
+  const fits = (candidate: string | undefined, labelText: string) =>
+    visibleWidth([labelText, type, candidate, ...suffix].filter(Boolean).join(" ")) <= width;
+  const chosen = candidates.find((candidate) => fits(candidate, label));
+  const modelWidth = visibleWidth([type, chosen, ...suffix].filter(Boolean).join(" "));
+  const labelWidth = Math.max(1, width - modelWidth - 1);
+  const finalLabel = visibleWidth(label) > labelWidth ? truncateToWidth(label, labelWidth) : label;
+  return [finalLabel, type, chosen, ...suffix].filter(Boolean).join(" ");
 }
 
 /** M-C: order active rows as a forest — severity-ordered roots, each followed by its children (depth-first). */
@@ -214,17 +264,20 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
 /** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors.
  *  Returns 1–2 lines: the main row plus, when the run is mid-tool / mid-thought, an indented
  *  activity continuation hung on a ╰ hook under the row's label (↳ replaced by space). */
-function renderRunLines(row: FleetRow, indent: string, color: FleetColorize): string[] {
+function renderRunLines(row: FleetRow, indent: string, color: FleetColorize, width: number): string[] {
   // ╰ hook sits directly under the row's label (mark column + space + indent),
   // so the continuation reads as hanging from the task name itself — without
   // it a bright trail line reads as the next agent's row.
   const pad = `  ${indent.replace(/↳/g, " ")}╰ `;
   if (row.highlight !== "none") {
-    const main = color(row.highlight, `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row)}`);
+    const main = color(
+      row.highlight,
+      `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row, Math.max(1, width - visibleWidth(`${WIDGET_MARK[row.highlight]} ${indent}`)))}`,
+    );
     const activity = widgetRowActivity(row);
     return activity ? [main, color(row.highlight, `${pad}${activity}`)] : [main];
   }
-  const main = `${WIDGET_MARK.none} ${indent}${widgetRowMain(row, color)}`;
+  const main = `${WIDGET_MARK.none} ${indent}${widgetRowMain(row, Math.max(1, width - visibleWidth(`${WIDGET_MARK.none} ${indent}`)), color)}`;
   const activity = widgetRowActivity(row, color);
   return activity ? [main, `${pad}${activity}`] : [main];
 }
@@ -265,6 +318,7 @@ export function buildFleetWidgetLines(
   opts: FleetWidgetRenderOptions = {},
 ): string[] | undefined {
   const color: FleetColorize = opts.color ?? ((_tone, text) => text);
+  const width = Math.max(20, opts.width ?? 120);
   const maxRows = Math.min(WIDGET_MAX_ROWS, Math.max(1, opts.maxRows ?? WIDGET_DEFAULT_ROWS));
   const lingerMs = opts.terminalLingerMs ?? 5000;
   const workflows = (opts.workflows ?? []).slice(0, 3);
@@ -325,7 +379,7 @@ export function buildFleetWidgetLines(
       "bash" in entry
         ? { main: widgetBashRowMain(entry.bash, color), activity: widgetBashRowActivity(entry.bash, color) }
         : (() => {
-            const [main, activity] = renderRunLines(entry.row, entry.indent, color);
+            const [main, activity] = renderRunLines(entry.row, entry.indent, color, width);
             return { main: main!, activity };
           })();
     budget -= 1;
@@ -363,7 +417,7 @@ export function buildFleetWidgetLines(
   for (const row of recentTerminal) {
     if (budget <= 0) break;
     const mark = row.status === "completed" ? "✓" : "✗";
-    lines.push(color("muted", `${mark} ${widgetTerminalDetail(row)}`));
+    lines.push(color("muted", `${mark} ${widgetTerminalDetail(row, width - visibleWidth(`${mark} `))}`));
     budget -= 1;
   }
   for (const row of recentBash) {
@@ -509,6 +563,7 @@ export class FleetWidgetController {
       ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
     });
     const lines = buildFleetWidgetLines(model, {
+      width: this.widgetWidth(),
       ...(this.deps.maxRows !== undefined ? { maxRows: this.deps.maxRows } : {}),
       ...(this.deps.color ? { color: this.deps.color } : {}),
       ...(this.deps.workflows
@@ -606,7 +661,9 @@ export class FleetWidgetController {
       // second line, and as live durations/trails changed width each 1Hz tick
       // the wrap toggled on/off → widget height oscillated → every line below
       // (editor, footer) reflowed every second — the "agent tree flicker".
-      const width = Math.max(20, (process.stdout?.columns ?? 120) - 2);
+      const width = this.widgetWidth();
+      // Main run rows are assembled to width; only live activity continuations
+      // retain truncation because their stream/tool content is intentionally unbounded.
       const truncated = lines?.map((line) => truncateToWidth(line, width));
       this.setWidget!(FLEET_WIDGET_KEY, truncated, { placement: "aboveEditor" });
     } catch {
@@ -614,6 +671,10 @@ export class FleetWidgetController {
       this.uiDead = true;
       this.stopTimer();
     }
+  }
+
+  private widgetWidth(): number {
+    return Math.max(20, (process.stdout?.columns ?? 120) - 2);
   }
 
   private stopTimer(): void {
