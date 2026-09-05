@@ -56,11 +56,13 @@ export class FabricMailbox {
           else this.options.engine.transition(record.key, "pending", "abandoned", { terminalReason: "ttl_expired" });
           continue;
         }
-        if (this.options.router.targetState(record.to) === "gone") {
+        const targetState = this.options.router.targetState(record.to);
+        if (targetState === "gone") {
           if (record.kind === "finding" || record.kind === "directive") gone.push(record);
           else this.options.engine.transition(record.key, "pending", "dropped", { terminalReason: "target_gone" });
           continue;
         }
+        if (targetState === "pending_start") continue;
         if (this.inFlight.has(target) || now < this.options.throttle.eligibleAt(record)) continue;
         const token = `${this.mailboxInstanceId}:${record.attempts}`;
         const claimed = this.options.engine.claim(record.key, token);
@@ -110,19 +112,24 @@ export class FabricMailbox {
   }
 
   private boundedSend(record: FabricRecord): Promise<Verdict> {
-    const sender =
-      record.to === "root"
-        ? effectiveChannel(
-            record.kind,
-            this.options.progressChannel ?? "display",
-            this.options.canRenderEntries ?? true,
-            record.to,
-          ) === "context"
-          ? this.options.ports.sendRootContext(record)
-          : this.options.ports.sendRootDisplay(record)
-        : this.options.ports.inject(record);
     return new Promise((resolve) => {
       let done = false;
+      let sender: Promise<Verdict>;
+      try {
+        sender =
+          record.to === "root"
+            ? effectiveChannel(
+                record.kind,
+                this.options.progressChannel ?? "display",
+                this.options.canRenderEntries ?? true,
+                record.to,
+              ) === "context"
+              ? this.options.ports.sendRootContext(record)
+              : this.options.ports.sendRootDisplay(record)
+            : this.options.ports.inject(record);
+      } catch (error) {
+        sender = Promise.reject(error);
+      }
       let timer: TimerHandle | undefined;
       const finish = (verdict: Verdict): void => {
         if (done) return;
@@ -172,6 +179,7 @@ export class FabricMailbox {
         this.options.router.issueDeadLetter({ ...record, attempts }, "target_gone");
       else this.options.engine.transition(key, "claimed", "dropped", { attempts, terminalReason: "target_gone" });
     } else {
+      console.warn(`[pi-subagent] fabric policy rejection for ${key}: ${verdict.reason}`);
       this.options.engine.transition(key, "claimed", "dropped", { attempts, terminalReason: "policy" });
     }
     this.inFlight.delete(target);

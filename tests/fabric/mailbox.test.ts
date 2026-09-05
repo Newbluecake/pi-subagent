@@ -8,10 +8,10 @@ import { FabricThrottle } from "../../src/fabric/throttle.js";
 import { FabricRouter } from "../../src/fabric/router.js";
 import { FabricMailbox, type Verdict } from "../../src/fabric/mailbox.js";
 
-const rec = (kind: FabricRecord["kind"] = "finding"): FabricRecord => ({
-  key: "r_ABCDEFGH:root:1:1" as FabricRecord["key"],
+const rec = (kind: FabricRecord["kind"] = "finding", to: FabricRecord["to"] = "root"): FabricRecord => ({
+  key: `r_ABCDEFGH:${to}:1:1` as FabricRecord["key"],
   from: "r_ABCDEFGH",
-  to: "root",
+  to,
   kind,
   seq: 1,
   generation: 1,
@@ -22,7 +22,7 @@ const rec = (kind: FabricRecord["kind"] = "finding"): FabricRecord => ({
   attempts: 0,
   updatedAt: 0,
 });
-function setup(inject: (r: FabricRecord) => Promise<Verdict>) {
+function setup(inject: (r: FabricRecord) => Promise<Verdict>, target: FabricRecord["to"] = "root") {
   const clock = new FakeClock();
   const store = new MemoryOutboxStore<FabricRecord>();
   const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
@@ -39,9 +39,10 @@ function setup(inject: (r: FabricRecord) => Promise<Verdict>) {
     memoryOnlyFields: ["claimToken"],
     now: () => clock.now(),
   });
-  engine.put(rec());
+  engine.put(rec("finding", target));
   const tree = new FabricTree();
   tree.append("root", "r_ABCDEFGH");
+  if (target !== "root") tree.append("root", target);
   const throttle = new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 20 });
   const router = new FabricRouter(
     engine,
@@ -68,10 +69,28 @@ function setup(inject: (r: FabricRecord) => Promise<Verdict>) {
     fabricSteerTimeoutMs: 10,
     maxAttempts: 3,
   });
-  return { clock, store, engine, mailbox };
+  return { clock, store, engine, mailbox, tree };
 }
 
 describe("fabric mailbox", () => {
+  it("waits for a pending_start target and flushes after its running hint", async () => {
+    const target = "r_TARGET01" as FabricRecord["to"];
+    let sends = 0;
+    const { mailbox, engine, tree } = setup(async () => {
+      sends++;
+      return { ok: true };
+    }, target);
+    mailbox.pump();
+    expect(sends).toBe(0);
+    expect(engine.get(rec("finding", target).key)?.state).toBe("pending");
+    tree.markRunning(target);
+    mailbox.pump(target);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sends).toBe(1);
+    expect(engine.get(rec("finding", target).key)?.state).toBe("delivered");
+  });
+
   it("claims once when pump is called twice in one tick", () => {
     let sends = 0;
     const { mailbox, engine } = setup(() => {

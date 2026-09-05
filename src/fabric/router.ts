@@ -178,6 +178,7 @@ export class FabricRouter {
       if (prior)
         this.engine.transition(o.key, ["pending", "claimed"], terminalFor(reason), {
           terminalReason: reason,
+          attempts: o.attempts,
           deadLetter:
             prior.status === "issued" ? { reason, status: "issued", key: prior.key } : { reason, status: prior.status },
         });
@@ -223,6 +224,7 @@ export class FabricRouter {
     for (const o of fresh)
       this.engine.transition(o.key, ["pending", "claimed"], terminalFor(reason), {
         terminalReason: reason,
+        attempts: o.attempts,
         deadLetter:
           outcome.status === "issued"
             ? { reason, status: "issued", key: outcome.key }
