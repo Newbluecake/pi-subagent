@@ -292,6 +292,27 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     ]);
   });
 
+  it("X6b: user @ message hangs one line under the tool trail of a running row", () => {
+    const run = snapshot({
+      runId: "aaaaaaaa",
+      diag: diag({
+        createdAt: 9_000,
+        lastEventAt: 9_900,
+        toolHistory: [
+          { name: "bash", toolCallId: "a", startedAt: 1, endedAt: 2, isError: false },
+          { name: "edit", toolCallId: "c", startedAt: 5 },
+        ],
+      }),
+    });
+    const model = buildFleetViewModel([run], OPTS);
+    const lines = buildFleetWidgetLines(model, {
+      mentionNoteOf: (runId) => (runId === "aaaaaaaa" ? "现在跑到第几轮了？" : undefined),
+    })!;
+    // lines[0] is the ● header; then main row, tool trail, mention line
+    expect(lines[2]).toContain("╰ ✓ bash"); // tool trail first
+    expect(lines[3]).toContain("@ » 现在跑到第几轮了？"); // mention line directly below it
+  });
+
   it("tool trail: terminal run freezes the in-flight segment (no ever-growing duration)", () => {
     // A run killed mid-tool keeps its in-flight record in toolHistory — the
     // trail must NOT carry a live duration that keeps aging after the run ended.
@@ -573,7 +594,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(lines[0]).toContain(`+${12 - WIDGET_MAX_ROWS} more`);
   });
 
-  it("pending terminal notifications stay beyond old linger and show a folded prompt", () => {
+  it("pending terminal notifications stay beyond old linger and show the user @ message", () => {
     const done = snapshot({
       status: "completed",
       phase: "settled",
@@ -585,9 +606,12 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       terminalLingerMs: 5_000,
       awaitNotificationMs: 600_000,
       receiptOf: () => ({ kind: "pending", at: 0 }),
+      mentionNoteOf: () => "继续\n  上次  的任务",
     });
     expect(lines?.join("\n")).toContain("· 待处理");
-    expect(lines?.join("\n")).toContain("╰ » do this carefully");
+    // X6b: the awaiting preview is the raw @ message (whitespace folded), never the dispatch prompt
+    expect(lines?.join("\n")).toContain("╰ @ » 继续 上次 的任务");
+    expect(lines?.join("\n")).not.toContain("do this carefully");
   });
 
   it("pending terminal notifications disappear after the await hard bound", () => {
@@ -691,28 +715,55 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       maxRows: 6,
       receiptOf: (runId) =>
         runId === "wait-0000" ? { kind: "pending" as const, at: 9_000 } : { kind: "untracked" as const },
+      mentionNoteOf: (runId) => (runId === "wait-0000" ? "用户的 @ 消息" : undefined),
     })!;
     expect(lines.join("\n")).not.toContain("· 待处理"); // main row hidden by budget
-    expect(lines.join("\n")).not.toContain("╰ »"); // preview must not orphan
+    expect(lines.join("\n")).not.toContain("@ »"); // mention preview must not orphan
     expect(lines[0]).toContain("1 待处理");
     expect(lines[0]).toContain("+1 more");
   });
 
-  it("elastic expansion wraps the newest awaiting preview to at most 4 lines", () => {
+  it("awaiting entries preview ONLY the user @ message, never the dispatch prompt", () => {
+    const awaiting = snapshot({
+      runId: "wait-0000",
+      status: "completed",
+      phase: "settled",
+      updatedAt: 9_000,
+      diag: diag({ taskPrompt: "dispatch prompt must not be shown" }),
+    });
+    const model = buildFleetViewModel([awaiting], { ...OPTS, recentTerminal: 1 });
+    // No mention note → no preview line at all (X6b).
+    const withoutNote = buildFleetWidgetLines(model, {
+      receiptOf: () => ({ kind: "pending" as const, at: 9_000 }),
+    })!;
+    expect(withoutNote.join("\n")).toContain("· 待处理");
+    expect(withoutNote.join("\n")).not.toContain("dispatch prompt");
+    expect(withoutNote.join("\n")).not.toContain("╰");
+    // With a mention note → the note is the only preview.
+    const withNote = buildFleetWidgetLines(model, {
+      receiptOf: () => ({ kind: "pending" as const, at: 9_000 }),
+      mentionNoteOf: (runId) => (runId === "wait-0000" ? "刚扩的音 跑完了吗" : undefined),
+    })!;
+    expect(withNote.join("\n")).toContain("╰ @ » 刚扩的音 跑完了吗".replace(/\s+/g, " "));
+    expect(withNote.join("\n")).not.toContain("dispatch prompt");
+  });
+
+  it("elastic expansion wraps the newest awaiting mention preview to at most 4 lines", () => {
     const long = "word ".repeat(80).trim(); // wraps to many lines at width 40
     const awaiting = snapshot({
       runId: "wait-0000",
       status: "completed",
       phase: "settled",
       updatedAt: 9_000,
-      diag: diag({ taskPrompt: long }),
+      diag: diag({}),
     });
     const model = buildFleetViewModel([awaiting], { ...OPTS, recentTerminal: 1 });
     const lines = buildFleetWidgetLines(model, {
       width: 40,
       receiptOf: () => ({ kind: "pending" as const, at: 9_000 }),
+      mentionNoteOf: (runId) => (runId === "wait-0000" ? long : undefined),
     })!;
-    expect(lines.filter((l) => l.includes("╰ »"))).toHaveLength(4); // capped, not 1 and not 5+
+    expect(lines.filter((l) => l.includes("╰ @ »"))).toHaveLength(4); // capped, not 1 and not 5+
   });
 
   it("M6: just-finished runs linger dimmed (✓/✗) within terminalLingerMs, then vanish", () => {

@@ -122,6 +122,8 @@ export interface FleetWidgetRenderOptions {
   terminalLingerMs?: number;
   /** Context receipt lookup for terminal notification visibility. */
   receiptOf?: (runId: string) => ContextReceipt;
+  /** X6b: latest raw user @ message per run — rendered under the run (and as the ONLY awaiting-entry preview). */
+  mentionNoteOf?: (runId: string) => string | undefined;
   /** Hard upper bound for pending notification rows. Default 10 minutes. */
   awaitNotificationMs?: number;
   /** M9: in-flight workflows — rendered as ⚙ group headers with their children (rows whose parentRunId === workflowId) indented beneath. */
@@ -328,6 +330,9 @@ export function buildFleetWidgetLines(
   const lingerMs = opts.terminalLingerMs ?? 5000;
   const awaitMs = opts.awaitNotificationMs ?? 600_000;
   const receiptOf = opts.receiptOf ?? (() => ({ kind: "untracked" as const }));
+  // Notes are single-line display text: fold whitespace like the panel's taskPreview does.
+  const rawMentionNoteOf = opts.mentionNoteOf ?? (() => undefined);
+  const mentionNoteOf = (runId: string) => rawMentionNoteOf(runId)?.replace(/\s+/g, " ").trim() || undefined;
   const workflows = (opts.workflows ?? []).slice(0, 3);
   const bashJobs = opts.bashJobs ?? [];
   const activeRows = model.rows.filter((r) => !r.terminal);
@@ -415,14 +420,24 @@ export function buildFleetWidgetLines(
                 "muted",
                 `${entry.awaiting.status === "completed" ? "✓" : "✗"} ${widgetTerminalDetail(entry.awaiting, width)} · 待处理`,
               ),
-              activity:
-                entry.awaiting.taskPreview === undefined
+              // X6b: awaiting entries preview ONLY the user's @ message; dispatch prompts are never shown.
+              activity: (() => {
+                const note = mentionNoteOf(entry.awaiting.runId);
+                return note === undefined
                   ? undefined
-                  : color("muted", `╰ » ${truncateToWidth(entry.awaiting.taskPreview, Math.max(1, width - 4))}`),
+                  : color("muted", `╰ @ » ${truncateToWidth(note, Math.max(1, width - 6))}`);
+              })(),
+              mention: undefined,
             }
           : (() => {
               const [main, activity] = renderRunLines(entry.row, entry.indent, color, width);
-              return { main: main!, activity };
+              const note = mentionNoteOf(entry.row.runId);
+              const pad = `  ${entry.indent.replace(/↳/g, " ")}╰ `;
+              const mention =
+                note === undefined
+                  ? undefined
+                  : color("muted", `${pad}@ » ${truncateToWidth(note, Math.max(1, width - visibleWidth(pad) - 4))}`);
+              return { main: main!, activity, mention };
             })();
     budget -= 1;
     shownRuns++;
@@ -444,23 +459,32 @@ export function buildFleetWidgetLines(
     lines.push(r.main);
     if (r.show && r.activity !== undefined) {
       const entry = entries[i];
+      const awaitingNote = entry !== undefined && "awaiting" in entry ? mentionNoteOf(entry.awaiting.runId) : undefined;
       if (
         !expandedAwaiting &&
         entry !== undefined &&
         "awaiting" in entry &&
         entry.awaiting.runId === latestAwaiting &&
-        entry.awaiting.taskPreview
+        awaitingNote !== undefined
       ) {
-        const wrapped = wrapTextWithAnsi(entry.awaiting.taskPreview, Math.max(1, width - 4)).slice(
-          0,
-          Math.min(4, budget + 1),
-        );
-        lines.push(...wrapped.map((line) => color("muted", `╰ » ${line}`)));
+        const wrapped = wrapTextWithAnsi(awaitingNote, Math.max(1, width - 6)).slice(0, Math.min(4, budget + 1));
+        lines.push(...wrapped.map((line) => color("muted", `╰ @ » ${line}`)));
         budget -= Math.max(0, wrapped.length - 1);
         expandedAwaiting = true;
       } else {
         lines.push(r.activity);
       }
+    }
+    // X6b: the user's latest @ message hangs one line below the tool trail.
+    if (
+      r !== undefined &&
+      "mention" in r &&
+      r.mention !== undefined &&
+      budget > 0 &&
+      (r.show || r.activity === undefined)
+    ) {
+      lines.push(r.mention);
+      budget -= 1;
     }
   }
   // M4: only active identities contribute to hidden; workflow headers and
@@ -538,6 +562,8 @@ export interface FleetWidgetDeps {
   color?: FleetColorize;
   /** Receipt lookup for terminal notification visibility. */
   receiptOf?: (runId: string) => ContextReceipt;
+  /** X6b: latest raw user @ message per run. */
+  mentionNoteOf?: (runId: string) => string | undefined;
   terminalLingerMs?: number;
   awaitNotificationMs?: number;
   pruneReceipts?: (keepRunIds: ReadonlySet<string>, now: number) => void;
@@ -650,6 +676,7 @@ export class FleetWidgetController {
       ...(this.deps.terminalLingerMs !== undefined ? { terminalLingerMs: this.deps.terminalLingerMs } : {}),
       ...(this.deps.awaitNotificationMs !== undefined ? { awaitNotificationMs: this.deps.awaitNotificationMs } : {}),
       ...(this.deps.receiptOf ? { receiptOf: this.deps.receiptOf } : {}),
+      ...(this.deps.mentionNoteOf ? { mentionNoteOf: this.deps.mentionNoteOf } : {}),
       ...(this.deps.color ? { color: this.deps.color } : {}),
       ...(this.deps.workflows
         ? {

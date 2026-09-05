@@ -116,6 +116,32 @@ describe("X6 @handle mention", () => {
     expect(request?.prompt).toContain("用户消息：\ncontinue from the last checkpoint");
   });
 
+  it("records the raw user message via noteMention on both steer and resume paths", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    const notes: [string, string][] = [];
+    const noteMention = (runId: string, message: string) => notes.push([runId, message]);
+    // steer path: noted against the running target, raw (unframed) message
+    await routeMention("@builder 进展如何", {
+      registry,
+      query: { get: () => snapshot("run-1", "running"), steer: async () => ({ ok: true as const }) },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+      fabricEnabled: () => true,
+      noteMention,
+    });
+    expect(notes).toEqual([["run-1", "进展如何"]]);
+    // resume path: noted against the NEW run id
+    const notes2: [string, string][] = [];
+    await routeMention("@builder 继续", {
+      registry,
+      query: { get: () => snapshot("run-1", "completed"), steer: async () => undefined },
+      spawn: { spawn: async () => ({ runId: "run-2" }) },
+      fabricEnabled: () => true,
+      noteMention: (runId, message) => notes2.push([runId, message]),
+    });
+    expect(notes2).toEqual([["run-2", "继续"]]);
+  });
+
   it("sends the raw message when fabric is disabled", async () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: "run-1", type: "worker" });
@@ -146,6 +172,29 @@ describe("X6 @handle mention", () => {
     expect((await routeMention("@unknown/path read this", deps)).handled).toBe(false);
     expect((await routeMention("@src/file.ts read this", deps)).handled).toBe(false);
     expect((await routeMention("@builder", deps)).handled).toBe(false);
+  });
+
+  it("routes suffixed labels for steer and resume, while the old label remains on its original run", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-old", type: "worker" });
+    registry.register("builder-2", { runId: "run-new", type: "worker" });
+    const steers: string[] = [];
+    await routeMention("@builder-2 inspect", {
+      registry,
+      query: {
+        get: () => snapshot("run-new", "running"),
+        steer: async (id) => (steers.push(id), { ok: true as const }),
+      },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+    });
+    expect(steers).toEqual(["run-new"]);
+    let resumedFrom: string | undefined;
+    await routeMention("@builder continue", {
+      registry,
+      query: { get: () => snapshot("run-old", "completed"), steer: async () => undefined },
+      spawn: { spawn: async (req) => ((resumedFrom = req.resumeFrom), { runId: "run-resumed" }) },
+    });
+    expect(resumedFrom).toBe("run-old");
   });
 
   it("keeps the first registration and warns on label conflict", () => {

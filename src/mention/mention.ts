@@ -51,6 +51,8 @@ export async function routeMention(
     spawn: Pick<SpawnService, "spawn">;
     /** When true, wrap the user message with the message_agent reply hint (fabric on ⇒ targets own the tool). */
     fabricEnabled?: () => boolean;
+    /** Optional sink recording the user's RAW @ message per target run, so the fleet widget can show it under the run. */
+    noteMention?: (runId: string, message: string) => void;
     reportError?: (message: string) => void;
   },
 ): Promise<MentionRouteResult> {
@@ -62,7 +64,10 @@ export async function routeMention(
   const snapshot = deps.query.get(target.runId);
   if (snapshot?.status === "running") {
     const result = await deps.query.steer(target.runId, message);
-    if (result.ok) return { handled: true, action: "steer", runId: target.runId };
+    if (result.ok) {
+      deps.noteMention?.(target.runId, parsed.message);
+      return { handled: true, action: "steer", runId: target.runId };
+    }
     const error = `cannot steer @${parsed.label}: ${result.detail ?? result.reason}`;
     deps.reportError?.(error);
     return { handled: true, action: "error", error };
@@ -74,7 +79,10 @@ export async function routeMention(
       label: parsed.label,
       resumeFrom: target.runId,
     } satisfies SpawnRequest);
-    if ("runId" in result) return { handled: true, action: "resume", runId: result.runId };
+    if ("runId" in result) {
+      deps.noteMention?.(result.runId, parsed.message);
+      return { handled: true, action: "resume", runId: result.runId };
+    }
     const error = `cannot resume @${parsed.label}: ${result.error.message}`;
     deps.reportError?.(error);
     return { handled: true, action: "error", error };
