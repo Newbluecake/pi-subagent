@@ -124,7 +124,7 @@ function withStartupTimeout<T>(
  * RuntimeRunner state to finish through — build the terminal RunOutcome
  * directly instead of faking a state-machine run.
  */
-function failedConfigOutcome(runId: string, error: ErrorInfo, now: number): RunOutcome {
+function failedConfigOutcome(runId: string, error: ErrorInfo, now: number, label?: string): RunOutcome {
   const diag: RunDiagnostics = {
     createdAt: now,
     phase: "resolve_config",
@@ -137,6 +137,7 @@ function failedConfigOutcome(runId: string, error: ErrorInfo, now: number): RunO
     degraded: [],
     staleInputs: 0,
     unkillable: [],
+    ...(label !== undefined ? { label } : {}),
     error,
   };
   return { runId, status: "failed", error, turns: 0, durationMs: 0, diag };
@@ -247,9 +248,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
    * lifecycle event. Persist + emit here through the same channels the
    * effect interpreter uses for state-machine-driven outcomes.
    */
-  const settleConfigFailure = (runId: string, error: ErrorInfo): RunOutcome => {
+  const settleConfigFailure = (runId: string, error: ErrorInfo, label?: string): RunOutcome => {
     const now = deps.clock.now();
-    const outcome = failedConfigOutcome(runId, error, now);
+    const outcome = failedConfigOutcome(runId, error, now, label);
     const snapshot: RunSnapshot = {
       runId,
       generation: outcome.diag.generation,
@@ -313,11 +314,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // starting (e.g. queued behind other synchronous work). H2 is not
         // invoked on this path, so no worktree is created.
         if (spec.request.deadlineAt !== undefined && spec.request.deadlineAt <= deps.clock.now())
-          return settleConfigFailure(spec.runId, {
-            kind: "config",
-            message: "deadlineAt already expired",
-            retryable: false,
-          });
+          return settleConfigFailure(
+            spec.runId,
+            {
+              kind: "config",
+              message: "deadlineAt already expired",
+              retryable: false,
+            },
+            spec.request.label,
+          );
         // Per-spawn thinkingOverride (Agent tool `thinking` param) wins over
         // the agent type's configured thinkingLevel; neither set => leave the
         // session to pi's global defaultThinkingLevel.
@@ -403,7 +408,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             spec.budget.startupMs,
             deps.clock,
           );
-          if (!resolved.ok) return settleConfigFailure(spec.runId, resolved.error);
+          if (!resolved.ok) return settleConfigFailure(spec.runId, resolved.error, spec.request.label);
           sessionSpec = resolved.value;
         }
         // X11: re-applied at bind and every turn_end (runtime/runner.ts), not

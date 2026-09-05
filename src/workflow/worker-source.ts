@@ -157,6 +157,7 @@ function workflowFn() {
 function agent(prompt, opts) {
   if (typeof prompt !== "string") return Promise.reject(new TypeError("agent(prompt, opts?): prompt must be a string"));
   var o = opts || {};
+  var fullResult = o.fullResult === true;
   var effectivePhase = typeof o.phase === "string" ? o.phase : currentPhase;
   var mergedOpts = effectivePhase !== undefined ? Object.assign({}, o, { phase: effectivePhase }) : o;
   return callHost("agent", { prompt: prompt, opts: mergedOpts }, hostCallMs).then(function (ack) {
@@ -172,6 +173,7 @@ function agent(prompt, opts) {
     // (unknown type, budget exhausted, HR1/HR2 timeout) reject instead — see
     // the rejection path above and §5.3's "narrowed" agentType row.
     if (!outcome.ok) return null;
+    if (fullResult) return { text: outcome.value == null ? null : outcome.value, runId: outcome.runId || null, label: outcome.label || null };
     return outcome.value;
   });
 }
@@ -526,14 +528,14 @@ commPort.on("message", (msg) => {
       // error), or this settle raced ahead of its own ack — buffer it
       // briefly so a \`waitForSettle()\` that registers moments later still
       // picks it up instead of hanging until HR1's own timeout.
-      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens });
+      bufferedSettles.set(msg.callId, { ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label });
       const cleanup = setTimeout(() => bufferedSettles.delete(msg.callId), BUFFERED_SETTLE_TTL_MS);
       if (typeof cleanup.unref === "function") cleanup.unref();
       return;
     }
     pendingSettles.delete(msg.callId);
     clearTimeout(pending.timer);
-    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens });
+    pending.resolve({ ok: !!msg.ok, value: msg.value, error: msg.error, outputTokens: msg.outputTokens, runId: msg.runId, label: msg.label });
     return;
   }
 });

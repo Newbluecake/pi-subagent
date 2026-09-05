@@ -60,7 +60,9 @@ export function createWorkflowChildSpawner(spawn: SpawnService, types: AgentType
         // `min(4, concurrencyLimit-1)`) is a *local* gate layered on top of,
         // never a substitute for, T1's queue-timeout protection.
       });
-      return "error" in result ? { error: { message: result.error.message } } : { runId: result.runId };
+      return "error" in result
+        ? { error: { message: result.error.message } }
+        : { runId: result.runId, ...(result.label !== undefined ? { label: result.label } : {}) };
     },
     abort(runId, cause) {
       return spawn.abort(runId, toCoreStopCause(cause));

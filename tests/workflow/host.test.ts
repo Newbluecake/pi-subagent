@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
+import type { JournalEntry, ReplayIndex } from "../../src/workflow/types.js";
 import { createWorkerHost } from "../../src/workflow/lifecycle.js";
 import {
   attachHostCallHandler,
@@ -182,6 +183,90 @@ describe("host.ts: agent() call/ack/settle (§3.3 HR3)", () => {
     expect(spawnCalls).toBe(0);
     const ack = h.sent.find((m) => (m as { id?: string }).id === "1") as { ok: boolean };
     expect(ack.ok).toBe(false);
+  });
+});
+
+describe("host.ts: replay label echo (§5.3 P1b)", () => {
+  it("omits runId/label from replay settle envelope but keeps the requested label in summary/event", async () => {
+    const h = harness();
+    await h.boot();
+    const events: WorkflowChildEvent[] = [];
+    const entry = {
+      v: 1,
+      scope: "content",
+      key: "key",
+      chainDigestBefore: "root",
+      occurrence: 0,
+      agentType: "worker",
+      status: "completed",
+      value: "cached",
+      completedAt: 1,
+      durationMs: 0,
+      digest: "digest",
+    } as JournalEntry;
+    const index: ReplayIndex = {
+      scope: "content",
+      lookup: () => entry,
+      stats: { loadedEntries: 1, corruptLines: 0, scopeMismatch: 0 },
+    };
+    const handler = attachHostCallHandler({
+      clock: h.clock,
+      workerHost: h.workerHost,
+      spawner: { ...noopSpawner(), configHashOf: () => "hash" },
+      gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
+      budget: BASE_BUDGET,
+      onChildEvent: (event) => events.push(event),
+      journal: {
+        store: { append: () => undefined } as never,
+        dir: ".",
+        index,
+        scope: "content",
+        noReplay: false,
+        deterministic: { current: true },
+      },
+    });
+    h.postHostCall("replay-call", "agent", { prompt: "cached", opts: { label: "requested" } });
+    await flush();
+    const settle = h.sent.find((message) => (message as { callId?: string }).callId === "replay-call") as Record<
+      string,
+      unknown
+    >;
+    expect(settle).not.toHaveProperty("runId");
+    expect(settle).not.toHaveProperty("label");
+    expect(handler.children[0]).toMatchObject({ label: "requested", source: "replay" });
+    expect(events.find((event) => event.kind === "settled")).toMatchObject({ label: "requested", source: "replay" });
+  });
+});
+
+describe("host.ts: effective label propagation (§5.3)", () => {
+  it("uses the spawner label in spawned, settled, children, and settle envelope", async () => {
+    const h = harness();
+    await h.boot();
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "derived-run", label: "derived-1" }),
+      abort: async () => true,
+      waitAll: async () => ({ settled: [{ runId: "derived-run", status: "completed", text: "ok" }], pending: [] }),
+    };
+    const events: WorkflowChildEvent[] = [];
+    const handler = attachHostCallHandler({
+      clock: h.clock,
+      workerHost: h.workerHost,
+      spawner,
+      gateRunner: async () => ({ ok: true, code: 0, stdout: "", stderr: "" }),
+      budget: BASE_BUDGET,
+      onChildEvent: (event) => events.push(event),
+    });
+    h.postHostCall("label-call", "agent", { prompt: "work", opts: { label: "requested" } });
+    await flush();
+    expect(events.find((event) => event.kind === "spawned")?.label).toBe("derived-1");
+    expect(events.find((event) => event.kind === "settled")?.label).toBe("derived-1");
+    expect(handler.children[0]?.label).toBe("derived-1");
+    const settle = h.sent.find((message) => (message as { callId?: string }).callId === "label-call") as {
+      runId?: string;
+      label?: string;
+    };
+    expect(settle.runId).toBe("derived-run");
+    expect(settle.label).toBe("derived-1");
   });
 });
 

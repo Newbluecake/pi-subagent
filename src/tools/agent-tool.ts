@@ -16,7 +16,7 @@ import { truncateResultText } from "./result-text.js";
  * cannot call abort()/waitAll() on unrelated runs).
  */
 export interface NestedSpawnPort {
-  spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
+  spawn(req: SpawnRequest): Promise<{ runId: RunId; label?: string } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
 }
 
@@ -35,6 +35,7 @@ export interface ForegroundProgressPort {
 /** M-B: partial-update / final-result details consumed by renderResult. */
 export interface AgentToolDetails {
   runId?: string;
+  label?: string;
   status?: string;
   turns?: number;
   durationMs?: number;
@@ -173,6 +174,10 @@ function parseModel(model?: string): { provider: string; id: string } | undefine
   return model ? parseStrictModelRef(model) : undefined;
 }
 
+function labelMarker(label: string, runId: string, status: string): string {
+  return `[subagent label: "${label}" · run_id: ${runId} · status: ${status}] — 用户可 @${label} 直接向它发消息`;
+}
+
 export function createAgentTool(deps: {
   spawn: NestedSpawnPort;
   parentRunId?: string;
@@ -207,7 +212,7 @@ export function createAgentTool(deps: {
       "with get_subagent_result after that notification arrives, rather than blocking with wait: true — a " +
       "blocking wait monopolizes the agent loop, so the user cannot enter a new command until it returns. Use " +
       "steer_subagent to send a follow-up instruction to a still-running one. A foreground call that exceeds the configured auto-background threshold returns early with a run_id (the run keeps going; you will be notified on completion). abort_subagent stops a running subagent. Set resume to the Agent label or run_id of a terminal run to continue its persisted session. " +
-      "Set schema to require a structured (schema-validated) result instead of free text." +
+      "Set schema to require a structured (schema-validated) result instead of free text. The effective label is reported in the tool result and should be used for @mentions." +
       nestedNote,
     promptSnippet:
       "Agent(description, prompt, subagent_type, model?, thinking?, resume?, schema?, run_in_background?) - spawn or resume a bounded subagent",
@@ -261,18 +266,20 @@ export function createAgentTool(deps: {
       if (params.run_in_background) {
         const spawned = await deps.spawn.spawn({ ...baseRequest, ...(signal ? { signal } : {}) });
         if ("error" in spawned) throw new Error(spawned.error.message);
+        const effectiveLabel = spawned.label ?? params.description;
         return {
           content: [
             {
               type: "text" as const,
-              text: `Subagent "${params.description}" started in background (run_id: ${spawned.runId}). You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
+              text: `Subagent "${effectiveLabel}" started in background (run_id: ${spawned.runId}). You will receive a completion notification when it finishes — do not block or poll for it now; collect the result with get_subagent_result(run_id: "${spawned.runId}") after the notification arrives.`,
             },
+            { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
           ],
-          details: { runId: spawned.runId, background: true },
+          details: { runId: spawned.runId, label: effectiveLabel, background: true },
         };
       }
       const outcome = await (async (): Promise<
-        RunOutcome | { content: [{ type: "text"; text: string }]; details: AgentToolDetails }
+        RunOutcome | { content: Array<{ type: "text"; text: string }>; details: AgentToolDetails }
       > => {
         // M-B: when a progress port is wired (top-level tool), spawn first to
         // learn the runId, stream 1 Hz partial updates from the live snapshot
@@ -296,7 +303,7 @@ export function createAgentTool(deps: {
             forwardAbort = false;
             if (relayListenerAttached) signal!.removeEventListener("abort", onAbort);
           };
-          let spawned: { runId: RunId } | { error: ErrorInfo };
+          let spawned: { runId: RunId; label?: string } | { error: ErrorInfo };
           try {
             spawned = await deps.spawn.spawn({ ...baseRequest, expectAck: true, signal: relay.signal });
           } catch (error) {
@@ -325,14 +332,16 @@ export function createAgentTool(deps: {
             if (waited.kind === "pending") {
               progress.markAutoBackgrounded?.(spawned.runId);
               stopForwarding();
+              const effectiveLabel = spawned.label ?? params.description;
               return {
                 content: [
                   {
                     type: "text" as const,
-                    text: `Subagent "${params.description}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget, and you will receive a completion notification when it finishes; collect it then with get_subagent_result(run_id: "${spawned.runId}"). Meanwhile you can use steer_subagent to send a follow-up instruction, or abort_subagent to stop it.`,
+                    text: `Subagent "${effectiveLabel}" is still running after ${formatDuration(autoMs)} and has been moved to the background (run_id: ${spawned.runId}). The run was NOT stopped — it keeps running under its normal time budget, and you will receive a completion notification when it finishes; collect it then with get_subagent_result(run_id: "${spawned.runId}"). Meanwhile you can use steer_subagent to send a follow-up instruction, or abort_subagent to stop it.`,
                   },
+                  { type: "text" as const, text: labelMarker(effectiveLabel, spawned.runId, "running") },
                 ],
-                details: { runId: spawned.runId, background: true, autoBackgrounded: true },
+                details: { runId: spawned.runId, label: effectiveLabel, background: true, autoBackgrounded: true },
               };
             }
             stopForwarding();
@@ -351,8 +360,9 @@ export function createAgentTool(deps: {
         const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
         const tail = outcome.text?.trim();
         const excerpt = tail ? (tail.length > 500 ? `…${tail.slice(-500)}` : tail) : undefined;
+        const effectiveLabel = outcome.diag.label ?? params.description;
         const parts = [
-          `Subagent "${params.description}" did not complete successfully: ${reason} (run_id: ${outcome.runId}).`,
+          `Subagent "${effectiveLabel}" (run_id: ${outcome.runId}, label: "${effectiveLabel}") did not complete successfully: ${reason}.`,
         ];
         if (outcome.diag.sessionFile) {
           parts.push(`A persisted session may be resumable — retry with resume: "${outcome.runId}".`);
@@ -362,25 +372,26 @@ export function createAgentTool(deps: {
         if (excerpt) parts.push(`Partial output (tail): ${excerpt}`);
         throw new Error(parts.join(" "));
       }
+      const effectiveLabel = outcome.diag.label ?? params.description;
+      const resultText =
+        outcome.structuredResult !== undefined
+          ? JSON.stringify(outcome.structuredResult)
+          : truncateResultText(
+              outcome.text ?? "(subagent completed with no text output)",
+              deps.resultMaxChars?.() ?? 0,
+              outcome.diag.sessionFile,
+            ).text;
       return {
         content: [
-          {
-            type: "text" as const,
-            text:
-              outcome.structuredResult !== undefined
-                ? JSON.stringify(outcome.structuredResult)
-                : truncateResultText(
-                    outcome.text ?? "(subagent completed with no text output)",
-                    deps.resultMaxChars?.() ?? 0,
-                    outcome.diag.sessionFile,
-                  ).text,
-          },
+          { type: "text" as const, text: resultText },
+          { type: "text" as const, text: labelMarker(effectiveLabel, outcome.runId, outcome.status) },
         ],
         // pi usage accounting: the child session's spend rides on this tool
         // result so pi's own totals (footer, /session, RPC) include it.
         ...(outcome.usage ? { usage: toPiToolUsage(outcome.usage) } : {}),
         details: {
           runId: outcome.runId,
+          label: effectiveLabel,
           status: outcome.status,
           turns: outcome.turns,
           durationMs: outcome.durationMs,

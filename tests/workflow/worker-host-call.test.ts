@@ -86,7 +86,7 @@ async function bootReal(
 describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regression coverage)", () => {
   it("a normal agent() call round-trips through the real worker and resolves to the fake child's result", async () => {
     const spawner: ChildSpawner = {
-      spawn: async () => ({ runId: "r1" }),
+      spawn: async () => ({ runId: "r1", label: "worker-label" }),
       abort: async () => true,
       waitAll: async ({ runIds }) => ({
         settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "hello from child" })),
@@ -97,6 +97,28 @@ describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regressi
     const result = await outcome;
     expect(result.threw).toBeUndefined();
     expect(result.returned).toBe("hello from child");
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("fullResult returns the settle envelope identity while the default remains a string", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "r-full", label: "full-label" }),
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "completed" as const, text: "full text" })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith(
+        'const a = await agent("x", { fullResult: true }); const b = await agent("y"); return JSON.stringify({ a, b });',
+      ),
+      spawner,
+    );
+    const result = await outcome;
+    expect(result.returned).toBe(
+      JSON.stringify({ a: { text: "full text", runId: "r-full", label: "full-label" }, b: "full text" }),
+    );
     await host.terminate("test-done");
   }, 10_000);
 
@@ -116,6 +138,23 @@ describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regressi
     const result = await outcome;
     expect(result.threw).toBeUndefined();
     expect(result.returned).toBe("was-null");
+    await host.terminate("test-done");
+  }, 10_000);
+
+  it("maps a failed fullResult settle to null without identity fields", async () => {
+    const spawner: ChildSpawner = {
+      spawn: async () => ({ runId: "r-failed", label: "failed-label" }),
+      abort: async () => true,
+      waitAll: async ({ runIds }) => ({
+        settled: runIds.map((runId) => ({ runId, status: "failed" as const, error: { message: "boom" } })),
+        pending: [],
+      }),
+    };
+    const { host, outcome } = await bootReal(
+      scriptWith('const r = await agent("x", { fullResult: true }); return r === null ? "null" : JSON.stringify(r);'),
+      spawner,
+    );
+    expect((await outcome).returned).toBe("null");
     await host.terminate("test-done");
   }, 10_000);
 

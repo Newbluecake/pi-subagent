@@ -284,7 +284,7 @@ describe("auto-background behavior", () => {
       (() => {}) as never,
       {} as never,
     );
-    expect(result.details).toEqual({ runId: "run-bg", background: true, autoBackgrounded: true });
+    expect(result.details).toEqual({ runId: "run-bg", label: "demo", background: true, autoBackgrounded: true });
     expect(result.content[0]!.text).toContain("get_subagent_result");
     expect(result.content[0]!.text).toContain("NOT stopped");
     expect(requestSignals[0]).not.toBe(controller.signal);

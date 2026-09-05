@@ -38,6 +38,7 @@ import type {
 
 export interface ChildSpawnResult {
   readonly runId: RunId;
+  readonly label?: string;
 }
 export interface ChildSpawnError {
   readonly error: { readonly message: string };
@@ -330,7 +331,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       kind: "settled",
       callId: enriched.callId,
       ...(enriched.runId !== undefined ? { runId: enriched.runId } : {}),
-      ...(label !== undefined ? { label } : {}),
+      ...(enriched.label !== undefined ? { label: enriched.label } : {}),
       ...(agentType !== undefined ? { agentType } : {}),
       ...(enriched.phaseId !== undefined ? { phaseId: enriched.phaseId } : {}),
       status: enriched.status,
@@ -617,6 +618,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
     }
 
     const bound = registry.bind(callId, spawned.runId);
+    const effectiveLabel = spawned.label ?? label;
+    if (effectiveLabel !== undefined) labelOf.set(callId, effectiveLabel);
     if (bound.cancelNow) {
       // M3.3 fix (was previously silently dropped): a cancel arrived while
       // this `agent()`'s `spawner.spawn()` call was still in flight, so
@@ -640,7 +643,7 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
       kind: "spawned",
       callId,
       runId: spawned.runId,
-      ...(label !== undefined ? { label } : {}),
+      ...(effectiveLabel !== undefined ? { label: effectiveLabel } : {}),
       agentType,
       ...(phaseId !== undefined ? { phaseId } : {}),
       at: deps.clock.now(),
@@ -716,6 +719,8 @@ export function attachHostCallHandler(deps: HostCallHandlerDeps): HostCallHandle
               ok: true,
               value: outcome.text ?? null,
               ...(outcome.usage?.output !== undefined ? { outputTokens: outcome.usage.output } : {}),
+              runId: outcome.runId,
+              ...(effectiveLabel !== undefined ? { label: effectiveLabel } : {}),
             }
           : { kind: "host_settle", callId, ok: false, error: outcome.error ?? { message: `child ${outcome.status}` } };
       deps.workerHost.send(settleMsg);

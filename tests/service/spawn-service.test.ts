@@ -78,13 +78,132 @@ describe("SpawnService", () => {
       const other = await service.spawn({ type: "worker", prompt: "other", label: "other" });
       if (!("runId" in other)) throw new Error("other spawn failed");
       await new Promise((resolve) => setTimeout(resolve, 0));
-      await service.spawn({ type: "worker", prompt: "conflict", label: "builder", resumeFrom: other.runId });
+      const conflict = await service.spawn({
+        type: "worker",
+        prompt: "conflict",
+        label: "builder",
+        resumeFrom: other.runId,
+      });
+      if (!("runId" in conflict)) throw new Error("conflict resume failed");
       expect(service.getLabel?.("builder")?.runId).toBe(resumed.runId);
-      expect(warning).toHaveBeenCalledWith(expect.stringContaining('label conflict for "builder"'));
+      expect(service.getLabel?.("builder-2")?.runId).toBe(conflict.runId);
+      expect(warning).not.toHaveBeenCalledWith(expect.stringContaining('label conflict for "builder"'));
     } finally {
       warning.mockRestore();
     }
   });
+  it("derives, sanitizes, and uniquifies labels before starting the runner", async () => {
+    const seen: string[] = [];
+    const onLabel = vi.fn();
+    const service = createSpawnService({
+      ...deps({
+        run: async (spec) => {
+          seen.push(spec.request.label ?? "");
+          return { ...outcome, runId: spec.runId, diag: { ...outcome.diag, label: spec.request.label } };
+        },
+      }),
+      onLabel,
+    });
+    const first = await service.spawn({ type: "worker", prompt: "first", label: "sleep 3" });
+    const second = await service.spawn({ type: "worker", prompt: "second", label: "sleep 3" });
+    if (!("runId" in first) || !("runId" in second)) throw new Error("spawn failed");
+    expect(first.label).toBe("sleep-3");
+    expect(second.label).toBe("sleep-3-2");
+    expect(seen).toEqual(["sleep-3", "sleep-3-2"]);
+    expect(onLabel).toHaveBeenNthCalledWith(2, "sleep-3-2", expect.anything(), { resumed: false });
+  });
+
+  it("derives a label from the prompt when the request has none", async () => {
+    const service = createSpawnService({
+      ...deps({
+        run: async (spec) => ({ ...outcome, runId: spec.runId, diag: { ...outcome.diag, label: spec.request.label } }),
+      }),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "\n\nReview the change\nmore" });
+    if (!("runId" in started)) throw new Error("spawn failed");
+    expect(started.label).toBe("Review-the-change");
+    expect(service.getLabel?.("Review-the-change")?.runId).toBe(started.runId);
+  });
+
+  it("falls back from an empty label to the prompt-derived label", async () => {
+    const service = createSpawnService({
+      ...deps({
+        run: async (spec) => ({ ...outcome, runId: spec.runId, diag: { ...outcome.diag, label: spec.request.label } }),
+      }),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "Review the change", label: "   " });
+    if (!("runId" in started)) throw new Error("spawn failed");
+    expect(started.label).toBe("Review-the-change");
+  });
+
+  it("uses agent fallback for run-id-shaped labels and keeps it mentionable", async () => {
+    const service = createSpawnService({ ...deps({ run: async (spec) => ({ ...outcome, runId: spec.runId }) }) });
+    const started = await service.spawn({ type: "worker", prompt: "work", label: "r_ABCDEFGH" });
+    if (!("runId" in started)) throw new Error("spawn failed");
+    expect(started.label).toBe("agent");
+    expect(service.getLabel?.("agent")?.runId).toBe(started.runId);
+  });
+
+  it("fails label allocation at MAX without admission side effects", async () => {
+    const labelIndex = new Map<string, { runId: string; type: "worker"; parent: "root" }>();
+    for (let i = 1; i <= 999; i += 1)
+      labelIndex.set(i === 1 ? "agent" : `agent-${i}`, { runId: `old-${i}`, type: "worker", parent: "root" });
+    const onLabel = vi.fn();
+    const service = createSpawnService({
+      ...deps({
+        run: async () => {
+          throw new Error("must not run");
+        },
+      }),
+      labelIndex,
+      onLabel,
+    });
+    const result = await service.spawn({ type: "worker", prompt: "   \n\t" });
+    expect(result).toMatchObject({ error: { kind: "config" } });
+    expect(labelIndex.size).toBe(999);
+    expect(service.snapshots()).toHaveLength(0);
+    expect(onLabel).not.toHaveBeenCalled();
+  });
+
+  it("resume registers a new label when it is unoccupied", async () => {
+    const sessionFile = new URL("../../package.json", import.meta.url).pathname;
+    const runner: Runner = {
+      run: async (spec) => ({ ...outcome, runId: spec.runId, diag: { ...outcome.diag, sessionFile } }),
+    };
+    const service = createSpawnService({ ...deps(runner) });
+    const first = await service.spawn({ type: "worker", prompt: "first" });
+    if (!("runId" in first)) throw new Error("spawn failed");
+    await service.waitOutcome(first.runId);
+    const resumed = await service.spawn({
+      type: "worker",
+      prompt: "resume",
+      label: "new-label",
+      resumeFrom: first.runId,
+    });
+    if (!("runId" in resumed)) throw new Error(`resume failed: ${resumed.error.message}`);
+    expect(resumed.label).toBe("new-label");
+    expect(service.getLabel?.("new-label")?.runId).toBe(resumed.runId);
+  });
+
+  it("resume without a usable label derives one from the prompt", async () => {
+    const sessionFile = new URL("../../package.json", import.meta.url).pathname;
+    const runner: Runner = {
+      run: async (spec) => ({ ...outcome, runId: spec.runId, diag: { ...outcome.diag, sessionFile } }),
+    };
+    const service = createSpawnService({ ...deps(runner) });
+    const first = await service.spawn({ type: "worker", prompt: "first" });
+    if (!("runId" in first)) throw new Error("spawn failed");
+    await service.waitOutcome(first.runId);
+    const resumed = await service.spawn({
+      type: "worker",
+      prompt: "Continue the work",
+      label: "   ",
+      resumeFrom: first.runId,
+    });
+    if (!("runId" in resumed)) throw new Error(`resume failed: ${resumed.error.message}`);
+    expect(resumed.label).toBe("Continue-the-work");
+  });
+
   it("does not create a timer for an unbounded wait", async () => {
     vi.useFakeTimers();
     try {
@@ -253,6 +372,26 @@ describe("SpawnService", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(notified?.error?.message).toBe("boom");
     expect(service.snapshots().find((s) => s.runId === notified?.runId)?.outcome?.error?.message).toBe("boom");
+  });
+
+  it("preserves the effective label on a runner failure snapshot and notification", async () => {
+    const notifications: RunOutcome[] = [];
+    const service = createSpawnService({
+      ...deps({
+        run: async () => {
+          throw new Error("runner boom");
+        },
+      }),
+      notifyTerminalFailure: (value) => notifications.push(value),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x", label: "failed label" });
+    if (!("runId" in started)) throw new Error("spawn failed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const snapshot = service.snapshots().find((value) => value.runId === started.runId);
+    expect(snapshot?.diag.label).toBe("failed-label");
+    expect(snapshot?.outcome?.diag.label).toBe("failed-label");
+    expect(service.getLabel?.("failed-label")?.runId).toBe(started.runId);
+    expect(notifications[0]?.diag.label).toBe("failed-label");
   });
 
   it("passes slotless nested requests and returns the runner outcome", async () => {

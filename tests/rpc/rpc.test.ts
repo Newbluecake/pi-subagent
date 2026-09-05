@@ -59,6 +59,17 @@ describe("cross-extension RPC", () => {
     await expect(client.ping()).rejects.toThrow("timed out after 10ms");
   });
 
+  it("透传 spawn 成功结果中的生效 label", async () => {
+    const events = new MemoryEvents();
+    const spawn = vi.fn().mockResolvedValue({ runId: "run-2", label: "x-2" });
+    createRPCServer({ events, spawn: { spawn }, query: { get: vi.fn(), stop: vi.fn() } });
+    const client = createRPCClient({ events, timeoutMs: 50, requestId: () => "spawn-label" });
+    await expect(client.call("spawn", { type: "worker", prompt: "run" })).resolves.toEqual({
+      runId: "run-2",
+      label: "x-2",
+    });
+  });
+
   it("clamps extreme spawn budgets before calling the service", async () => {
     const events = new MemoryEvents();
     const spawn = vi.fn().mockResolvedValue({ runId: "run-1" });

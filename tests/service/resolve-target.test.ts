@@ -50,6 +50,26 @@ describe("model-facing target resolution", () => {
     expect(result.candidates).toHaveLength(1);
   });
 
+  it("resolves derived and suffixed labels exactly without prefix ambiguity", () => {
+    const labels = new Map<string, { runId: string }>([
+      ["builder", { runId: "r_00000001" }],
+      ["builder-2", { runId: "r_00000002" }],
+    ]);
+    const snapshots = [snapshot("r_00000001"), snapshot("r_00000002")];
+    expect(resolveRunId("builder-2", deps(snapshots, labels))).toEqual({ ok: true, runId: "r_00000002" });
+    expect(resolveRunId("builder", deps(snapshots, labels))).toEqual({ ok: true, runId: "r_00000001" });
+  });
+
+  it("resolves a re-pointed label and keeps old and new labels addressable", () => {
+    const labels = new Map<string, { runId: string }>([
+      ["x", { runId: "r_old0001" }],
+      ["x-2", { runId: "r_new0001" }],
+    ]);
+    const snapshots = [snapshot("r_old0001"), snapshot("r_new0001", "running")];
+    expect(resolveRunId("x", deps(snapshots, labels))).toEqual({ ok: true, runId: "r_old0001" });
+    expect(resolveRunId("x-2", deps(snapshots, labels))).toEqual({ ok: true, runId: "r_new0001" });
+  });
+
   it("normalizes candidate labels and caps the list", () => {
     const labels = new Map<string, { runId: string }>();
     const snapshots = Array.from({ length: 12 }, (_, i) => {

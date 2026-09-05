@@ -125,7 +125,9 @@ describe("tools/agent-tool: foreground failure diagnostics", () => {
         undefined,
         {} as never,
       ),
-    ).rejects.toThrow(/did not complete successfully: boom.*run_id: failed-42.*may be resumable.*resume: "failed-42"/);
+    ).rejects.toThrow(
+      /run_id: failed-42.*label: "demo".*did not complete successfully: boom.*may be resumable.*resume: "failed-42"/,
+    );
     try {
       await tool.execute(
         "tc2",
@@ -196,6 +198,88 @@ describe("tools/agent-tool: timeout_ms budget override", () => {
       {} as never,
     );
     expect(port2.seen?.budgetOverride).toBeUndefined();
+  });
+});
+
+describe("tools/agent-tool: label result contract", () => {
+  it("adds an effective-label marker as a separate final content block", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async () => outcome("run-1", {}, { label: "derived-1" });
+    const result = (await createAgentTool({ spawn: port }).execute(
+      "tc",
+      {
+        description: "requested",
+        prompt: "p",
+        subagent_type: "worker",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )) as { content: Array<{ text: string }>; details: { label?: string } };
+    expect(result.details.label).toBe("derived-1");
+    expect(result.content).toHaveLength(2);
+    expect(result.content[1]?.text).toContain('[subagent label: "derived-1"');
+  });
+
+  it("keeps structured JSON in content[0] and puts the marker in content[1]", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async () => outcome("run-2", { structuredResult: { ok: true } }, { label: "structured" });
+    const result = (await createAgentTool({ spawn: port }).execute(
+      "tc",
+      {
+        description: "requested",
+        prompt: "p",
+        subagent_type: "worker",
+        schema: { type: "object" },
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )) as { content: Array<{ text: string }> };
+    expect(result.content).toHaveLength(2);
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ ok: true });
+    expect(result.content[1]?.text).toContain('label: "structured"');
+  });
+
+  it("uses the label returned by background spawn", async () => {
+    const port = fakePort();
+    port.spawn = async () => ({ runId: "run-bg", label: "derived-bg" });
+    const result = (await createAgentTool({ spawn: port }).execute(
+      "tc",
+      {
+        description: "requested",
+        prompt: "p",
+        subagent_type: "worker",
+        run_in_background: true,
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )) as { content: Array<{ text: string }>; details: { label?: string } };
+    expect(result.details.label).toBe("derived-bg");
+    expect(result.content[0]?.text).toContain('Subagent "derived-bg"');
+    expect(result.content[1]?.text).toContain("@derived-bg");
+  });
+
+  it("carries the re-pointed label through a resume result", async () => {
+    const port = fakePort();
+    port.spawnAndWait = async (req) => {
+      expect(req.resumeFrom).toBe("old");
+      return outcome("run-resumed", {}, { label: "repointed" });
+    };
+    const result = (await createAgentTool({ spawn: port }).execute(
+      "tc",
+      {
+        description: "requested",
+        prompt: "p",
+        subagent_type: "worker",
+        resume: "old",
+      },
+      undefined,
+      undefined,
+      {} as never,
+    )) as { content: Array<{ text: string }> };
+    expect(result.content[1]?.text).toContain("@repointed");
   });
 });
 

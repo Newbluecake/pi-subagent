@@ -469,6 +469,9 @@ export type HostSettleEnvelope =
       readonly callId: string;
       readonly ok: true;
       readonly value: unknown;
+      /** Effective child identity, omitted for replay hits. */
+      readonly runId?: string;
+      readonly label?: string;
       /** M3.6 (workflow design §5.2 `budget.spent()`): this call's live child's output-token usage, so the sandbox's cumulative counter can advance. Absent (not `0`) for a replay hit — a cached result costs nothing, and `budget.spent()`'s doc explicitly promises it "never fabricates a number" for anything it cannot actually account for. */
       readonly outputTokens?: number;
     }

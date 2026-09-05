@@ -53,7 +53,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
   tool surfaces, `/agent` command, fleet widget, `@label` mentions, RPC, extension points
-  (worktree isolation).
+  (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
 - `docs/dev/` — per-feature design docs (auto-background, delivery v2, ...); read the matching
   one before changing that subsystem.

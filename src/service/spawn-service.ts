@@ -1,5 +1,6 @@
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
+import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import type {
@@ -27,7 +28,7 @@ export interface SpawnLabelTarget {
 }
 export type BoundedWaitResult = { kind: "settled"; outcome: RunOutcome } | { kind: "pending" };
 export interface SpawnService {
-  spawn(req: SpawnRequest): Promise<{ runId: RunId } | { error: ErrorInfo }>;
+  spawn(req: SpawnRequest): Promise<{ runId: RunId; label?: string } | { error: ErrorInfo }>;
   spawnAndWait(req: SpawnRequest): Promise<RunOutcome>;
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
   expectsAck(runId: RunId): boolean;
@@ -76,6 +77,8 @@ export interface SpawnServiceDeps {
    */
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
   runIdTaken?: (id: string) => boolean;
+  /** Test seam for pre-populating the process-local label index. */
+  labelIndex?: Map<string, SpawnLabelTarget>;
 }
 export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { snapshots(): readonly RunSnapshot[] } {
   const now = deps.now ?? (() => Date.now());
@@ -87,7 +90,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
   const running = new Set<RunId>();
   const claimedRunIds = new Set<RunId>();
   const resumeLocks = new Set<string>();
-  const labels = new Map<string, SpawnLabelTarget>();
+  const labels = deps.labelIndex ?? new Map<string, SpawnLabelTarget>();
   const tombstones = deps.tombstones ?? new TombstoneStore(30 * 60 * 1000, now);
   // X3: nested-delegation bookkeeping. `nesting` holds, for every currently
   // *running* top-level or nested run, the depth it was spawned at plus the
@@ -211,6 +214,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           degraded: [],
           staleInputs: 0,
           unkillable: [],
+          ...(req.label !== undefined ? { label: req.label } : {}),
         },
         error: toErrorInfo(error),
       };
@@ -322,12 +326,38 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       const runId = newRunId(
         (id) => records.has(id) || running.has(id) || tombstones.has(id) || deps.runIdTaken?.(id) === true,
       );
+      // Label planning is deliberately read-only and completes before the
+      // first mutable admission write (resume locks included).
+      const requestedBase =
+        sanitizeLabelBase(req.label ?? "") ?? sanitizeLabelBase(firstNonEmptyLine(req.prompt) ?? "");
+      let base = requestedBase ?? "agent";
+      if (isRunId(base)) {
+        console.warn(`[pi-subagent] label "${base}" looks like a run id; using a fallback label instead`);
+        base = "agent";
+      }
+      const resumeTarget = req.resumeFrom ? resolveRun(req.resumeFrom) : undefined;
+      const prior = labels.get(base);
+      const repoint =
+        req.resumeFrom !== undefined &&
+        prior !== undefined &&
+        resumeTarget?.ok === true &&
+        prior.runId === resumeTarget.runId;
+      const effective = repoint ? base : deriveUniqueLabel(base, (label) => labels.has(label));
+      if (effective === undefined)
+        return {
+          error: {
+            kind: "config",
+            message: `cannot derive a unique label from "${base}": all 999 numbered variants are taken — pass a different label/description`,
+            retryable: false,
+          },
+        };
+      const labelAction: "register" | "repoint" = repoint ? "repoint" : "register";
+
       if (req.resumeFrom) {
         // Resolve once for the running hint, then resolve the owned session
         // file. Both calls are synchronous and this whole admission section
-        // runs before the first await, so lock checks and writes are atomic
-        // with respect to every other spawn() call in this process.
-        const target = resolveRun(req.resumeFrom);
+        // runs before the first await, so lock checks and writes are atomic.
+        const target = resumeTarget!;
         if (!target.ok) {
           const resume = resolveResume(req.resumeFrom);
           return {
@@ -356,27 +386,10 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
       }
       const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
       const parent = req.parentRunId ?? "root";
-      if (req.label && isRunId(req.label)) {
-        console.warn(`[pi-subagent] label "${req.label}" looks like a run id; not registering it as a label`);
-      } else if (req.label && req.resumeFrom) {
-        const prior = labels.get(req.label);
-        const resolvedTarget = resolveRun(req.resumeFrom);
-        if (prior && resolvedTarget.ok && prior.runId === resolvedTarget.runId) {
-          const target = { runId, type: req.type, parent };
-          labels.set(req.label, target);
-          deps.onLabel?.(req.label, target, { resumed: true });
-        } else if (!prior) {
-          const target = { runId, type: req.type, parent };
-          labels.set(req.label, target);
-          deps.onLabel?.(req.label, target, { resumed: false });
-        } else console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
-      } else if (req.label && !labels.has(req.label)) {
-        const target = { runId, type: req.type, parent };
-        labels.set(req.label, target);
-        deps.onLabel?.(req.label, target, { resumed: false });
-      } else if (req.label) {
-        console.warn(`[pi-subagent] label conflict for "${req.label}"; keeping the first registration`);
-      }
+      const target = { runId, type: req.type, parent };
+      labels.set(effective, target);
+      deps.onLabel?.(effective, target, { resumed: labelAction === "repoint" });
+      resolvedReq = { ...resolvedReq, label: effective };
       nesting.set(runId, { depth, ...(config.canSpawn ? { canSpawn: config.canSpawn } : {}) });
       if (req.expectAck) claimedRunIds.add(runId);
       if (req.parentRunId) {
@@ -390,7 +403,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         deps.onSpawnEdge?.("root", runId);
       }
       void start(resolvedReq, runId, config, budget, lockKeys, depth, admittedModel);
-      return { runId };
+      return { runId, label: effective };
     },
     async spawnAndWait(req) {
       const started = await service.spawn({ ...req, expectAck: true });

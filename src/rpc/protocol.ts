@@ -10,6 +10,8 @@ export const MAX_REQUEST_ID_LENGTH = 128;
 
 const requestId = Type.String({ minLength: 1, maxLength: MAX_REQUEST_ID_LENGTH });
 const budgetNumber = Type.Number({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
+// Spawn replies are a weak/documented contract: successful result is { runId: string, label?: string }.
+// Keep RPC result as Type.Unknown() so transport remains forward-compatible.
 export const SpawnParamsSchema = Type.Object(
   {
     type: Type.String({ minLength: 1, maxLength: 256 }),

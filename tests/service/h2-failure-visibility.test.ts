@@ -153,6 +153,23 @@ describe("H2 failure visibility (store snapshot + lifecycle)", () => {
     expect(store.get("r1")?.status).toBe("failed");
   });
 
+  it("carries the effective label through H2 snapshot, outcome, and notification", async () => {
+    const clock = new FakeClock();
+    const notifications: unknown[] = [];
+    const ext: SubagentExtensionPoints = {
+      resolveSessionSpec: () => {
+        throw new Error("bad labeled config");
+      },
+    };
+    const { runner, store } = buildAdapter(clock, [ext], (payload) => notifications.push(payload));
+    const outcome = await runner.run(spec(type, { label: "derived-label" }));
+    const stored = store.get("r1");
+    expect(stored?.diag.label).toBe("derived-label");
+    expect(stored?.outcome?.diag.label).toBe("derived-label");
+    expect(outcome.diag.label).toBe("derived-label");
+    expect(notifications[0]).toMatchObject({ label: "derived-label" });
+  });
+
   it("enqueues a notification for a background config failure", async () => {
     const clock = new FakeClock();
     const notifications: unknown[] = [];
