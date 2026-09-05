@@ -17,6 +17,9 @@ describe("fabric message protocol", () => {
       "r_ABCDEFGH:r_12345678:x:1",
       "r:root:0:1",
       "r_ABCDEFGH:r_12345678:0:0",
+      "system:r_12345678:1:1",
+      "r_ABCDEFGH:r_12345678:01:1",
+      "r_ABCDEFGH:r_12345678:1:01",
     ]) {
       expect(parseMessageKey(invalid)).toBeUndefined();
     }
@@ -43,9 +46,9 @@ describe("fabric message protocol", () => {
       payload: { text: "do this" },
     };
     expect(formatMessage({ ...base, kind: "finding" }, "parent").header).toContain("不可信输入");
-    expect(formatMessage({ ...base, kind: "finding" }, "parent").text).toBe("do this");
-    expect(formatMessage({ ...base, kind: "directive" }, "parent").text).toContain("fabric-directive");
-    expect(formatMessage({ ...base, kind: "directive" }, "sibling").text).toBe("do this");
+    expect(formatMessage({ ...base, kind: "finding" }, "parent").text).toContain("do this");
+    expect(formatMessage({ ...base, kind: "directive" }, "parent").text).toContain("<fabric-directive>");
+    expect(formatMessage({ ...base, kind: "directive" }, "sibling").text).toContain("do this");
   });
 
   it("represents rejected and dead-letter records with the prescribed states", () => {

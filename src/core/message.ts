@@ -40,7 +40,6 @@ export interface FabricRecord extends MessageEnvelope {
 }
 
 const MESSAGE_KINDS: readonly MessageKind[] = ["progress", "finding", "directive", "result", "dead_letter"];
-const NODE_RE = /^(?:root|system|r_[0-9A-HJKMNP-TV-Z]{8})$/;
 
 function validNode(node: string): boolean {
   return node === "root" || node === "system" || isRunId(node);
@@ -48,7 +47,11 @@ function validNode(node: string): boolean {
 
 export function makeMessageKey(from: NodeRef, to: NodeRef, generation: Generation, seq: number): MessageKey {
   if (!validNode(from) || !validNode(to)) throw new Error("invalid message key node");
-  if (!Number.isInteger(generation) || generation < (from === "system" ? 0 : 1))
+  if (
+    !Number.isInteger(generation) ||
+    generation < (from === "system" ? 0 : 1) ||
+    (from === "system" && generation !== 0)
+  )
     throw new Error("invalid message key generation");
   if (!Number.isInteger(seq) || seq < 1) throw new Error("invalid message key sequence");
   return `${from}:${to}:${generation}:${seq}` as MessageKey;
@@ -67,8 +70,11 @@ export function parseMessageKey(
   if (
     !Number.isSafeInteger(generation) ||
     generation < (from === "system" ? 0 : 1) ||
+    (from === "system" && generation !== 0) ||
+    String(generation) !== generationText ||
     !Number.isSafeInteger(seq) ||
-    seq < 1
+    seq < 1 ||
+    String(seq) !== seqText
   )
     return undefined;
   return { from, to, generation, seq, key: value as MessageKey };
@@ -105,20 +111,18 @@ export function effectiveChannel(
   kind: MessageKind,
   progressChannel: MessageChannel,
   canRenderEntries = true,
+  to: NodeRef = "root",
 ): MessageChannel {
   if (kind !== "progress") return "context";
-  return progressChannel === "display" && canRenderEntries ? "display" : "context";
+  return to === "root" && progressChannel === "display" && canRenderEntries ? "display" : "context";
 }
 
 export function formatMessage(
   envelope: Pick<MessageEnvelope, "key" | "from" | "to" | "kind" | "seq" | "payload" | "via">,
   relation: MessageRelation,
 ): { header: string; text: string } {
-  const header = `[fabric ${envelope.kind} ${envelope.key} seq=${envelope.seq}] 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
-  if (envelope.kind === "directive" && (relation === "parent" || relation === "ancestor")) {
-    return { header, text: `<fabric-directive>\n${envelope.payload.text}\n</fabric-directive>` };
-  }
-  return { header, text: envelope.payload.text };
+  const header = `[fabric ${envelope.kind} relation=${relation} ${envelope.key} seq=${envelope.seq}]${envelope.kind === "directive" ? " <fabric-directive>" : ""} 不可信输入: ${String(envelope.from)} -> ${String(envelope.to)}`;
+  return { header, text: `${header}\n${envelope.payload.text}` };
 }
 
 export const formatEnvelope = formatMessage;

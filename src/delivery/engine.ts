@@ -40,10 +40,34 @@ export function createDeliveryEngine<
 >(options: EngineOptions<R, S>): DeliveryEngine<R, S> {
   const records = new Map<string, R>();
   let frozen = false;
+  for (const [key, record] of (() => {
+    const folded = new Map<string, R>();
+    for (const raw of options.store.list()) {
+      const current = folded.get(raw.key);
+      if (
+        current !== undefined &&
+        (current.updatedAt > raw.updatedAt || (current.updatedAt === raw.updatedAt && current.attempts >= raw.attempts))
+      )
+        continue;
+      const normalized = copy(raw);
+      if (options.memoryOnly.has(normalized.state)) {
+        normalized.state = "pending" as S;
+        for (const field of options.memoryOnlyFields) delete (normalized as Record<string, unknown>)[String(field)];
+      }
+      folded.set(raw.key, normalized);
+    }
+    return folded;
+  })())
+    records.set(key, record);
 
   const withoutMemoryOnly = (patch: Partial<R>): Partial<R> => {
     const result: Record<string, unknown> = { ...(patch as object) };
     for (const field of options.memoryOnlyFields) delete result[String(field)];
+    return result as Partial<R>;
+  };
+  const withoutState = (patch: Partial<R>): Partial<R> => {
+    const result: Record<string, unknown> = { ...(patch as object) };
+    delete result.state;
     return result as Partial<R>;
   };
 
@@ -64,7 +88,6 @@ export function createDeliveryEngine<
       try {
         options.store.put(persisted as R);
       } catch (error) {
-        recordDegraded(record.key, error);
         throw error;
       }
       records.set(record.key, copy(record));
@@ -82,7 +105,11 @@ export function createDeliveryEngine<
       const current = records.get(key);
       if (current === undefined) return undefined;
       const allowedFrom = Array.isArray(from) ? from : [from];
-      if (!allowedFrom.includes(current.state) || !(options.allowed[current.state] ?? []).includes(to))
+      if (
+        !allowedFrom.includes(current.state) ||
+        options.memoryOnly.has(to) ||
+        !(options.allowed[current.state] ?? []).includes(to)
+      )
         return undefined;
       if (guard !== undefined && !guard(current)) return undefined;
       const next = { ...current, ...patch, state: to, updatedAt: options.now() } as R;
@@ -113,10 +140,13 @@ export function createDeliveryEngine<
       if (frozen) return false;
       const current = records.get(key);
       if (current === undefined) return false;
-      const next = { ...current, ...patch, updatedAt: options.now() } as R;
+      const next = { ...current, ...withoutState(patch), state: current.state, updatedAt: options.now() } as R;
       records.set(key, next);
       try {
-        options.store.update(key, withoutMemoryOnly({ ...patch, updatedAt: next.updatedAt } as Partial<R>));
+        options.store.update(
+          key,
+          withoutMemoryOnly(withoutState({ ...patch, updatedAt: next.updatedAt } as Partial<R>)),
+        );
       } catch (error) {
         recordDegraded(key, error);
       }

@@ -92,9 +92,11 @@ describe("DeliveryEngine", () => {
   });
 
   it("annotates without changing state", () => {
-    const { engine } = setup();
+    const { engine, store } = setup();
     engine.put(base());
-    expect(engine.annotate(base().key, { terminalReason: "audit" })).toBe(true);
-    expect(engine.get(base().key)).toMatchObject({ state: "pending", terminalReason: "audit" });
+    expect(engine.annotate(base().key, { state: "delivered" })).toBe(true);
+    expect(engine.get(base().key)?.state).toBe("pending");
+    expect(store.list()[0]?.state).toBe("pending");
+    expect(engine.transition(base().key, "pending", "claimed")).toBeUndefined();
   });
 });

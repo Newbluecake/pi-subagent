@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { MemoryOutboxStore } from "../../src/core/store.js";
+import { createDeliveryEngine } from "../../src/delivery/engine.js";
+import { FabricTree } from "../../src/fabric/tree.js";
+import { FabricThrottle } from "../../src/fabric/throttle.js";
+import { FabricRouter } from "../../src/fabric/router.js";
 import { authorize, makeMessageKey, parseMessageKey, type MessageRelation } from "../../src/core/message.js";
 
 function random(seed: number): () => number {
@@ -25,14 +30,55 @@ describe("fabric seeded properties", () => {
     }
   });
 
-  it("keeps per-link sequence strictly increasing across mixed admission outcomes", () => {
-    const sequences = new Map<string, number>();
-    for (let i = 1; i <= 1000; i++) {
-      const link = i % 3 === 0 ? "r_ABCDEFGH:root:1" : "r_ABCDEFGH:r_12345678:1";
-      const previous = sequences.get(link) ?? 0;
-      const seq = previous + 1;
-      sequences.set(link, seq);
-      expect(seq).toBeGreaterThan(previous);
+  it("keeps router-issued sequence numbers increasing across admitted and rejected records", () => {
+    for (const seed of [1, 7, 31, 101, 0xfab1c]) {
+      const next = random(seed);
+      const store = new MemoryOutboxStore<FabricRecord>();
+      const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+        store,
+        allowed: {
+          pending: ["claimed", "consumed", "dropped", "abandoned"],
+          claimed: ["pending", "delivered", "consumed", "dropped"],
+          delivered: [],
+          consumed: [],
+          dropped: [],
+          abandoned: [],
+        },
+        memoryOnly: new Set(["claimed"]),
+        memoryOnlyFields: ["claimToken"],
+        now: () => 0,
+      });
+      const tree = new FabricTree();
+      tree.append("root", "r_ABCDEFGH");
+      tree.markRunning("r_ABCDEFGH");
+      const router = new FabricRouter(
+        engine,
+        tree,
+        new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
+        {
+          maxPerRun: 3,
+          findingQuota: 3,
+          directiveQuota: 3,
+          deadLetterQuota: 3,
+          maxChars: 100,
+          progressTtlMs: 100,
+          reconcileTtlMs: 100,
+          rootInboxCap: 100,
+        },
+        () => 0,
+      );
+      let previous = 0;
+      for (let i = 0; i < 20; i++) {
+        const result = router.admit("r_ABCDEFGH", {
+          to: "root",
+          kind: "finding",
+          text: String(next()),
+          generation: 1,
+          canMessage: ["child"],
+        });
+        expect(result.seq).toBe(previous + 1);
+        previous = result.seq;
+      }
     }
   });
 });

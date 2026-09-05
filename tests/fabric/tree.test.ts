@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 import { FabricTree } from "../../src/fabric/tree.js";
 
 describe("fabric tree", () => {
+  it("treats unknown and settled nodes as gone, and sweeps expired tombstone data", () => {
+    const tree = new FabricTree();
+    expect(tree.targetState("r_ABCDEFGH")).toBe("gone");
+    tree.append("root", "r_ABCDEFGH");
+    expect(tree.targetState("r_ABCDEFGH")).toBe("pending_start");
+    tree.markRunning("r_ABCDEFGH");
+    expect(tree.targetState("r_ABCDEFGH")).toBe("running");
+    tree.tombstone("r_ABCDEFGH", 10, 5);
+    expect(tree.targetState("r_ABCDEFGH", 100)).toBe("gone");
+    expect(tree.sweep(100)).toBe(1);
+    expect(tree.targetState("r_ABCDEFGH")).toBe("gone");
+  });
+
   it("computes relations, LCA, and route hops", () => {
     const tree = new FabricTree();
     tree.append("root", "r_ABCDEFGH");
