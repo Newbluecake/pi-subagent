@@ -7,6 +7,7 @@ import { formatDuration, formatModelRef, phaseLabel } from "../ui/fleet-panel.js
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { formatWidgetCost } from "../ui/fleet-widget.js";
 import { toPiToolUsage } from "./usage.js";
+import { truncateResultText } from "./result-text.js";
 
 /**
  * Narrow port the Agent tool needs from SpawnService (X3: also the shape the
@@ -190,6 +191,7 @@ export function createAgentTool(deps: {
   /** M-B: live foreground progress (top-level tool only; never handed to nested tools). */
   progress?: ForegroundProgressPort;
   autoBackgroundMs?: () => number;
+  resultMaxChars?: () => number;
 }): ToolDefinition<typeof AgentToolParams> {
   const nestedNote = deps.allowedTypes
     ? ` This is a nested delegation tool: subagent_type is restricted to [${deps.allowedTypes.join(", ")}], every spawned run is slotless (does not consume the concurrency pool), and nesting depth is capped by the host (further attempts beyond the cap are rejected, not silently allowed).`
@@ -367,7 +369,11 @@ export function createAgentTool(deps: {
             text:
               outcome.structuredResult !== undefined
                 ? JSON.stringify(outcome.structuredResult)
-                : (outcome.text ?? "(subagent completed with no text output)"),
+                : truncateResultText(
+                    outcome.text ?? "(subagent completed with no text output)",
+                    deps.resultMaxChars?.() ?? 0,
+                    outcome.diag.sessionFile,
+                  ).text,
           },
         ],
         // pi usage accounting: the child session's spend rides on this tool

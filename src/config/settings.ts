@@ -96,6 +96,8 @@ export interface AgentSettings {
   maxNestedDepth: number;
   /** X7b: always-on agent-tree widget pinned above the editor while subagent runs are active. Default true. */
   fleetWidget: boolean;
+  /** Max chars of a subagent result body returned to callers; 0 = unlimited. */
+  resultMaxChars: number;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
   workflow: WorkflowSettings;
   /** bash auto-background settings (§6). Enabled by default (R4). */
@@ -117,6 +119,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   worktree: { enabled: false, gitTimeoutMs: 30_000 },
   maxNestedDepth: 3,
   fleetWidget: true,
+  resultMaxChars: 8_000,
   workflow: {
     enabled: false,
     budget: {},
@@ -241,6 +244,10 @@ export function loadSettings(source: unknown): AgentSettings {
         ? Math.floor(value.maxNestedDepth)
         : DEFAULT_SETTINGS.maxNestedDepth,
     fleetWidget: typeof value.fleetWidget === "boolean" ? value.fleetWidget : DEFAULT_SETTINGS.fleetWidget,
+    resultMaxChars:
+      typeof value.resultMaxChars === "number" && Number.isFinite(value.resultMaxChars) && value.resultMaxChars >= 0
+        ? Math.floor(value.resultMaxChars)
+        : DEFAULT_SETTINGS.resultMaxChars,
     worktree:
       value.worktree && typeof value.worktree === "object"
         ? {

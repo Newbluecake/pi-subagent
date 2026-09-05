@@ -53,6 +53,8 @@ export interface RuntimeAdapterDeps {
    * by which point index.ts has filled in the ref.
    */
   nestedSpawn?: () => NestedSpawnPort | undefined;
+  /** Live cap for nested Agent foreground result text. */
+  resultMaxChars?: () => number;
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
 }
@@ -324,6 +326,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 parentRunId: spec.runId,
                 allowedTypes: spec.type.canSpawn,
                 forceSlotless: true,
+                ...(deps.resultMaxChars ? { resultMaxChars: deps.resultMaxChars } : {}),
               }),
             );
             grantedReserved.push("Agent");

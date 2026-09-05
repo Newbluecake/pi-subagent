@@ -4,7 +4,7 @@ import { FakeClock } from "../../src/core/clock.js";
 import type { RunOutcome } from "../../src/core/types.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
 import { BasicEffectInterpreter, RuntimeRunner, type ResolvedSpawnRequest } from "../../src/runtime/runner.js";
-import type { SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
+import type { DriverEvent, SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { Watchdog } from "../../src/runtime/watchdog.js";
 
@@ -182,6 +182,48 @@ describe("runner hang bounds", () => {
     const result = await p;
     expect(result.disposed).toBe(true);
     expect(result.escalation.some((e) => e.level === "L2" && !e.ok)).toBe(true);
+  });
+});
+
+describe("final assistant text", () => {
+  it("prefers the final assistant message over streamed narrative deltas", async () => {
+    const clock = new FakeClock();
+    let emit: ((event: DriverEvent) => void) | undefined;
+    const driver: SessionDriver = {
+      create: async () =>
+        handle({
+          getLastAssistantText: () => "final",
+          prompt: async () => {
+            emit?.({ t: "text_delta", delta: "narrative " });
+            emit?.({ t: "turn_end", toolResults: 0 });
+            emit?.({ t: "text_delta", delta: "again" });
+          },
+        }),
+      bind: async (_handle, onEvent) => {
+        emit = onEvent;
+      },
+    };
+    const outcome = await new RuntimeRunner(deps(clock, driver)).run({ ...request, runId: "r-final" }, budget);
+    expect(outcome.text).toBe("final");
+  });
+
+  it("keeps streamed partial output when the final turn reports an error", async () => {
+    const clock = new FakeClock();
+    let emit: ((event: { t: "text_delta"; delta: string }) => void) | undefined;
+    const driver: SessionDriver = {
+      create: async () =>
+        handle({
+          getLastAssistantText: () => "truncated",
+          getTurnError: () => "provider failed",
+          prompt: async () => emit?.({ t: "text_delta", delta: "partial" }),
+        }),
+      bind: async (_handle, onEvent) => {
+        emit = onEvent as typeof emit;
+      },
+    };
+    const outcome = await new RuntimeRunner(deps(clock, driver)).run({ ...request, runId: "r-error-text" }, budget);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.text).toBe("partial");
   });
 });
 

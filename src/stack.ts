@@ -458,6 +458,7 @@ export function buildSessionStack(
     onLifecycle: (event) =>
       pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
     nestedSpawn: () => spawnRef.current,
+    resultMaxChars: () => settings.resultMaxChars,
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定

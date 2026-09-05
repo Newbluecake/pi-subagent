@@ -7,6 +7,7 @@ import {
   DEFAULT_SETTINGS,
   TIME_SETTING_MS_PATHS,
   isTimeSettingKey,
+  loadSettings,
   loadSettingsFromFile,
 } from "../../src/config/settings.js";
 import { secondsKeyOf } from "../../src/config/time-units.js";
@@ -36,6 +37,17 @@ describe("settings file time-unit migration", () => {
   const write = (value: unknown): void => writeFileSync(path, JSON.stringify(value, null, 2) + "\n", "utf8");
   const readBack = (): Record<string, unknown> => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   const warnings = (): string => warn.mock.calls.map((c) => String(c[0])).join("\n");
+
+  it("loads and exposes resultMaxChars with the v3 validation rules", () => {
+    expect(loadSettings({ resultMaxChars: 100 }).resultMaxChars).toBe(100);
+    expect(loadSettings({ resultMaxChars: Number.NaN }).resultMaxChars).toBe(8_000);
+    expect(loadSettings({ resultMaxChars: Number.POSITIVE_INFINITY }).resultMaxChars).toBe(8_000);
+    expect(loadSettings({ resultMaxChars: -5 }).resultMaxChars).toBe(8_000);
+    expect(loadSettings({ resultMaxChars: "100" }).resultMaxChars).toBe(8_000);
+    expect(loadSettings({ resultMaxChars: 3.9 }).resultMaxChars).toBe(3);
+    expect(SETTING_SPECS.resultMaxChars).toMatchObject({ path: "resultMaxChars", live: true });
+    expect(loadSettings({}).resultMaxChars).toBe(8_000);
+  });
 
   it("every duration key is covered by the path list, and only durations", () => {
     // budget.startupRetries is a count, not a duration

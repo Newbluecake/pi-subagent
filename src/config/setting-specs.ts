@@ -136,6 +136,10 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   maxNestedDepth: count("maxNestedDepth", 0, "Max nested delegation depth"),
   rememberAgents: bool("rememberAgents", "Remember the agent registry across sessions"),
   fleetWidget: bool("fleetWidget", "Pin the live agent tree above the editor"),
+  resultMaxChars: {
+    ...count("resultMaxChars", 0, "Max chars of subagent result text returned; 0 = no cap"),
+    live: true,
+  },
   deliveryAttempts: count("deliveryAttempts", 1, "Notification delivery attempts"),
   deliveryBackoffS: seconds("deliveryBackoffMs", { description: "Backoff between delivery attempts" }),
   reconcileTtlS: seconds("reconcileTtlMs", { description: "Retention of delivered records for reconcile" }),

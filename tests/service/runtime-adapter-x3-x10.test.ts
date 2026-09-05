@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { MemoryRunStore } from "../../src/core/store.js";
-import type { AgentTypeConfig, DeliveryPayload, RunSnapshot } from "../../src/core/types.js";
+import type { AgentTypeConfig, DeliveryPayload, RunDiagnostics, RunSnapshot } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
 import type { SessionDriver, SessionHandle, SessionSpec } from "../../src/runtime/session-driver.js";
 import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
@@ -75,6 +75,21 @@ async function drain(clock: FakeClock, ticks: number, stepMs = 1) {
 function spec(type: AgentTypeConfig, overrides: Partial<RunnerSpec["request"]> = {}): RunnerSpec {
   return { runId: "r1", type, request: { type: type.name, prompt: "hi", ...overrides }, budget: fastBudget() };
 }
+function handleDiagnostics(): RunDiagnostics {
+  return {
+    createdAt: 0,
+    phase: "settled",
+    phaseEnteredAt: 0,
+    pendingTools: 0,
+    turns: 1,
+    escalation: [],
+    orphaned: false,
+    generation: 1,
+    degraded: [],
+    staleInputs: 0,
+    unkillable: [],
+  };
+}
 
 describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
   const nestedType: AgentTypeConfig = {
@@ -107,6 +122,45 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
     await drain(clock, 10);
     await p;
     expect(capturedTools?.some((t) => (t as { name?: string }).name === "Agent")).toBe(true);
+  });
+
+  it("threads resultMaxChars into the nested Agent tool", async () => {
+    const clock = new FakeClock();
+    let captured: { execute: (...args: any[]) => Promise<any> } | undefined;
+    const driver: SessionDriver = {
+      create: async (s: SessionSpec) => {
+        captured = s.customTools?.find((tool) => (tool as { name?: string }).name === "Agent") as typeof captured;
+        return handle();
+      },
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const port: NestedSpawnPort = {
+      spawn: async () => ({ runId: "child" }),
+      spawnAndWait: async () => ({
+        runId: "child",
+        status: "completed",
+        text: "z".repeat(120),
+        turns: 1,
+        durationMs: 1,
+        diag: {
+          ...handleDiagnostics(),
+          sessionFile: "/tmp/nested.jsonl",
+        },
+      }),
+    };
+    const runner = buildAdapter(clock, { driver, nestedSpawn: () => port, resultMaxChars: () => 100 });
+    const p = runner.run(spec(nestedType));
+    await drain(clock, 10);
+    await p;
+    const result = await captured?.execute("call", {
+      description: "nested",
+      prompt: "p",
+      subagent_type: "worker",
+    });
+    expect((result as { content: Array<{ text: string }> }).content[0]!.text).toContain(
+      "showing first 100 of 120 chars",
+    );
   });
 
   it("does not inject the nested Agent tool when the agent type has no canSpawn", async () => {

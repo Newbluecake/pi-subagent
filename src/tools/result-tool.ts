@@ -9,6 +9,7 @@ import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines } from "./agent-tool.js";
 import { createPollGuard, type PollGuardOptions } from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
+import { truncateResultText } from "./result-text.js";
 
 /**
  * "get_subagent_result" — drop-in replacement for @tintinweb/pi-subagents'
@@ -48,6 +49,7 @@ export function createResultTool(deps: {
   resolveRun?: (handle: string) => ResolveRunResult;
   notifier?: Pick<Notifier, "ack">;
   pollGuard?: PollGuardOptions;
+  resultMaxChars?: () => number;
 }): ToolDefinition<typeof ResultToolParams> {
   const pollGuard = createPollGuard(deps.pollGuard);
   // pi usage accounting dedupe: a background run's spend is attached to the
@@ -80,7 +82,8 @@ export function createResultTool(deps: {
       "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
       "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
       "expected notification never arrived. Terminal results include the run's wall-clock " +
-      "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran.",
+      "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran. " +
+      "Long result text is capped by resultMaxChars with a session-file path for reading the full transcript.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
     /**
@@ -108,8 +111,9 @@ export function createResultTool(deps: {
       if (!params.wait) {
         const snapshot = deps.query.get(runId);
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
+        const maxChars = deps.resultMaxChars?.() ?? 0;
         const text = snapshot.outcome
-          ? formatOutcome(snapshot.outcome)
+          ? formatOutcome(snapshot.outcome, maxChars)
           : [
               `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
               ...buildProgressLines(snapshot, Date.now()),
@@ -123,6 +127,7 @@ export function createResultTool(deps: {
             status: snapshot.status,
             usage: snapshot.diag.usage,
             ...(snapshot.outcome ? { durationMs: snapshot.outcome.durationMs } : {}),
+            ...(snapshot.outcome ? truncationDetails(snapshot.outcome, maxChars) : {}),
             ...(snapshot.outcome?.structuredResult !== undefined
               ? { structuredResult: snapshot.outcome.structuredResult }
               : {}),
@@ -175,14 +180,16 @@ export function createResultTool(deps: {
         throw new Error(reason);
       }
       tryAck(runId, waited.outcome.diag.generation, waited.outcome);
+      const maxChars = deps.resultMaxChars?.() ?? 0;
       return {
-        content: [{ type: "text" as const, text: withWarning(formatOutcome(waited.outcome)) }],
+        content: [{ type: "text" as const, text: withWarning(formatOutcome(waited.outcome, maxChars)) }],
         ...usageOnce(runId, waited.outcome.usage),
         details: {
           runId,
           status: waited.outcome.status,
           durationMs: waited.outcome.durationMs,
           usage: waited.outcome.usage,
+          ...truncationDetails(waited.outcome, maxChars),
           ...(waited.outcome.structuredResult !== undefined
             ? { structuredResult: waited.outcome.structuredResult }
             : {}),
@@ -192,15 +199,19 @@ export function createResultTool(deps: {
   } satisfies ToolDefinition<typeof ResultToolParams>;
 }
 
-function formatOutcome(outcome: {
-  status: string;
-  text?: string;
-  structuredResult?: unknown;
-  error?: { message: string };
-  timeoutReason?: string;
-  durationMs: number;
-  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
-}): string {
+function formatOutcome(
+  outcome: {
+    status: string;
+    text?: string;
+    structuredResult?: unknown;
+    error?: { message: string };
+    timeoutReason?: string;
+    durationMs: number;
+    usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number };
+    diag?: { sessionFile?: string };
+  },
+  maxChars = 0,
+): string {
   // durationMs is a first-class RunOutcome field, so the trailer always
   // carries it — unlike the completion notification (which shows `21s` once
   // and is gone), this makes wall-clock duration retrievable on every
@@ -212,9 +223,19 @@ function formatOutcome(outcome: {
     const body =
       outcome.structuredResult !== undefined
         ? JSON.stringify(outcome.structuredResult)
-        : (outcome.text ?? "(subagent completed with no text output)");
+        : truncateResultText(
+            outcome.text ?? "(subagent completed with no text output)",
+            maxChars,
+            outcome.diag?.sessionFile,
+          ).text;
     return body + trailer;
   }
   const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
   return `Subagent run ${outcome.status}: ${reason}${trailer}`;
+}
+
+function truncationDetails(outcome: RunOutcome, maxChars: number): { truncated?: true; totalChars?: number } {
+  if (outcome.status !== "completed" || outcome.structuredResult !== undefined || outcome.text === undefined) return {};
+  const result = truncateResultText(outcome.text, maxChars, outcome.diag.sessionFile);
+  return result.truncated ? { truncated: true, totalChars: result.totalChars } : {};
 }

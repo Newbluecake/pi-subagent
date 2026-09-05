@@ -143,6 +143,48 @@ describe("result consumption", () => {
     expect((result.details as { durationMs: number }).durationMs).toBe(65_000);
   });
 
+  it("truncates completed result bodies on get and wait, preserving trailers and metadata", async () => {
+    const snap = completedSnapshot();
+    const long = "x".repeat(120);
+    snap.diag.sessionFile = "/tmp/session.jsonl";
+    snap.outcome = { ...snap.outcome!, text: long, diag: snap.diag };
+    const get = await createResultTool({ query: queryForSnapshot(snap), resultMaxChars: () => 100 }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    const getText = (get.content[0] as { text: string }).text;
+    expect(getText).toContain("showing first 100 of 120 chars");
+    expect(getText).toContain("full session transcript: /tmp/session.jsonl");
+    expect(getText).toContain("(duration: 10ms");
+    expect(get.details).toMatchObject({ truncated: true, totalChars: 120 });
+    const waited = await createResultTool({ query: queryForSnapshot(snap), resultMaxChars: () => 100 }).execute(
+      "tc2",
+      { run_id: "r1", wait: true },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    expect((waited.content[0] as { text: string }).text).toContain("showing first 100 of 120 chars");
+    expect(waited.details).toMatchObject({ truncated: true, totalChars: 120 });
+  });
+
+  it("does not truncate structured results", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, text: "x".repeat(120), structuredResult: { value: "x".repeat(120) } };
+    const result = await createResultTool({ query: queryForSnapshot(snap), resultMaxChars: () => 10 }).execute(
+      "tc1",
+      { run_id: "r1" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+    expect((result.content[0] as { text: string }).text).toContain("x".repeat(120));
+    expect(result.details).not.toHaveProperty("truncated");
+  });
+
   it("still shows duration when the outcome has no usage", async () => {
     const snap = completedSnapshot();
     snap.outcome = { ...snap.outcome!, durationMs: 900, usage: undefined };

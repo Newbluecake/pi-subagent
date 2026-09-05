@@ -126,6 +126,7 @@ export default function activate(pi: ExtensionAPI): void {
       // terminal wait through the spawn service's own waiter (no unknown-run
       // race for a just-spawned id, unlike QueryService.wait).
       autoBackgroundMs: () => settings.foregroundAutoBackgroundMs,
+      resultMaxChars: () => settings.resultMaxChars,
       progress: {
         getSnapshot: (runId) => holder.current?.query.get(runId),
         waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
@@ -138,6 +139,7 @@ export default function activate(pi: ExtensionAPI): void {
       query: forwardQuery(holder),
       resolveRun: forwardResolveRun(holder),
       notifier: forwardNotifier(holder),
+      resultMaxChars: () => settings.resultMaxChars,
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));

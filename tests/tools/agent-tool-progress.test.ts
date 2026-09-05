@@ -54,6 +54,23 @@ function completed(overrides: Partial<RunOutcome> = {}): RunOutcome {
   };
 }
 
+describe("result text presentation", () => {
+  it("caps foreground completed text with the shared result helper", async () => {
+    const spawn: NestedSpawnPort = {
+      spawn: async () => ({ runId: "child" }),
+      spawnAndWait: async () => completed({ text: "y".repeat(120), diag: diag({ sessionFile: "/tmp/session.jsonl" }) }),
+    };
+    const result = await createAgentTool({ spawn, resultMaxChars: () => 100 }).execute(
+      "tc1",
+      { description: "demo", prompt: "p", subagent_type: "general" },
+      undefined,
+      undefined,
+    );
+    expect((result.content[0] as { text: string }).text).toContain("showing first 100 of 120 chars");
+    expect((result.content[0] as { text: string }).text).toContain("full session transcript: /tmp/session.jsonl");
+  });
+});
+
 describe("M-B: buildProgressLines", () => {
   it("renders the status header with model, phase, turn, elapsed and cost", () => {
     const snap = snapshot({
