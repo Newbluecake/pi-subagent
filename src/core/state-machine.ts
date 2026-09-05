@@ -331,6 +331,11 @@ function terminalUpdate(state: RunState, input: RunInput): { state: RunState; ef
   if (input.kind === "session_event") {
     d.lastEventAt = input.at;
     d.lastEventType = input.event.t;
+    if (input.event.t === "text_delta" && d.textFinal) {
+      // finalText already includes the assistant message; late teardown deltas
+      // would duplicate it. Thinking deltas remain display-only and continue.
+      return { state: { ...state, diag: d }, effects: [] };
+    }
     if (input.event.t === "text_delta" || input.event.t === "thinking_delta") {
       const patched = streamPatch(d, input.event);
       if (input.event.t === "text_delta" && state.outcome) {
@@ -638,11 +643,11 @@ export function reduce(
           : input.error.kind === "timeout"
             ? "timed_out"
             : "failed";
-    // Final text from SessionHandle.getLastAssistantText() (passed by the
-    // runner alongside prompt_settled) only fills in when no text_delta
-    // events already accumulated diag.text — deltas are the more granular,
-    // already-observed source of truth when both are present.
-    const textPatch = input.text !== undefined && state.diag.text === undefined ? { text: input.text } : {};
+    // SessionHandle.getLastAssistantText() is the authoritative final
+    // assistant message for a normal completion. Failed/aborted/timeout runs
+    // retain their accumulated deltas as the most useful partial output.
+    const textPatch =
+      input.text !== undefined && input.error === undefined ? { text: input.text, textFinal: true as const } : {};
     return finish(state, status, input.at, budget, {
       ...textPatch,
       ...(input.error === undefined ? {} : { error: input.error }),

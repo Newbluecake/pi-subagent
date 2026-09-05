@@ -176,6 +176,68 @@ describe("transition contract", () => {
     expect(r.state.outcome?.text).toBe("late text");
     expect(r.effects).toEqual([]);
   });
+  it("uses final assistant text for normal completion after multiple narrative deltas", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "turn 1" } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "turn_end", toolResults: 0 } }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "turn 2" } }).state;
+    const result = apply(s, { kind: "prompt_settled", text: "final answer" });
+    expect(result.state.outcome?.text).toBe("final answer");
+    expect(result.state.diag.text).toBe("final answer");
+    expect(result.state.diag.textFinal).toBe(true);
+    expect(result.effects.map((effect) => effect.effect.kind)).toContain("enqueue_delivery");
+    const delivery = result.effects.find((effect) => effect.effect.kind === "enqueue_delivery")?.effect;
+    expect(delivery).toMatchObject({ payload: { textPreview: "final answer" } });
+  });
+  it("ignores late text deltas after final text while updating event diagnostics", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    s = apply(s, { kind: "prompt_settled", text: "final" }).state;
+    const result = apply(s, { kind: "session_event", event: { t: "text_delta", delta: " trailing" } });
+    expect(result.state.diag.text).toBe("final");
+    expect(result.state.outcome?.text).toBe("final");
+    expect(result.state.diag.lastEventType).toBe("text_delta");
+  });
+  it("retains delta output when a prompt settles with an error", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    s = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "partial output" } }).state;
+    const result = apply(s, {
+      kind: "prompt_settled",
+      text: "truncated sentence",
+      error: { kind: "model", message: "provider failed", retryable: false },
+    });
+    expect(result.state.status).toBe("failed");
+    expect(result.state.outcome?.text).toBe("partial output");
+    expect(result.state.diag.textFinal).toBeUndefined();
+    const late = apply(result.state, { kind: "session_event", event: { t: "text_delta", delta: " later" } });
+    expect(late.state.outcome?.text).toBe("partial output later");
+  });
+  it("does not block thinking deltas after final text", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    s = apply(s, { kind: "prompt_settled", text: "final" }).state;
+    const result = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "reasoning" } });
+    expect(result.state.diag.thinkingText).toBe("reasoning");
+    expect(result.state.diag.text).toBe("final");
+  });
+  it("still accumulates text during abort grace", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    s = apply(s, { kind: "stop_requested", cause: "user_stop" }).state;
+    const result = apply(s, { kind: "session_event", event: { t: "text_delta", delta: "grace output" } });
+    expect(result.state.phase).toBe("abort_grace");
+    expect(result.state.diag.text).toBe("grace output");
+  });
+  it("uses final text when no delta was observed", () => {
+    let s = apply(enqueued(), { kind: "slot_acquired" }).state;
+    s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;
+    const result = apply(s, { kind: "prompt_settled", text: "final" });
+    expect(result.state.outcome?.text).toBe("final");
+    expect(result.state.diag.textFinal).toBe(true);
+  });
+
   it("clears current tool and rejects mismatched tool ends", () => {
     let s = apply(enqueued(), { kind: "slot_acquired" }).state;
     s = apply(s, { kind: "phase_entered", phase: "model_turn" }).state;

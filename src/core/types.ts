@@ -288,7 +288,14 @@ export interface RunDiagnostics {
   unkillable: Array<{ kind: string; id: string }>;
   deliveryKey?: string;
   lastWarn?: string;
+  /**
+   * During execution, the text_delta stream preview buffer. On normal
+   * prompt_settled, finalText replaces it and sets textFinal; non-normal
+   * terminal states retain the accumulated partial output.
+   */
   text?: string;
+  /** Normal completion has installed the authoritative final assistant text. */
+  textFinal?: true;
   /**
    * Display-only tail of the model's in-progress thinking (reasoning) stream
    * for the current turn — the agent tree's `»` preview line. Accumulated
