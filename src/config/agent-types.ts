@@ -47,6 +47,7 @@ function configHashInput(config: AgentTypeConfig): Record<string, unknown> {
     thinkingLevel: config.thinkingLevel,
     maxTurns: config.maxTurns,
     canSpawn: config.canSpawn,
+    canMessage: config.canMessage,
   };
 }
 
@@ -98,6 +99,15 @@ function parseFile(text: string, path: string): AgentTypeConfig {
           .map((x) => x.trim())
           .filter(Boolean)
       : undefined;
+  const canMessage =
+    typeof fields.can_message === "string"
+      ? fields.can_message
+          .split(",")
+          .map((x) => x.trim())
+          .filter((x): x is "parent" | "child" | "ancestor" | "descendant" | "sibling" | "self" =>
+            ["parent", "child", "ancestor", "descendant", "sibling", "self"].includes(x),
+          )
+      : undefined;
   // `model:` accepts a strict `provider/id` pair (used verbatim at spawn)
   // or a fuzzy hint ("sonnet", "kimi-k3") kept raw and resolved against
   // pi's available models at spawn admission (model-hint.ts) — same
@@ -109,6 +119,7 @@ function parseFile(text: string, path: string): AgentTypeConfig {
   if (typeof fields.display_name === "string") config.displayName = fields.display_name;
   if (tools?.length) config.tools = tools;
   if (canSpawn?.length) config.canSpawn = canSpawn;
+  if (canMessage?.length) config.canMessage = canMessage;
   if (modelPair) config.model = modelPair;
   else if (modelRaw) config.modelHint = modelRaw;
   if (typeof fields.thinking === "string" && (THINKING_LEVELS as readonly string[]).includes(fields.thinking))

@@ -161,6 +161,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Hold window suppressing caller-acked deliveries",
   }),
   "worktree.enabled": bool("worktree.enabled", "Isolate subagents in git worktrees"),
+  "compact.enabled": bool("compact.enabled", "Allow the model to trigger context compaction"),
   "worktree.gitTimeoutS": seconds("worktree.gitTimeoutMs", { description: "Git command timeout for worktree ops" }),
   "workflow.enabled": bool("workflow.enabled", "Master switch for SubagentWorkflow"),
   "workflow.replayTtlS": seconds("workflow.replayTtlMs", { description: "Journal replay retention; 0 = unlimited" }),
@@ -199,6 +200,21 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     ["keep", "kill"],
     "What to do with running jobs on shutdown",
   ),
+  "fabric.enabled": bool("fabric.enabled", "Enable inter-agent message fabric"),
+  "fabric.minIntervalS": seconds("fabric.minIntervalMs", {
+    description: "Minimum interval between messages on one link",
+  }),
+  "fabric.maxPerRun": count("fabric.maxPerRun", 0, "Progress messages per sender run"),
+  "fabric.findingQuota": count("fabric.findingQuota", 0, "Finding messages per sender run"),
+  "fabric.directiveQuota": count("fabric.directiveQuota", 0, "Directive messages per sender run"),
+  "fabric.deadLetterQuota": count("fabric.deadLetterQuota", 0, "Dead letters per sender run"),
+  "fabric.maxChars": count("fabric.maxChars", 0, "Maximum message characters"),
+  "fabric.progressTtlS": seconds("fabric.progressTtlMs", { description: "Progress message retention" }),
+  "fabric.progressChannel": choice("fabric.progressChannel", ["context", "display"], "Progress channel to root"),
+  "fabric.rootMinIntervalS": seconds("fabric.rootMinIntervalMs", {
+    description: "Minimum root context interval; 0 = unlimited, backpressure only",
+  }),
+  "fabric.rootInboxCap": count("fabric.rootInboxCap", 0, "Maximum pending root context messages"),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

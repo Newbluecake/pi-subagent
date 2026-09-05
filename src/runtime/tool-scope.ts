@@ -23,6 +23,7 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   "get_subagent_result",
   "steer_subagent",
   "StructuredOutput",
+  "message_agent",
 ];
 
 export interface ToolScopePolicy {

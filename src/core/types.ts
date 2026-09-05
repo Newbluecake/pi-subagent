@@ -112,6 +112,8 @@ export interface AgentTypeConfig {
    * spawn-service-level depth/whitelist check — architecture §7.2 X3).
    */
   canSpawn?: string[];
+  /** Frontmatter `can_message`: relations this run may address through fabric. */
+  canMessage?: Array<"parent" | "child" | "ancestor" | "descendant" | "sibling" | "self">;
 }
 export interface SpawnRequest {
   /** Assigned run identifier, used by lifecycle extensions for resource names. */

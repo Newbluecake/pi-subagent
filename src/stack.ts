@@ -22,7 +22,14 @@ import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
 import type { DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
-import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
+import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-store.js";
+import { detectPiCapabilities } from "./adapters/pi-compat.js";
+import { createDeliveryEngine } from "./delivery/engine.js";
+import { createFabricMailbox, type FabricPorts } from "./fabric/mailbox.js";
+import { createFabricRouter } from "./fabric/router.js";
+import { createFabricThrottle } from "./fabric/throttle.js";
+import { createFabricTree } from "./fabric/tree.js";
+import { formatMessage, type FabricRecord } from "./core/message.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import type { AgentTypeRegistry } from "./config/agent-types.js";
 import { resolveModelHint } from "./config/model-hint.js";
@@ -70,6 +77,7 @@ let previousAckHold: Coalescer | undefined;
  * adopt the still-running jobs and own the single notification channel.
  */
 let previousBashJobs: BashJobManager | undefined;
+let previousFabricMailbox: ReturnType<typeof createFabricMailbox> | undefined;
 
 /** customType of the bash job completion notice (§5) — distinct from `subagent:notification`. */
 export const BASH_JOB_NOTIFICATION_TYPE = "bash-job:notification";
@@ -161,6 +169,115 @@ export async function readBashJobTail(
   } catch {
     return undefined;
   }
+}
+
+function buildFabric(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  settings: AgentSettings,
+  prefetched: ReadonlyArray<{ type: string; customType?: string; data?: unknown }>,
+  readBack: boolean,
+  runnerRef: { current?: Runner },
+) {
+  const entries = prefetched
+    .filter((entry) => entry.type === "custom" && entry.customType === "subagent:fabric")
+    .map((entry) => entry.data)
+    .filter((data): data is FabricRecord => Boolean(data && typeof data === "object" && "key" in data));
+  const store = readBack
+    ? createPiOutboxStore<FabricRecord>(
+        { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager },
+        "subagent:fabric",
+        prefetched,
+      )
+    : new MemoryOutboxStore<FabricRecord>();
+  const allowed: Record<FabricRecord["state"], readonly FabricRecord["state"][]> = {
+    pending: ["claimed", "consumed", "dropped", "abandoned"],
+    claimed: ["pending", "delivered", "consumed", "dropped"],
+    delivered: [],
+    consumed: [],
+    dropped: [],
+    abandoned: [],
+  };
+  const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+    store,
+    allowed,
+    memoryOnly: new Set(["claimed"]),
+    memoryOnlyFields: ["claimToken"],
+    now: () => systemClock.now(),
+    onDegraded: (key, reason) => console.warn(`[pi-subagent] fabric persistence degraded for ${key}: ${reason}`),
+  });
+  const tree = createFabricTree();
+  for (const entry of prefetched) {
+    if (entry.type === "custom" && entry.customType === "subagent:run") {
+      const snapshot = entry.data as { runId?: string; parentRunId?: string; status?: string } | undefined;
+      if (snapshot?.runId) tree.appendEdge(snapshot.parentRunId ?? "root", snapshot.runId);
+      if (snapshot?.runId && snapshot.status === "running") tree.markRunning(snapshot.runId);
+      if (
+        snapshot?.runId &&
+        snapshot.status &&
+        ["completed", "failed", "timed_out", "aborted"].includes(snapshot.status)
+      )
+        tree.tombstone(snapshot.runId, systemClock.now(), settings.reconcileTtlMs);
+    }
+  }
+  const throttle = createFabricThrottle({
+    minIntervalMs: settings.fabric.minIntervalMs,
+    rootMinIntervalMs: settings.fabric.rootMinIntervalMs,
+    backoffMs: settings.deliveryBackoffMs,
+    progressChannel: settings.fabric.progressChannel,
+    canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+    records: [...engine.select(() => true)],
+  });
+  const router = createFabricRouter(
+    engine,
+    tree,
+    throttle,
+    {
+      ...settings.fabric,
+      reconcileTtlMs: settings.reconcileTtlMs,
+      canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+    },
+    () => systemClock.now(),
+    () => mailbox.pump(),
+  );
+  router.hydrate([...engine.select(() => true)]);
+  const ports: FabricPorts = {
+    inject: async (record) => {
+      const steer = runnerRef.current?.steer;
+      if (!steer) throw new Error("fabric runner unavailable");
+      const formatted = formatMessage(record, tree.relation(record.from, record.to, systemClock.now()));
+      await steer(record.to as string, formatted.text);
+      return { ok: true };
+    },
+    sendRootContext: async (record) => {
+      pi.sendMessage(
+        {
+          customType: "subagent:fabric",
+          content: formatMessage(record, "child").text,
+          display: false,
+          details: record,
+        },
+        { deliverAs: "steer", triggerTurn: true },
+      );
+      return { ok: true };
+    },
+    sendRootDisplay: async (record) => {
+      pi.appendEntry("subagent:fabric", record);
+      return { ok: true };
+    },
+  };
+  const mailbox = createFabricMailbox({
+    engine,
+    router,
+    throttle,
+    ports,
+    clock: systemClock,
+    fabricSteerTimeoutMs: settings.budget.steerMs,
+    progressChannel: settings.fabric.progressChannel,
+    canRenderEntries: detectPiCapabilities(pi).canRenderEntries,
+    maxAttempts: settings.deliveryAttempts,
+  });
+  return { engine, tree, router, mailbox };
 }
 
 function currentSessionId(ctx: ExtensionContext): string {
@@ -271,6 +388,7 @@ export interface Stack {
   fleetWidget?: FleetWidgetController;
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
+  fabric?: { dispose(): void; pump(): void };
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -298,6 +416,8 @@ export function buildSessionStack(
   const prevBashJobs = previousBashJobs;
   prevBashJobs?.dispose();
   previousBashJobs = undefined;
+  previousFabricMailbox?.dispose();
+  previousFabricMailbox = undefined;
 
   // The widget controller is created after QueryService exists (below), but
   // its H1 onLifecycle must be part of the merged extension points *before*
@@ -314,6 +434,7 @@ export function buildSessionStack(
   // (types.d.ts:219), but if a future pi drops it we degrade to in-memory
   // stores + WARN instead of throwing inside the session_start handler.
   const readBack = probeReadBackEntries(ctx);
+  const prefetchedEntries = readBack ? ctx.sessionManager.getEntries() : [];
   if (!readBack)
     console.warn(
       "[pi-subagent] ctx.sessionManager.getEntries unavailable; run-log/outbox degrade to in-memory (G5a read-back verification off).",
@@ -337,7 +458,11 @@ export function buildSessionStack(
     },
   });
   const outbox = readBack
-    ? createPiOutboxStore({ appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager })
+    ? createPiOutboxStore(
+        { appendEntry: pi.appendEntry, sessionManager: ctx.sessionManager },
+        OUTBOX_CUSTOM_TYPE,
+        prefetchedEntries,
+      )
     : new MemoryOutboxStore<PersistedDelivery>();
   let taken = new Set<string>();
   try {
@@ -351,6 +476,10 @@ export function buildSessionStack(
     console.warn("[pi-subagent] outbox list failed; runId uniqueness degrades to process-local (M17)");
   }
   const spawnRef: { current?: SpawnService } = {};
+  const fabric = settings.fabric.enabled
+    ? buildFabric(pi, ctx, settings, prefetchedEntries, readBack, runnerRef)
+    : undefined;
+  if (fabric) previousFabricMailbox = fabric.mailbox;
   const sendFormatted = (items: readonly DeliveryPayload[]) => {
     const stats = Object.fromEntries(
       items.flatMap((item) => {
@@ -454,6 +583,7 @@ export function buildSessionStack(
     watchdog,
     reaper,
     notifier,
+    ...(fabric ? { fabric: { router: fabric.router } } : {}),
     extensions: [merged],
     onLifecycle: (event) =>
       pi.events.emit(event.status === "completed" ? "subagent:completed" : "subagent:failed", event),
@@ -481,6 +611,7 @@ export function buildSessionStack(
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
     onLabel: (label, target) => mentionRef.current?.register(label, target),
+    ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
     onOutcomeAcked: (outcome) => {
       try {
         notifier.ack(outcome.runId, outcome.diag.generation, { extensionOwner: "spawnAndWait" });
@@ -533,6 +664,11 @@ export function buildSessionStack(
         pi.events.emit("subagent:started", { runId: snapshot.runId, at: snapshot.updatedAt });
       }
       usageRef.current?.poke(); // M-E: start/refresh the 1Hz cost broadcast
+      if (fabric) {
+        if (snapshot.status === "running") fabric.tree.markRunning(snapshot.runId);
+        if (["completed", "failed", "timed_out", "aborted"].includes(snapshot.status))
+          fabric.mailbox.onRunSettled(snapshot.runId);
+      }
     },
   });
   spawnRef.current = spawn;
@@ -702,5 +838,6 @@ export function buildSessionStack(
     workflow,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
+    ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
   };
 }

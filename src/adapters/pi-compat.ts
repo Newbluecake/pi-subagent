@@ -18,6 +18,7 @@ export interface PiCapabilities {
   version: string;
   canSendMessage: boolean;
   canAppendEntry: boolean;
+  canRenderEntries: boolean;
   canReadBackEntries: boolean;
   canUseEvents: boolean;
   canRetargetTools: boolean;
@@ -35,6 +36,7 @@ export interface PiCapabilities {
 export interface MinimalPiHost {
   sendMessage?: unknown;
   appendEntry?: unknown;
+  registerEntryRenderer?: unknown;
   setActiveTools?: unknown;
   getActiveTools?: unknown;
   events?: { on?: unknown; emit?: unknown };
@@ -67,6 +69,7 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
     version,
     canSendMessage: typeof pi.sendMessage === "function",
     canAppendEntry: typeof pi.appendEntry === "function",
+    canRenderEntries: typeof pi.registerEntryRenderer === "function",
     canReadBackEntries: typeof pi.sessionManager?.getEntries === "function",
     canUseEvents: typeof pi.events?.on === "function" && typeof pi.events?.emit === "function",
     canRetargetTools: typeof pi.setActiveTools === "function" && typeof pi.getActiveTools === "function",

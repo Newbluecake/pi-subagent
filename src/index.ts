@@ -26,9 +26,11 @@ import { createRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { createAgentTool } from "./tools/agent-tool.js";
+import { Text } from "@earendil-works/pi-tui";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
+import { createCompactTool } from "./tools/compact-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
 import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
@@ -119,6 +121,15 @@ export default function activate(pi: ExtensionAPI): void {
     return;
   }
 
+  if (caps.canRenderEntries) {
+    pi.registerEntryRenderer("subagent:fabric", (entry, _options, theme) => {
+      const data = entry.data as { payload?: { text?: string }; kind?: string } | undefined;
+      const text = data?.payload?.text ?? "";
+      return new Text(theme.fg("muted", `[fabric ${data?.kind ?? "message"}] ${text}`), 0, 0);
+    });
+  } else {
+    console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
+  }
   pi.registerTool(
     createAgentTool({
       spawn: forwardSpawn(holder),
@@ -144,6 +155,10 @@ export default function activate(pi: ExtensionAPI): void {
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // HOST_KEY guard above means this registration is visible only in the main session.
+  if (settings.compact.enabled) {
+    pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));
+  }
   // bash auto-background (§2.6/R6): the same-name `bash` override and its
   // `bash_job` management tool exist only when the feature is on — off means
   // pi's built-in bash stays in place with zero behaviour change.
@@ -217,11 +232,13 @@ export default function activate(pi: ExtensionAPI): void {
       holder.current.fleetWidget?.dispose();
       holder.current.scheduler.stop();
       holder.current.rpc.close();
+      holder.current.fabric?.dispose();
     }
     await types.reload();
     const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)]);
     holder.current = stack;
-    stack.notifier.reconcile(); // RC5: synchronous, never blocks startup
+    stack.notifier.reconcile();
+    stack.fabric?.pump(); // RC5: synchronous, never blocks startup
     await stack.scheduler.start(); // X5
   });
 
@@ -239,6 +256,9 @@ export default function activate(pi: ExtensionAPI): void {
     stack.fleetWidget?.dispose();
     stack.scheduler.stop(); // X5
     stack.rpc.close(); // X8
+    // Fabric must freeze before run shutdown so late verdicts from the old
+    // stack cannot write into the shared outbox; the next stack owns pending records.
+    stack.fabric?.dispose();
     const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);
     const pending = stack.query
       .list()

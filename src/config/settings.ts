@@ -77,6 +77,10 @@ export interface BashJobsSettings {
   shellPath?: string;
 }
 
+export interface CompactSettings {
+  enabled: boolean;
+}
+
 export interface AgentSettings {
   concurrencyLimit: number;
   budget: DeadlineBudget;
@@ -102,6 +106,24 @@ export interface AgentSettings {
   workflow: WorkflowSettings;
   /** bash auto-background settings (§6). Enabled by default (R4). */
   bashJobs: BashJobsSettings;
+  /** Model-triggered context compaction. */
+  compact: CompactSettings;
+  /** Message fabric settings; disabled by default for the MVP gray rollout. */
+  fabric: FabricSettings;
+}
+
+export interface FabricSettings {
+  enabled: boolean;
+  minIntervalMs: number;
+  maxPerRun: number;
+  findingQuota: number;
+  directiveQuota: number;
+  deadLetterQuota: number;
+  maxChars: number;
+  progressTtlMs: number;
+  progressChannel: "context" | "display";
+  rootMinIntervalMs: number;
+  rootInboxCap: number;
 }
 export const DEFAULT_SETTINGS: AgentSettings = {
   concurrencyLimit: 6,
@@ -134,6 +156,20 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     retentionMs: 24 * 60 * 60 * 1_000,
     drainTimeoutMs: 30_000,
     shutdownPolicy: "keep",
+  },
+  compact: { enabled: true },
+  fabric: {
+    enabled: false,
+    minIntervalMs: 30_000,
+    maxPerRun: 20,
+    findingQuota: 10,
+    directiveQuota: 5,
+    deadLetterQuota: 5,
+    maxChars: 2_000,
+    progressTtlMs: 900_000,
+    progressChannel: "display",
+    rootMinIntervalMs: 10_000,
+    rootInboxCap: 12,
   },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
@@ -174,6 +210,9 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "bashJobs.autoBackgroundMs",
   "bashJobs.drainTimeoutMs",
   "bashJobs.retentionMs",
+  "fabric.minIntervalMs",
+  "fabric.progressTtlMs",
+  "fabric.rootMinIntervalMs",
 ];
 
 const TIME_SETTING_SECONDS_PATHS: ReadonlySet<string> = new Set(TIME_SETTING_MS_PATHS.map(secondsKeyOf));
@@ -260,7 +299,43 @@ export function loadSettings(source: unknown): AgentSettings {
         : { ...DEFAULT_SETTINGS.worktree },
     workflow: parseWorkflowSettings(value.workflow),
     bashJobs: parseBashJobsSettings(value.bashJobs),
+    compact: parseCompactSettings(value.compact),
+    fabric: parseFabricSettings(value.fabric),
   });
+}
+
+function parseFabricSettings(input: unknown): FabricSettings {
+  const defaults = DEFAULT_SETTINGS.fabric;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  const count = (key: keyof FabricSettings): number => {
+    const raw = value[key];
+    return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : (defaults[key] as number);
+  };
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    minIntervalMs: count("minIntervalMs"),
+    maxPerRun: count("maxPerRun"),
+    findingQuota: count("findingQuota"),
+    directiveQuota: count("directiveQuota"),
+    deadLetterQuota: count("deadLetterQuota"),
+    maxChars: count("maxChars"),
+    progressTtlMs: count("progressTtlMs"),
+    progressChannel:
+      value.progressChannel === "context" || value.progressChannel === "display"
+        ? value.progressChannel
+        : defaults.progressChannel,
+    rootMinIntervalMs: count("rootMinIntervalMs") === 0 ? 0 : Math.max(1_000, count("rootMinIntervalMs")),
+    rootInboxCap: count("rootInboxCap"),
+  };
+}
+
+/** Parse the optional model-triggered context compaction settings block. */
+export function parseCompactSettings(input: unknown): CompactSettings {
+  const defaults = DEFAULT_SETTINGS.compact;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  return { enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled };
 }
 
 /**

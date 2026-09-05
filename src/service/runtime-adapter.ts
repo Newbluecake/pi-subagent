@@ -30,6 +30,8 @@ import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
+import { createMessageAgentTool } from "../tools/message-agent-tool.js";
+import type { FabricRouter } from "../fabric/router.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
 
 export interface RuntimeAdapterDeps {
@@ -57,6 +59,8 @@ export interface RuntimeAdapterDeps {
   resultMaxChars?: () => number;
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
+  /** Optional fabric surface; absent means no message_agent injection. */
+  fabric?: { router: FabricRouter };
 }
 
 /**
@@ -317,6 +321,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // further extend — the full customTools list).
         const grantedReserved: string[] = [];
         const customTools: unknown[] = [];
+        if (deps.fabric) {
+          customTools.push(
+            createMessageAgentTool({
+              router: deps.fabric.router,
+              from: spec.runId,
+              generation: () => deps.store.get(spec.runId)?.generation,
+              ...(spec.type.canMessage === undefined ? {} : { canMessage: spec.type.canMessage }),
+            }),
+          );
+          grantedReserved.push("message_agent");
+        }
         if (spec.type.canSpawn?.length && deps.nestedSpawn) {
           const port = deps.nestedSpawn();
           if (port) {

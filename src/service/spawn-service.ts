@@ -57,6 +57,8 @@ export interface SpawnServiceDeps {
   now?: () => number;
   budget?: Partial<DeadlineBudget>;
   onSnapshot?: (snapshot: RunSnapshot) => void;
+  /** Narrow admission hook for the fabric tree; called after a child edge is recorded. */
+  onSpawnEdge?: (parentRunId: RunId, childRunId: RunId) => void;
   onLifecycle?: LifecycleSink;
   onOutcomeAcked?: (outcome: RunOutcome) => void;
   notifyTerminalFailure?: (outcome: RunOutcome) => void;
@@ -367,6 +369,10 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         const siblings = childrenOf.get(req.parentRunId) ?? new Set<RunId>();
         siblings.add(runId);
         childrenOf.set(req.parentRunId, siblings);
+        deps.onSpawnEdge?.(req.parentRunId, runId);
+      } else {
+        // In the fabric tree, every top-level run is a child of the host root.
+        deps.onSpawnEdge?.("root", runId);
       }
       void start(resolvedReq, runId, config, budget, lockKeys, depth, admittedModel);
       return { runId };
