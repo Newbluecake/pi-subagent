@@ -219,7 +219,7 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     const cases = [
       ["queue_wait", "⏸ 1s"],
       ["resolve_config", "⚡ 1s"],
-      ["retry_backoff", "♻2/3 1s"],
+      ["retry_backoff", "♻ 2/3 1s"],
       ["reap", "⏹ 1s"],
     ] as const;
     for (const [phase, expected] of cases) {
@@ -251,8 +251,9 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(compactPhaseLabel("⏸️排队")).toBe("⏸️");
     expect(compactPhaseLabel("⚡️启动")).toBe("⚡️");
     expect(compactPhaseLabel("⏹️停止中")).toBe("⏹️");
-    expect(compactPhaseLabel("♻️重试2/3")).toBe("♻️2/3");
-    expect(compactPhaseLabel("♻重试1/5")).toBe("♻1/5");
+    expect(compactPhaseLabel("♻️重试2/3")).toBe("♻️ 2/3");
+    expect(compactPhaseLabel("♻重试1/5")).toBe("♻ 1/5");
+    expect(compactPhaseLabel("♻重试")).toBe("♻");
     expect(compactPhaseLabel("🤔思考")).toBe("🤔");
     // Non-emoji phase labels pass through untouched.
     expect(compactPhaseLabel("等待中")).toBe("等待中");

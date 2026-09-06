@@ -159,7 +159,13 @@ export function compactPhaseLabel(label: string): string {
   // rest-slicing below misfires (♻️重试2/3 would keep the 重试 remnant).
   const codePoints = [...label];
   const emoji = `${codePoints[0] ?? ""}${codePoints[1] === "\uFE0F" ? codePoints[1] : ""}`;
-  if (emoji.startsWith("♻")) return `${emoji}${label.slice(emoji.length).replace(/^重试/, "")}`;
+  if (emoji.startsWith("♻")) {
+    // Keep a visible separator before the attempt counter. The recycle mark
+    // is rendered as an emoji in some terminals (two columns), so `♻1/3`
+    // can visually collide even though its string width looks correct.
+    const rest = label.slice(emoji.length).replace(/^重试/, "");
+    return rest ? `${emoji} ${rest}` : emoji;
+  }
   if (!/^(?:🧠|💭|🤔|💡|⏸|⚡|🔧|🗜|⏹)/u.test(label)) return label;
   return emoji;
 }
