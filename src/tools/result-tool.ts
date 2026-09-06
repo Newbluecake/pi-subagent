@@ -16,6 +16,11 @@ import { truncateResultText } from "./result-text.js";
  * result-retrieval tool. `wait` is bounded by `wait_ms` (architecture G1/G2:
  * QueryService.wait() never blocks unboundedly, see service/query-service.ts)
  * — this closes the original plugin's P2 defect (unbounded wait:true).
+ *
+ * Reads never consume the run, so re-checking is side-effect free — but
+ * polling in a tight loop trips the poll guard (tools/poll-guard.ts, shared
+ * with bash_job status): a warning is prepended telling the model to stop
+ * and await the completion notification.
  */
 export const ResultToolParams = Type.Object({
   run_id: Type.String({
@@ -84,7 +89,9 @@ export function createResultTool(deps: {
       "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
       "expected notification never arrived. Terminal results include the run's wall-clock " +
       "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran. " +
-      "Long result text is capped by resultMaxChars with a session-file path for reading the full transcript.",
+      "Long result text is capped by resultMaxChars with a session-file path for reading the full transcript. " +
+      "Reading a result never consumes the run, so checking is safe — but rapid repeated polling of the " +
+      "same run returns a warning; await the completion notification instead.",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
     /**

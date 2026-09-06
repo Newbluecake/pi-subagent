@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed. The guard behavior itself is unchanged.
+
 ### Added
 
 - **`compact_context` tool** — the model can proactively trigger context compaction (equivalent to `/compact`) instead of waiting for the automatic threshold. Registered only in the host session; an in-flight guard plus cooldown refuses back-to-back triggers, and an optional follow-up message resumes the task on the summarized context. Configured via `compact.enabled` (default on).
