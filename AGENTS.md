@@ -8,7 +8,11 @@ Guidance for AI coding agents working in this repository.
 (the `@earendil-works/pi-coding-agent` CLI). It is a drop-in replacement for the core of
 `@tintinweb/pi-subagents`: it provides the `Agent` / `get_subagent_result` / `steer_subagent` /
 `abort_subagent` tools, the `SubagentWorkflow` orchestration tool, the `/agent` command, a live
-fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler.
+fleet widget (agent tree), a notification delivery subsystem, and a cron scheduler. Beyond that
+core it optionally (settings-gated) overrides pi's built-in `bash` with auto-backgrounding plus
+a `bash_job` manager tool, provides `compact_context` / `set_compact_threshold` for manual and
+threshold-triggered context compaction, and implements the message fabric (`message_agent`,
+fire-and-forget inter-agent messaging routed along the agent tree).
 
 The whole point of the project is **zero-hang guarantees**: every run has layered deadlines
 (watchdog sub-phase budgets + total budget), an escalating reaper for orphans, and persistent,
@@ -19,7 +23,7 @@ acknowledgeable delivery of results. Preserve these invariants when editing.
 ```sh
 npm install          # dev setup (Node >= 22, enforced by engines + CI)
 npm run build        # tsc -p tsconfig.build.json → dist/
-npm test             # vitest run — 1500+ tests; must stay green
+npm test             # vitest run — 1800+ tests; must stay green
 npm run typecheck    # tsc --noEmit (strict; see tsconfig flags)
 npm run format       # prettier --write .
 npm run format:check # CI gate
@@ -45,6 +49,17 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/runtime/` — runner, session driver, watchdog, reaper, slot pool (concurrency), dynamic
   tool scoping.
 - `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label).
+- `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
+  log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
+  setting is off, pi's built-in bash stays untouched.
+- `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward
+  `compact_context` at a configurable threshold (with a forced-compaction warning level).
+- `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
+  persisted settings override.
+- `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),
+  mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents via
+  `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
+  frontmatter (default: parent only).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
 - `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed,
@@ -52,11 +67,11 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
 - `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, runaway detection.
 - `src/adapters/` — pi-facing shims (compat probing, outbox store, run log).
 - `src/tools/`, `src/commands/`, `src/ui/`, `src/mention/`, `src/rpc/`, `src/extensions/` —
-  tool surfaces, `/agent` command, fleet widget, `@label` mentions, RPC, extension points
-  (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
+  tool surfaces, `/agent` command (status/settings/costs), fleet widget + TUI settings editor,
+  `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
-- `docs/dev/` — per-feature design docs (auto-background, delivery v2, ...); read the matching
-  one before changing that subsystem.
+- `docs/dev/` — per-feature design docs (auto-background, delivery v2, bash-auto-background,
+  subagent-push/fabric, compact-hint, ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
 
 ## Conventions
