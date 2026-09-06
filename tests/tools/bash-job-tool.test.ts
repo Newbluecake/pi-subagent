@@ -548,7 +548,7 @@ describe("bash_job — status poll guard (anti-loop frequency warning)", () => {
   const status = (tool: ReturnType<typeof createBashJobTool>, jobId = "b_AAAA1111") =>
     tool.execute("tc", { action: "status", job_id: jobId }, undefined, undefined, {} as never);
 
-  it("does not warn at or below the default threshold (3 status calls per job within 10s)", async () => {
+  it("does not warn at or below the default threshold (3 status calls per job within 120s)", async () => {
     const tool = createBashJobTool({ manager: setup, now: () => NOW });
     for (let i = 0; i < 3; i++) {
       const r = await status(tool);
@@ -596,7 +596,50 @@ describe("bash_job — status poll guard (anti-loop frequency warning)", () => {
     const tool = createBashJobTool({ manager: setup, now: () => now });
     for (let i = 0; i < 3; i++) await status(tool);
     expect((await status(tool)).content[0]!.text).toContain("Polling too frequently");
-    now += 11_000;
+    now += 121_000;
     expect((await status(tool)).content[0]!.text).not.toContain("Polling too frequently");
+  });
+});
+
+describe("bash_job — wait timeout streak (repeated timing-out waits escalate guidance)", () => {
+  // waitResolvesImmediately makes waitExit return the still-running record at
+  // once — exactly what a wait that hit its budget looks like to the tool.
+  const setup = () => {
+    const manager = fakeManager({ waitResolvesImmediately: true });
+    manager.put(makeRecord({ jobId: "b_AAAA1111", status: "running", pid: 23456 }), "line\n");
+    return manager;
+  };
+  const wait = (tool: ReturnType<typeof createBashJobTool>) =>
+    tool.execute("tc", { action: "wait", job_id: "b_AAAA1111", wait_ms: 5_000 }, undefined, undefined, {} as never);
+
+  it("first timing-out wait suggests a larger wait_ms or awaiting the notification, without escalation", async () => {
+    const tool = createBashJobTool({ manager: setup, now: () => NOW });
+    const text = (await wait(tool)).content[0]!.text;
+    expect(text).toContain("Still running after waiting 5s");
+    expect(text).toContain("wait_ms");
+    expect(text).toContain("completion notification");
+    expect(text).not.toContain("consecutive wait timeouts");
+  });
+
+  it("escalates on the 2nd consecutive timing-out wait with streak and blocked total", async () => {
+    const tool = createBashJobTool({ manager: setup, now: () => NOW });
+    await wait(tool);
+    const text = (await wait(tool)).content[0]!.text;
+    expect(text).toContain("2 consecutive wait timeouts");
+    expect(text).toContain("10s spent blocked");
+  });
+
+  it("a finished job resets the streak", async () => {
+    const manager = setup();
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW });
+    await wait(tool); // streak 1
+    await wait(tool); // streak 2 (escalated)
+    manager.put(makeRecord({ jobId: "b_AAAA1111", status: "completed", exitCode: 0, endedAt: NOW }), "line\n");
+    const finished = await wait(tool); // terminal -> reset
+    expect(finished.content[0]!.text).toContain("Command exited with code 0");
+    manager.put(makeRecord({ jobId: "b_AAAA1111", status: "running", pid: 23456 }), "line\n");
+    const text = (await wait(tool)).content[0]!.text;
+    expect(text).toContain("Still running after waiting 5s");
+    expect(text).not.toContain("consecutive wait timeouts"); // back to first-timeout wording
   });
 });

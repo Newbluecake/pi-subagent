@@ -5,7 +5,12 @@ import type { Millis } from "../core/types.js";
 import type { BashJobManager, JobOutputRead } from "../bash/manager.js";
 import { describeJobStatus, isTerminalJobStatus, previewCommand, type JobRecord } from "../bash/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
-import { createPollGuard, type PollGuardOptions } from "./poll-guard.js";
+import {
+  createPollGuard,
+  createTimeoutStreak,
+  type PollGuardOptions,
+  type TimeoutStreakOptions,
+} from "./poll-guard.js";
 
 /**
  * "bash_job" — the management surface for bash commands that were moved to
@@ -53,7 +58,8 @@ export const BashJobToolParams = Type.Object({
       "status: state summary plus the tail of the job's log; " +
       "wait: block (bounded) until the job exits — a completion notification is pushed automatically when the " +
       "job finishes, and while wait blocks the user cannot send new input, so prefer status (or simply " +
-      "continuing other work) unless there is nothing else to do; " +
+      "continuing other work) unless there is nothing else to do; repeated timing-out waits escalate " +
+      "guidance (raise wait_ms, or await the notification); " +
       "kill: terminate the process tree; list: all known jobs.",
   }),
   job_id: Type.Optional(
@@ -80,11 +86,14 @@ export interface BashJobToolDeps {
   now?: () => Millis;
   /**
    * Anti-polling-loop guard for `status` (the action a stuck model loops on).
-   * `wait` is excluded: each call blocks for seconds by design, so it cannot
-   * spin at "high frequency in a short window"; `list`/`kill` are not
-   * polling surfaces.
+   * `wait` is excluded from the frequency guard: each call blocks for seconds
+   * by design, so it cannot spin at "high frequency in a short window" — a
+   * wait loop is caught by the consecutive-timeout streak below instead.
+   * `list`/`kill` are not polling surfaces.
    */
   pollGuard?: PollGuardOptions;
+  /** Consecutive-timeout streak for `wait` calls that keep timing out. */
+  timeoutStreak?: TimeoutStreakOptions;
 }
 
 // ── formatting helpers (model-facing text) ─────────────────────────────────
@@ -242,6 +251,7 @@ function formatStatus(record: JobRecord, read: JobOutputRead | undefined, at: Mi
 
 export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof BashJobToolParams> {
   const now = deps.now ?? (() => Date.now());
+  const waitStreak = createTimeoutStreak(deps.timeoutStreak);
   const statusPollGuard = createPollGuard({
     windowMs: deps.pollGuard?.windowMs,
     maxCalls: deps.pollGuard?.maxCalls,
@@ -284,7 +294,8 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
       "Actions: status (state summary plus the tail of the log), wait (block up to wait_ms, returns the current " +
       "status on timeout; a completion notification arrives on its own when the job finishes, and while " +
       "wait blocks the user cannot send new input, so prefer status or continuing other work unless there is " +
-      "nothing else to do), kill (terminate the process tree; safe to repeat), list (this " +
+      "nothing else to do; repeated timing-out waits escalate the guidance toward raising wait_ms or " +
+      "awaiting the notification), kill (terminate the process tree; safe to repeat), list (this " +
       "session's jobs). " +
       "The log is a plain file: for the full or a targeted view, read its path directly with the read tool or with " +
       "tail/grep/awk instead of calling this tool (grep a large log rather than reading it whole). " +
@@ -351,10 +362,25 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         if (signal?.aborted) throw new Error("wait was aborted");
         const at = now();
         const finished = isTerminalJobStatus(record.status);
-        const suffix = finished
-          ? `\n${finalStatusLine(record)}\n${formatLogFileHint(record.logPath)}`
-          : `\nStill running after waiting ${formatDuration(waitMs)}; the job was not stopped. ` +
-            "Wait again, keep working, or wait for its completion notification.";
+        let suffix: string;
+        if (finished) {
+          waitStreak.reset(jobId);
+          suffix = `\n${finalStatusLine(record)}\n${formatLogFileHint(record.logPath)}`;
+        } else {
+          // A timing-out wait is not an error, but the streak escalates the
+          // guidance when the model keeps re-waiting on the same job: raise
+          // wait_ms (capped) or stop blocking and await the notification.
+          const streak = waitStreak.timeout(jobId, waitMs);
+          const escalation = streak.escalate
+            ? ` That is ${streak.streak} consecutive wait timeouts on this job ` +
+              `(~${formatDuration(streak.totalWaitedMs)} spent blocked) — re-waiting does not make it finish faster.`
+            : "";
+          suffix =
+            `\nStill running after waiting ${formatDuration(waitMs)}; the job was not stopped.${escalation} ` +
+            `Either retry with a larger wait_ms (cap ${formatDuration(MAX_WAIT_MS)}) if blocking is genuinely ` +
+            "necessary, or — preferred — end your turn (or keep working) and let the job's completion " +
+            "notification arrive; to inspect output, tail/grep the log file.";
+        }
         return {
           ...text(`${formatJobSummary(record, at)}${suffix}`),
           details: { ...jobDetails(record, at), waitedMs: waitMs, finished },

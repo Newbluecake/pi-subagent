@@ -479,7 +479,7 @@ describe("poll guard (anti-loop frequency warning)", () => {
     tool.execute("tc", { run_id: runId }, undefined, () => undefined, {} as never);
   const textOf = (r: Awaited<ReturnType<typeof call>>) => (r.content[0] as { text: string }).text;
 
-  it("does not warn at or below the default threshold (3 calls per run within 10s)", async () => {
+  it("does not warn at or below the default threshold (3 calls per run within 120s)", async () => {
     const tool = toolWithGuard();
     for (let i = 0; i < 3; i++) {
       expect(textOf(await call(tool))).not.toContain("Polling too frequently");
@@ -509,7 +509,7 @@ describe("poll guard (anti-loop frequency warning)", () => {
     const tool = toolWithGuard({ now: () => now });
     for (let i = 0; i < 3; i++) await call(tool);
     expect(textOf(await call(tool))).toContain("Polling too frequently");
-    now += 11_000; // beyond the default 10s window
+    now += 121_000; // beyond the default 120s window
     expect(textOf(await call(tool))).not.toContain("Polling too frequently");
   });
 
@@ -521,12 +521,62 @@ describe("poll guard (anti-loop frequency warning)", () => {
     expect(textOf(await call(tool))).toContain("Polling too frequently");
   });
 
-  it("warns on the wait path too", async () => {
+  it("does not count wait calls toward the frequency guard (waits are guarded by the timeout streak)", async () => {
     const tool = toolWithGuard();
     for (let i = 0; i < 3; i++) {
       await tool.execute("tc", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
     }
-    const result = await tool.execute("tc", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
-    expect(textOf(result)).toContain("Polling too frequently");
+    // 3 waits + this read would have warned if waits were still counted.
+    expect(textOf(await call(tool))).not.toContain("Polling too frequently");
+  });
+});
+
+describe("wait timeout streak (repeated wait timeouts escalate guidance)", () => {
+  const snap = completedSnapshot();
+  const timeoutTool = () =>
+    createResultTool({
+      query: {
+        ...queryForSnapshot(snap),
+        wait: async () => ({ ok: false as const, reason: "wait_timeout" as const }),
+      },
+    });
+  const waitOnce = (tool: ReturnType<typeof createResultTool>) =>
+    tool.execute("tc", { run_id: "r1", wait: true, wait_ms: 60_000 }, undefined, () => undefined, {} as never);
+
+  it("first timeout states the two ways out (larger wait_ms / await the notification) without escalation", async () => {
+    const err: Error = await waitOnce(timeoutTool()).catch((e: Error) => e);
+    expect(err.message).toContain("wait timed out after 1m00s");
+    expect(err.message).toContain("wait_ms");
+    expect(err.message).toContain("completion notification");
+    expect(err.message).not.toContain("consecutive timeouts");
+  });
+
+  it("escalates on the 2nd consecutive timeout with the streak and cumulative blocked time", async () => {
+    const tool = timeoutTool();
+    await waitOnce(tool).catch(() => undefined);
+    const err: Error = await waitOnce(tool).catch((e: Error) => e);
+    expect(err.message).toContain("2 consecutive timeouts");
+    expect(err.message).toContain("2m00s spent blocked");
+    expect(err.message).toContain("wait_ms");
+  });
+
+  it("a terminal outcome resets the streak", async () => {
+    let mode: "timeout" | "ok" = "timeout";
+    const tool = createResultTool({
+      query: {
+        ...queryForSnapshot(snap),
+        wait: async () =>
+          mode === "ok"
+            ? { ok: true as const, outcome: snap.outcome! }
+            : { ok: false as const, reason: "wait_timeout" as const },
+      },
+    });
+    await waitOnce(tool).catch(() => undefined); // streak 1
+    await waitOnce(tool).catch(() => undefined); // streak 2 (escalated)
+    mode = "ok";
+    await waitOnce(tool); // terminal outcome -> reset
+    mode = "timeout";
+    const err: Error = await waitOnce(tool).catch((e: Error) => e);
+    expect(err.message).not.toContain("consecutive timeouts"); // back to first-timeout wording
   });
 });

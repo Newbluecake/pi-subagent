@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed. The guard behavior itself is unchanged.
+- **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed.
+
+- **poll guard retuned to real loop shapes** — the frequency window for non-blocking reads (`get_subagent_result` without wait, `bash_job` status) is now 120s/3 calls per key, up from 10s: each poll costs a full model turn (seconds to tens of seconds), so a 10s window only ever caught same-message bursts and never a real cross-turn polling loop. Blocking waits are no longer frequency-counted at all; instead a consecutive-timeout streak guards them — a wait blocks up to its budget by design, so the loop signal is the same run/job timing out again and again. The first timeout already states the two ways out (raise `wait_ms`, or end the turn and await the completion notification); from the 2nd consecutive timeout the message escalates with the streak count and cumulative time spent blocked, and any terminal outcome resets the streak.
 
 ### Added
 

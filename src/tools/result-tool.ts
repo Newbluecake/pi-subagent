@@ -7,7 +7,13 @@ import { deliveryKey, type Notifier } from "../delivery/notifier.js";
 import type { RunOutcome } from "../core/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
 import { buildProgressLines } from "./agent-tool.js";
-import { createPollGuard, type PollGuardOptions } from "./poll-guard.js";
+import {
+  createPollGuard,
+  createTimeoutStreak,
+  type PollGuardOptions,
+  type TimeoutStreakOptions,
+  type TimeoutStreakResult,
+} from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
 import { truncateResultText } from "./result-text.js";
 
@@ -18,9 +24,13 @@ import { truncateResultText } from "./result-text.js";
  * — this closes the original plugin's P2 defect (unbounded wait:true).
  *
  * Reads never consume the run, so re-checking is side-effect free — but
- * polling in a tight loop trips the poll guard (tools/poll-guard.ts, shared
- * with bash_job status): a warning is prepended telling the model to stop
- * and await the completion notification.
+ * polling in a tight loop trips the frequency guard (tools/poll-guard.ts,
+ * shared with bash_job): a warning is prepended telling the model to stop
+ * and await the completion notification. The wait path is guarded by a
+ * consecutive-timeout streak instead (frequency is meaningless when each
+ * call blocks by design): repeated timeouts on the same run escalate the
+ * error message toward the two ways out — raise wait_ms, or end the turn
+ * and let the notification arrive.
  */
 export const ResultToolParams = Type.Object({
   run_id: Type.String({
@@ -55,9 +65,11 @@ export function createResultTool(deps: {
   resolveRun?: (handle: string) => ResolveRunResult;
   notifier?: Pick<Notifier, "ack">;
   pollGuard?: PollGuardOptions;
+  timeoutStreak?: TimeoutStreakOptions;
   resultMaxChars?: () => number;
 }): ToolDefinition<typeof ResultToolParams> {
   const pollGuard = createPollGuard(deps.pollGuard);
+  const waitStreak = createTimeoutStreak(deps.timeoutStreak);
   // pi usage accounting dedupe: a background run's spend is attached to the
   // FIRST tool result that reports its terminal outcome — get_subagent_result
   // can be called repeatedly for the same run, and re-attaching usage each
@@ -91,7 +103,9 @@ export function createResultTool(deps: {
       "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran. " +
       "Long result text is capped by resultMaxChars with a session-file path for reading the full transcript. " +
       "Reading a result never consumes the run, so checking is safe — but rapid repeated polling of the " +
-      "same run returns a warning; await the completion notification instead.",
+      "same run returns a warning; await the completion notification instead. " +
+      "A wait that times out tells you how to proceed; repeated timeouts on the same run escalate that " +
+      "guidance (raise wait_ms, or stop blocking and await the notification).",
     promptSnippet: "get_subagent_result(run_id, wait?, wait_ms?) - check a background subagent's status/result",
     parameters: ResultToolParams,
     /**
@@ -114,9 +128,11 @@ export function createResultTool(deps: {
       const resolved = deps.resolveRun?.(params.run_id);
       if (resolved && !resolved.ok) throw new Error(resolved.error);
       const runId = resolved?.ok ? resolved.runId : params.run_id;
-      const pollWarning = pollGuard.record(runId);
-      const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
       if (!params.wait) {
+        // The frequency guard covers only this non-blocking read path; the
+        // wait path below is guarded by the consecutive-timeout streak.
+        const pollWarning = pollGuard.record(runId);
+        const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
         const snapshot = deps.query.get(runId);
         if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
         const maxChars = deps.resultMaxChars?.() ?? 0;
@@ -126,7 +142,10 @@ export function createResultTool(deps: {
               `Run ${runId} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
               ...buildProgressLines(snapshot, Date.now()),
             ].join("\n");
-        if (snapshot.outcome) tryAck(runId, snapshot.generation, snapshot.outcome);
+        if (snapshot.outcome) {
+          waitStreak.reset(runId);
+          tryAck(runId, snapshot.generation, snapshot.outcome);
+        }
         return {
           content: [{ type: "text" as const, text: withWarning(text) }],
           ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
@@ -167,28 +186,27 @@ export function createResultTool(deps: {
       // try/finally rather than .finally(): a synchronous throw from a
       // non-async QueryService stub would otherwise skip cleanup entirely
       // (the rejection would surface before the .finally chain existed).
+      const waitMs = params.wait_ms ?? DEFAULT_WAIT_MS;
       let waited;
       try {
         waited = await deps.query.wait(runId, {
-          waitMs: params.wait_ms ?? DEFAULT_WAIT_MS,
+          waitMs,
           ...(signal ? { signal } : {}),
         });
       } finally {
         if (timer) clearInterval(timer);
       }
       if (!waited.ok) {
-        const reason =
-          waited.reason === "unknown_run"
-            ? `unknown run_id: ${params.run_id}`
-            : waited.reason === "aborted"
-              ? "wait was aborted"
-              : `wait timed out after ${params.wait_ms ?? DEFAULT_WAIT_MS}ms`;
-        throw new Error(reason);
+        if (waited.reason === "wait_timeout") {
+          throw new Error(waitTimeoutMessage(runId, waitMs, waitStreak.timeout(runId, waitMs)));
+        }
+        throw new Error(waited.reason === "unknown_run" ? `unknown run_id: ${params.run_id}` : "wait was aborted");
       }
+      waitStreak.reset(runId);
       tryAck(runId, waited.outcome.diag.generation, waited.outcome);
       const maxChars = deps.resultMaxChars?.() ?? 0;
       return {
-        content: [{ type: "text" as const, text: withWarning(formatOutcome(waited.outcome, maxChars)) }],
+        content: [{ type: "text" as const, text: formatOutcome(waited.outcome, maxChars) }],
         ...usageOnce(runId, waited.outcome.usage),
         details: {
           runId,
@@ -203,6 +221,25 @@ export function createResultTool(deps: {
       };
     },
   } satisfies ToolDefinition<typeof ResultToolParams>;
+}
+
+/**
+ * The wait-timeout error IS the guidance surface (a timeout throws, so there
+ * is no tool result to prepend a warning to). The first timeout states the
+ * two ways out; consecutive timeouts on the same run escalate with the
+ * streak count and the cumulative time already wasted blocking.
+ */
+function waitTimeoutMessage(runId: string, waitMs: number, streak: TimeoutStreakResult): string {
+  const base = `wait timed out after ${formatDuration(waitMs)}; run ${runId} is still going.`;
+  const directions =
+    "Either retry with a larger wait_ms if blocking is genuinely necessary, or — preferred — end your " +
+    "turn (or do other work) and let the run's completion notification arrive.";
+  if (!streak.escalate) return `${base} ${directions}`;
+  return (
+    `${base} That is ${streak.streak} consecutive timeouts on this run ` +
+    `(~${formatDuration(streak.totalWaitedMs)} spent blocked) — re-waiting does not make it finish faster. ` +
+    directions
+  );
 }
 
 function formatOutcome(
