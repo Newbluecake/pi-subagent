@@ -39,6 +39,7 @@ import {
   type FrozenCardInput,
   type PendingNotification,
 } from "./core.js";
+import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
 
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
@@ -432,6 +433,7 @@ export default function (pi: ExtensionAPI) {
   function currentStats(ctx: ExtensionContext) {
     return {
       project: basename(ctx.cwd),
+      cwd: ctx.cwd,
       prompt: taskPrompt || "(无任务描述)",
       durationSec: taskStartedAt > 0 ? Math.round((Date.now() - taskStartedAt) / 1000) : 0,
       turns,
@@ -458,7 +460,9 @@ export default function (pi: ExtensionAPI) {
     if (deferredNote) overrides = { ...overrides, details: `${overrides?.details ?? ""}\n后台任务超时未结束` };
     if (!config.webhookUrl) return { ok: false, error: "webhookUrl 未配置" };
     const stats = { ...currentStats(ctx), ...statsOverride };
-    const card = buildCard({ status, summary, errorMessage: errMsg, overrides, ...stats });
+    // best-effort 取分支：失败/超时/非 git 仓库 → undefined，不阻塞通知
+    const branch = await getGitBranch(stats.cwd ?? ctx.cwd);
+    const card = buildCard({ status, summary, errorMessage: errMsg, overrides, ...stats, branch });
     const result = await sendToFeishu(config, card);
     if (!result.ok) {
       log(`send failed: ${result.error}`);
@@ -724,6 +728,8 @@ export default function (pi: ExtensionAPI) {
       const card = buildCard({
         status: "test",
         project: basename(ctx.cwd),
+        cwd: ctx.cwd,
+        branch: await getGitBranch(ctx.cwd),
         prompt: "这是一条测试消息",
         durationSec: 0,
         turns: 0,

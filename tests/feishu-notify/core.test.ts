@@ -9,6 +9,7 @@ import {
   DEFAULT_SUBAGENT_FLUSH_DEBOUNCE_MS,
   DEFAULT_WAIT_NOTIFY_TIMEOUT_SEC,
   buildCard,
+  escapeLarkMd,
   feishuSign,
   formatDuration,
   parseConfig,
@@ -204,6 +205,68 @@ describe("buildCard", () => {
     const card = buildCard({ status: "subagents", ...base, overrides: { details: longDetails } }) as any;
     const detailsElement = card.card.elements[card.card.elements.length - 1];
     expect(detailsElement.text.content.length).toBeLessThanOrEqual(801); // 800 + ellipsis
+  });
+
+  it("renders full cwd and branch in a meta div right after the fields row", () => {
+    const card = buildCard({
+      status: "success",
+      ...base,
+      cwd: "/home/bluecake/ai/pi-subagent",
+      branch: "feat/notify-cwd-branch",
+    }) as any;
+    const meta = card.card.elements[1];
+    expect(meta.tag).toBe("div");
+    expect(meta.text.content).toContain("**目录**\n/home/bluecake/ai/pi-subagent");
+    expect(meta.text.content).toContain("**分支**\nfeat/notify-cwd-branch");
+    // 任务块被顶到后面
+    expect(card.card.elements[2].text.content).toContain("**任务**");
+  });
+
+  it("renders cwd without branch field when branch is absent", () => {
+    const card = buildCard({ status: "success", ...base, cwd: "/tmp/proj" }) as any;
+    const meta = card.card.elements[1];
+    expect(meta.text.content).toContain("**目录**\n/tmp/proj");
+    expect(meta.text.content).not.toContain("分支");
+  });
+
+  it("omits the meta div entirely when cwd is absent (backward compatible)", () => {
+    const card = buildCard({ status: "success", ...base }) as any;
+    expect(JSON.stringify(card.card.elements)).not.toContain("目录");
+    expect(JSON.stringify(card.card.elements)).not.toContain("分支");
+    // 卡片形状不变：fields + 任务 + 结果摘要
+    expect(card.card.elements[1].text.content).toContain("**任务**");
+  });
+
+  it("escapes lark_md metacharacters in cwd and branch", () => {
+    const card = buildCard({
+      status: "success",
+      ...base,
+      cwd: "/tmp/my proj*_[v2]",
+      branch: "feat/x~1`y`",
+    }) as any;
+    const content = card.card.elements[1].text.content as string;
+    expect(content).toContain("/tmp/my proj\\*\\_\\[v2\\]");
+    expect(content).toContain("feat/x\\~1\\`y\\`");
+  });
+});
+
+describe("escapeLarkMd", () => {
+  it("escapes backslash first, then markdown metacharacters", () => {
+    expect(escapeLarkMd("a\\b*c_d`e~f[g]")).toBe("a\\\\b\\*c\\_d\\`e\\~f\\[g\\]");
+  });
+
+  it("leaves ordinary paths and branch names untouched", () => {
+    expect(escapeLarkMd("/home/user/proj")).toBe("/home/user/proj");
+    expect(escapeLarkMd("feat/notify-cwd-branch")).toBe("feat/notify-cwd-branch");
+  });
+
+  it("never expands fast-check input length by more than 2x (fast-check)", () => {
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        const out = escapeLarkMd(s);
+        expect(out.length).toBeLessThanOrEqual(s.length * 2);
+      }),
+    );
   });
 });
 

@@ -104,6 +104,14 @@ export function truncate(text: string, max: number): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+/**
+ * lark_md 转义：路径/分支名可能含 `*`、`_`、`` ` ``、`~`、`[`、`]` 等 markdown 元字符，
+ * 直接拼进 lark_md 会破坏渲染。先转义反斜杠自身，再转义其余元字符。
+ */
+export function escapeLarkMd(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/[*_`~\[\]]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // Card building
 // ---------------------------------------------------------------------------
@@ -127,7 +135,12 @@ export interface BuildCardOverrides {
 
 export interface BuildCardInput {
   status: CardStatus;
+  /** 项目名（通常为目录 basename），渲染在 fields 区第一格 */
   project: string;
+  /** 完整工作目录路径。缺省时不渲染「目录」行（向后兼容）。 */
+  cwd?: string | undefined;
+  /** git 分支（detached 时为短 SHA）。缺省时「目录」行不附带分支（向后兼容）。 */
+  branch?: string | undefined;
   prompt: string;
   durationSec: number;
   turns: number;
@@ -175,6 +188,14 @@ export function buildCard(input: BuildCardInput): unknown {
     { tag: "div", fields },
     { tag: "div", text: { tag: "lark_md", content: `**任务**\n${truncate(input.prompt, 200)}` } },
   ];
+
+  // 目录/分支元信息块：紧跟 fields 区之后。cwd 缺失时整块省略；
+  // branch 缺失（非 git 仓库/取分支失败）时只显示目录。
+  if (input.cwd) {
+    const lines = [`**目录**\n${escapeLarkMd(input.cwd)}`];
+    if (input.branch) lines.push(`**分支**\n${escapeLarkMd(input.branch)}`);
+    elements.splice(1, 0, { tag: "div", text: { tag: "lark_md", content: lines.join("\n") } });
+  }
 
   if (input.status === "error" && input.errorMessage) {
     elements.push({
