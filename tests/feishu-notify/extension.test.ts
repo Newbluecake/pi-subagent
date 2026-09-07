@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { publishBackgroundStatus } from "../../src/service/background-status.js";
 
 const TEST_CONFIG_PATH = join(tmpdir(), `feishu-notify-test-${process.pid}.json`);
 
@@ -112,11 +113,15 @@ function writeTestConfigFile(extra: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 
 let extensionModule: any;
+let activeHarness: { emit: (event: string, payload?: any, ctx?: any) => Promise<void> } | undefined;
+let releaseBackgroundStatus: (() => void) | undefined;
+let backgroundStatus = { runningSubagents: 0, runningBashJobs: 0 as number | null };
 
 beforeEach(async () => {
   vi.resetModules();
   vi.useFakeTimers();
   assistantText = "";
+  backgroundStatus = { runningSubagents: 0, runningBashJobs: 0 };
   process.env.FEISHU_WEBHOOK_URL = "https://example.com/hook";
   delete process.env.FEISHU_WEBHOOK_SECRET;
   process.env.FEISHU_NOTIFY_CONFIG_PATH = TEST_CONFIG_PATH;
@@ -124,7 +129,11 @@ beforeEach(async () => {
   extensionModule = await import("../../src/feishu-notify/index.js");
 });
 
-afterEach(() => {
+afterEach(async () => {
+  if (activeHarness) await activeHarness.emit("session_shutdown", { reason: "test" }, defaultCtx);
+  activeHarness = undefined;
+  releaseBackgroundStatus?.();
+  releaseBackgroundStatus = undefined;
   vi.unstubAllGlobals();
   vi.useRealTimers();
   delete process.env.FEISHU_WEBHOOK_URL;
@@ -134,9 +143,52 @@ afterEach(() => {
 
 function setup() {
   const { pi, emit, bus, tools, commands } = createFakePi();
+  releaseBackgroundStatus = publishBackgroundStatus(() => backgroundStatus);
   extensionModule.default(pi);
-  return { emit, bus, tools, commands };
+  activeHarness = { emit };
+  return {
+    emit,
+    bus,
+    tools,
+    commands,
+    setBackgroundStatus: (next: typeof backgroundStatus) => (backgroundStatus = next),
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Background gating semantics
+// ---------------------------------------------------------------------------
+
+describe("background gating", () => {
+  it("fails closed when the background-status provider is missing", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit } = setup();
+    releaseBackgroundStatus?.();
+    releaseBackgroundStatus = undefined;
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("defers a result card while busy and sends it after the provider becomes idle", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].body).toContain("任务完成");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 12. Heartbeat basic
