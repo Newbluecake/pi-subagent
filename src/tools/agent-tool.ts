@@ -143,7 +143,11 @@ export const AgentToolParams = Type.Object({
   isolation: Type.Optional(
     Type.Literal("worktree", {
       description:
-        "Run in an isolated git worktree; changes are committed to a pi-agent-<runId> branch afterwards. Requires worktree.enabled in settings.",
+        "Run in an isolated git worktree created from the current HEAD (uncommitted changes in the main checkout are NOT visible). " +
+        "Use for risky edits or when running parallel agents on the same repo. " +
+        "On completion all changes are committed to a new pi-agent-<runId> branch in the main repo and the worktree is deleted; " +
+        "merge or cherry-pick that branch to keep the results. " +
+        "Fails with a config error (no fallback) if worktree.enabled is off or the cwd is not a git repository.",
     }),
   ),
   timeout_ms: Type.Optional(

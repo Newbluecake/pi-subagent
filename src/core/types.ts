@@ -145,7 +145,12 @@ export interface SpawnRequest {
   parentRunId?: RunId;
   /** Caller will synchronously acknowledge the terminal outcome. */
   expectAck?: boolean;
-  /** Request an isolated git worktree for this run. */
+  /**
+   * Request an isolated git worktree for this run. Created from the current
+   * HEAD (uncommitted main-checkout changes are not visible); on reap all
+   * changes are committed to a `pi-agent-<runId>` branch and the worktree is
+   * removed. Fails as `failed(config)` with no fallback when unavailable.
+   */
   isolation?: "worktree";
   signal?: AbortSignal;
   /** Resume a terminal run by run id or directly by its persisted session file. */
