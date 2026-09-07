@@ -21,7 +21,9 @@ const valid = {
 function capture() {
   let tool: Tool | undefined;
   let active: string[] | undefined;
+  const emitted: string[] = [];
   const pi = {
+    events: { emit: (name: string) => emitted.push(name) },
     registerTool(definition: Tool) {
       tool = definition;
     },
@@ -37,6 +39,7 @@ function capture() {
     get active() {
       return active;
     },
+    emitted,
   };
 }
 
@@ -59,6 +62,18 @@ function tuiContext(onCreate?: (component: AskUserComponent) => void) {
 }
 
 describe("ask_user entry orchestration", () => {
+  it("emits ask-user:activity from the TUI component input path", async () => {
+    const captured = capture();
+    await captured.tool.execute(
+      "id",
+      valid,
+      undefined,
+      undefined,
+      tuiContext((component) => component.handleInput("\r")),
+    );
+    expect(captured.emitted).toContain("ask-user:activity");
+  });
+
   it("registers the tool and returns a structured TUI result", async () => {
     const { tool } = capture();
     const result = await tool.execute(

@@ -12,7 +12,7 @@ const TEST_CONFIG_PATH = join(tmpdir(), `feishu-notify-test-${process.pid}.json`
 // Test scaffolding (per plan §9.1, with the createFakePi "push" bug fixed)
 // ---------------------------------------------------------------------------
 
-function createFakePi() {
+function createFakePi(externalTools: unknown[] = []) {
   const handlers = new Map<string, Function[]>();
   const busHandlers = new Map<string, Function[]>();
   const tools: any[] = [];
@@ -42,6 +42,7 @@ function createFakePi() {
     },
     registerTool: (t: any) => tools.push(t),
     registerCommand: (n: string, c: any) => commands.set(n, c),
+    getAllTools: () => externalTools,
   } as unknown as ExtensionAPI;
 
   const emit = async (e: string, ev: any = {}, ctx: any = defaultCtx) => {
@@ -171,6 +172,19 @@ describe("background gating", () => {
     await emit("agent_start", {}, ctx);
     await emit("agent_settled", {}, ctx);
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("后台任务状态不可用"), "warning");
+  });
+
+  it("treats a disabled bash provider value as idle", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: null });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("defers a result card while busy and sends it after the provider becomes idle", async () => {
@@ -187,6 +201,132 @@ describe("background gating", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![1].body).toContain("任务完成");
+  });
+
+  it("sends at the defer cap and annotates the card", async () => {
+    writeTestConfigFile({ backgroundIdleRecheckMs: 100, backgroundDeferCapMs: 500 });
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].body).toContain("后台任务超时未结束");
+  });
+
+  it("drops an armed idle reminder if the provider becomes busy before fire", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 1 });
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps heartbeat and waiting reminders exempt while background work is busy", async () => {
+    writeTestConfigFile({ heartbeatIntervalSec: 1, waitNotifyTimeoutSec: 1 });
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 1 });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("tool_execution_start", { toolCallId: "ask-1", toolName: "ask_user", args: {} }, ctx);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock.mock.calls.some((call) => call[1].body.includes("仍在运行"))).toBe(true);
+    expect(fetchMock.mock.calls.some((call) => call[1].body.includes("等待输入"))).toBe(true);
+    expect(fetchMock.mock.calls.some((call) => call[1].body.includes("后台任务：subagent 1 个，bash 1 个"))).toBe(true);
+  });
+
+  it("sends feishu_notify while busy and cancels the pending result card", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, tools, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    const tool = tools.find((candidate) => candidate.name === "feishu_notify");
+    await tool.execute("explicit", { status: "success", summary: "explicit" }, undefined, undefined, ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps multiple result keys and sends each exactly once", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    for (const text of ["first", "second"]) {
+      await emit("input", { type: "input", text: `@notify ${text}`, source: "interactive" }, ctx);
+      await emit("agent_start", {}, ctx);
+      await emit("agent_settled", {}, ctx);
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears pending notifications on session shutdown", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit, setBackgroundStatus } = setup();
+    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    await emit("session_shutdown", {}, ctx);
+    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails safe and warns when an old ask_user tool is detected", async () => {
+    const fetchState = installFetchMock();
+    const oldTool = { name: "ask_user", sourceInfo: "/home/user/.pi-ask-user/index.ts" };
+    const fake = createFakePi([oldTool]);
+    releaseBackgroundStatus = publishBackgroundStatus(() => backgroundStatus);
+    extensionModule.default(fake.pi);
+    const ctx = makeCtx();
+    await fake.emit("session_start", {}, ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("卸载旧包"), "warning");
+    const tool = fake.tools.find((candidate) => candidate.name === "feishu_notify");
+    await expect(
+      tool.execute("id", { status: "success", summary: "blocked" }, undefined, undefined, ctx),
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining("卸载旧包") }],
+    });
+    expect(fetchState.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps a child activation inert while the host claim is held", () => {
+    const hostKey = Symbol.for("pi-subagent:feishu-notify:host");
+    (globalThis as Record<symbol, unknown>)[hostKey] = { test: true };
+    const child = createFakePi();
+    extensionModule.default(child.pi);
+    expect(child.tools).toHaveLength(0);
+    expect(child.commands.size).toBe(0);
+    expect(child.handlers.size).toBe(0);
+    delete (globalThis as Record<symbol, unknown>)[hostKey];
   });
 });
 

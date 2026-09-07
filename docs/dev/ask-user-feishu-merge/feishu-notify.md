@@ -33,7 +33,7 @@
 }
 ```
 
-defer 仅存于当前扩展实例内，reload、退出或切换 session 时未发送项会丢弃。
+defer 仅存于当前扩展实例内，reload、退出或切换 session 时未发送项会丢弃。当前实现只由 unref 的轮询定时器驱动补发，不在 subagent/bash 事件上额外复检；这是为降低接线复杂度而接受的简化，最坏延迟为一个 `backgroundIdleRecheckMs` 周期。
 
 ## 从独立包迁移
 

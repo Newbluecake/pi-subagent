@@ -32,7 +32,7 @@
 1. 执行 `pi uninstall @bluecake/pi-ask-user`，或从 pi 配置的 packages 中移除旧包。
 2. 升级/安装本包；`pi.extensions` 已包含 `index.ts`、`ask-user.ts` 和 `feishu-notify.ts` 三个入口。
 3. 保留原有 `~/.pi/agent/feishu-notify.json` 配置；新增门控项 `requireBackgroundIdle`、`backgroundIdleRecheckMs`、`backgroundDeferCapMs` 可按需调整。
-4. 若启动时看到冲突 warning，说明旧包仍被加载；完成卸载并重新 `/reload`。
+4. 若首次 `session_start` 时看到冲突 warning，说明旧包仍被加载；完成卸载并重新 `/reload`。
 
 ## Message fabric
 

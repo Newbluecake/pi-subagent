@@ -27,7 +27,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 
 ## Migrating from standalone pi-ask-user
 
-The merged package must not be installed alongside `@bluecake/pi-ask-user`. Remove the old package from pi (`pi uninstall @bluecake/pi-ask-user` or remove it from package settings), install/update this package, keep the existing `~/.pi/agent/feishu-notify.json`, and reload pi. A startup conflict warning means the old package is still active and must be removed before reloading.
+The merged package must not be installed alongside `@bluecake/pi-ask-user`. Remove the old package from pi (`pi uninstall @bluecake/pi-ask-user` or remove it from package settings), install/update this package, keep the existing `~/.pi/agent/feishu-notify.json`, and reload pi. A conflict warning during the first `session_start` means the old package is still active and must be removed before reloading.
 
 ## Message fabric
 

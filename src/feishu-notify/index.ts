@@ -144,6 +144,7 @@ export default function (pi: ExtensionAPI) {
     if (!status && !missingStatusWarned) {
       missingStatusWarned = true;
       log("background status provider missing; gated notification held");
+      if (lastCtx?.hasUI) lastCtx.ui.notify("后台任务状态不可用，已暂缓完成类飞书通知", "warning");
     }
     return isBackgroundIdle(status);
   }
@@ -217,7 +218,11 @@ export default function (pi: ExtensionAPI) {
       heartbeatTimer = undefined;
       if (!running || !lastCtx) return; // 🟢-1：不崩在计时器里
       if (gateOpen()) {
-        void sendCard(lastCtx, "heartbeat", extractSummary(lastCtx), undefined, undefined, {
+        const status = readBackgroundStatus();
+        const details = status
+          ? `后台任务：subagent ${status.runningSubagents} 个，bash ${status.runningBashJobs ?? 0} 个`
+          : undefined;
+        void sendCard(lastCtx, "heartbeat", extractSummary(lastCtx), undefined, details ? { details } : undefined, {
           project: lastProject,
         });
       }
@@ -477,9 +482,13 @@ export default function (pi: ExtensionAPI) {
       if (!tool || typeof tool !== "object") return false;
       const info = (tool as { sourceInfo?: unknown }).sourceInfo;
       const source = typeof info === "string" ? info : JSON.stringify(info ?? "");
-      return (tool as { name?: unknown }).name === "feishu_notify" && source.length > 0 && !source.includes(ownPath);
+      const name = (tool as { name?: unknown }).name;
+      return (name === "feishu_notify" || name === "ask_user") && source.length > 0 && !source.includes(ownPath);
     });
-    if (conflictInert) log("旧 pi-ask-user/feishu-notify detected; notifications disabled");
+    if (conflictInert) {
+      log("旧 pi-ask-user/feishu-notify detected; notifications disabled");
+      if (ctx.hasUI) ctx.ui.notify("检测到旧版 pi-ask-user，请卸载旧包后再使用合并版", "warning");
+    }
     watched = false;
     notifyRequested = false;
     running = false;
@@ -680,8 +689,11 @@ export default function (pi: ExtensionAPI) {
         pendings.delete(`result:${taskStartedAt}`);
         return { content: [{ type: "text" as const, text: "飞书通知已发送。" }], details: {} };
       }
+      const errorText = conflictInert
+        ? "飞书通知不可用：检测到旧版 pi-ask-user，请先卸载旧包。"
+        : `飞书通知发送失败: ${result.error}`;
       return {
-        content: [{ type: "text" as const, text: `飞书通知发送失败: ${result.error}` }],
+        content: [{ type: "text" as const, text: errorText }],
         details: {},
         isError: true,
       };
@@ -700,6 +712,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("feishu-test", {
     description: "发送飞书测试卡片，验证 webhook 配置",
     handler: async (_args, ctx) => {
+      if (conflictInert) {
+        ctx.ui.notify("检测到旧版 pi-ask-user，请先卸载旧包后再发送飞书通知", "error");
+        return;
+      }
       config = loadConfig();
       if (!config.webhookUrl) {
         ctx.ui.notify(`未配置 webhook，请编辑 ${configPath()} 或设置 FEISHU_WEBHOOK_URL`, "error");

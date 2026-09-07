@@ -16,9 +16,9 @@ import {
   stubTheme,
 } from "./fixtures.js";
 
-function make(questions: Question[]) {
+function make(questions: Question[], onActivity?: () => void) {
   const calls: Array<Result | null> = [];
-  const c = new AskUserComponent(questions, mockTui, stubTheme, (result) => calls.push(result));
+  const c = new AskUserComponent(questions, mockTui, stubTheme, (result) => calls.push(result), { onActivity });
   return { c, calls };
 }
 
@@ -109,6 +109,15 @@ describe("AskUserComponent", () => {
     expect(c.render(80).join("\n")).toContain("Cancel");
     c.handleInput(ENTER);
     expect(calls).toEqual([null]);
+  });
+
+  it("emits activity for input and ignores input after resolution", () => {
+    const activity = [] as number[];
+    const { c } = make([singleQ], () => activity.push(1));
+    c.handleInput(DOWN);
+    c.handleInput(ENTER);
+    c.handleInput(DOWN);
+    expect(activity).toHaveLength(2);
   });
 
   it("deletes emoji safely in freeform", () => {

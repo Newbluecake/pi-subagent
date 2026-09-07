@@ -137,6 +137,23 @@ describe("parseConfig", () => {
     expect(parseConfig({ subagentForegroundSummary: true }, {}).subagentForegroundSummary).toBe(true);
   });
 
+  it("parses the background gating settings and falls back for invalid values", () => {
+    expect(
+      parseConfig(
+        {
+          requireBackgroundIdle: false,
+          backgroundIdleRecheckMs: 123,
+          backgroundDeferCapMs: 456,
+        },
+        {},
+      ),
+    ).toMatchObject({ requireBackgroundIdle: false, backgroundIdleRecheckMs: 123, backgroundDeferCapMs: 456 });
+    expect(parseConfig({ backgroundIdleRecheckMs: "bad" as never, backgroundDeferCapMs: NaN }, {})).toMatchObject({
+      backgroundIdleRecheckMs: 5000,
+      backgroundDeferCapMs: 600000,
+    });
+  });
+
   it("webhookUrl/secret fall back to env vars", () => {
     const cfg = parseConfig({}, { FEISHU_WEBHOOK_URL: "https://x", FEISHU_WEBHOOK_SECRET: "s" } as never);
     expect(cfg.webhookUrl).toBe("https://x");
