@@ -7,6 +7,7 @@ import { createWorkflowTool } from "../../src/tools/workflow-tool.js";
 import { createStructuredOutputTool } from "../../src/tools/structured-output-tool.js";
 import { createBashTool } from "../../src/tools/bash-tool.js";
 import { createBashJobTool } from "../../src/tools/bash-job-tool.js";
+import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
   if (!schema || typeof schema !== "object") return out;
@@ -36,6 +37,7 @@ function tools() {
     // job wording are generated, so drift here is easy to miss).
     createBashTool({ manager: () => undefined, autoBackgroundMs: () => 120_000 }),
     createBashJobTool({ manager: () => undefined }),
+    createSetModelTool({}),
   ];
 }
 
@@ -52,6 +54,8 @@ describe("model-facing tool strings", () => {
     expect(collectDescriptions(result.parameters).join(" ")).toContain("label");
     expect(collectDescriptions(steer.parameters).join(" ")).toContain("label");
     expect(collectDescriptions(abort.parameters).join(" ")).toContain("label");
+    const setModel = tools().find((tool) => tool.name === "set_model")!;
+    expect(collectDescriptions(setModel.parameters).join(" ")).toContain("label");
     expect(agent.description).toContain("terminal run");
   });
 
