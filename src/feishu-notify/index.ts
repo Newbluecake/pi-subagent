@@ -35,7 +35,11 @@ import {
   parseSubagentLifecycle,
   sendToFeishu,
   truncate,
+  isBackgroundIdle,
+  type FrozenCardInput,
+  type PendingNotification,
 } from "./core.js";
+import { readBackgroundStatus } from "../service/background-status.js";
 
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
 const LOG_PATH = join(CONFIG_DIR, "feishu-notify.log");
@@ -70,6 +74,12 @@ function log(message: string): void {
 }
 
 export default function (pi: ExtensionAPI) {
+  const hostKey = Symbol.for("pi-subagent:feishu-notify:host");
+  const global = globalThis as Record<symbol, unknown>;
+  if (global[hostKey]) return;
+  const claim = { activatedAt: Date.now() };
+  global[hostKey] = claim;
+  let conflictInert = false;
   let config = loadConfig();
 
   // ---- 任务级状态（一个「用户任务」生命周期，可跨多次 agent_start/settled 中的 run 内续跑） ----
@@ -105,6 +115,9 @@ export default function (pi: ExtensionAPI) {
   // ---- subagent 汇总 ----
   const subagents = new SubagentTracker();
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  let backgroundTimer: ReturnType<typeof setTimeout> | undefined;
+  const pendings = new Map<string, PendingNotification>();
+  let missingStatusWarned = false;
 
   // ---- 等待输入提醒：交互工具打开后长时间未结束 → 飞书提醒（按 toolCallId 跟踪） ----
   interface WaitTimerEntry {
@@ -123,6 +136,63 @@ export default function (pi: ExtensionAPI) {
   /** gateOpen() = watched || taskGate || notifyRequested （并集） */
   function gateOpen(): boolean {
     return watched || taskGate || notifyRequested;
+  }
+
+  function backgroundIdle(): boolean {
+    if (config.requireBackgroundIdle === false) return true;
+    const status = readBackgroundStatus();
+    if (!status && !missingStatusWarned) {
+      missingStatusWarned = true;
+      log("background status provider missing; gated notification held");
+    }
+    return isBackgroundIdle(status);
+  }
+
+  function scheduleBackgroundCheck(): void {
+    if (backgroundTimer || pendings.size === 0) return;
+    const delay = config.backgroundIdleRecheckMs ?? 5000;
+    if (delay <= 0) return;
+    backgroundTimer = setTimeout(() => {
+      backgroundTimer = undefined;
+      void drainPending();
+    }, delay);
+    backgroundTimer.unref?.();
+  }
+
+  function queuePending(entry: PendingNotification): void {
+    pendings.set(entry.key, entry);
+    scheduleBackgroundCheck();
+  }
+
+  async function drainPending(): Promise<void> {
+    const now = Date.now();
+    for (const [key, entry] of pendings) {
+      if (entry.state !== "pending") continue;
+      if (!backgroundIdle() && now < entry.deadlineAt) continue;
+      entry.state = "sending";
+      if (entry.kind === "subagents") {
+        if (lastCtx) doFlushSubagentSummary(lastCtx, true);
+        entry.state = "sent";
+        pendings.delete(key);
+        continue;
+      }
+      const card = entry.card;
+      const result = card
+        ? await sendCard(
+            lastCtx,
+            card.status,
+            card.summary,
+            card.errorMessage,
+            card.overrides,
+            card.statsOverride as Partial<ReturnType<typeof currentStats>>,
+            false,
+            now >= entry.deadlineAt,
+          )
+        : { ok: false, error: "pending card unavailable" };
+      entry.state = result.ok ? "sent" : "failed";
+      pendings.delete(key);
+    }
+    if (pendings.size > 0) scheduleBackgroundCheck();
   }
 
   // ------------------------------------------------------------------
@@ -182,6 +252,7 @@ export default function (pi: ExtensionAPI) {
 
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
+      if (config.requireBackgroundIdle !== false && !backgroundIdle()) return;
       void sendCard(
         ctx,
         "idle",
@@ -229,7 +300,7 @@ export default function (pi: ExtensionAPI) {
     flushTimer.unref?.();
   }
 
-  function doFlushSubagentSummary(ctx: ExtensionContext): void {
+  function doFlushSubagentSummary(ctx: ExtensionContext, fromDeadline = false): void {
     const now = Date.now();
     if (subagents.runningCount(now) > 0 || !subagents.hasFinished()) return; // 复检
 
@@ -242,6 +313,16 @@ export default function (pi: ExtensionAPI) {
 
     if (!gateOpen()) {
       subagents.discardFinished();
+      return;
+    }
+    if (!fromDeadline && config.requireBackgroundIdle !== false && !backgroundIdle()) {
+      queuePending({
+        key: "subagents:batch",
+        kind: "subagents",
+        createdAt: now,
+        deadlineAt: now + Math.max(0, config.backgroundDeferCapMs ?? 600000),
+        state: "pending",
+      });
       return;
     }
 
@@ -355,13 +436,21 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function sendCard(
-    ctx: ExtensionContext,
+    ctx: ExtensionContext | undefined,
     status: CardStatus,
     summary: string,
     errMsg?: string,
     overrides?: BuildCardOverrides,
     statsOverride?: Partial<ReturnType<typeof currentStats>>,
+    gated = false,
+    deferredNote = false,
   ): Promise<{ ok: boolean; error?: string }> {
+    if (!ctx) return { ok: false, error: "no active context" };
+    if (conflictInert) return { ok: false, error: "feishu-notify conflict detected" };
+    if (gated && config.requireBackgroundIdle !== false && !backgroundIdle()) {
+      return { ok: false, error: "background tasks still running" };
+    }
+    if (deferredNote) overrides = { ...overrides, details: `${overrides?.details ?? ""}\n后台任务超时未结束` };
     if (!config.webhookUrl) return { ok: false, error: "webhookUrl 未配置" };
     const stats = { ...currentStats(ctx), ...statsOverride };
     const card = buildCard({ status, summary, errorMessage: errMsg, overrides, ...stats });
@@ -379,6 +468,18 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     config = loadConfig();
+    const tools =
+      typeof (pi as ExtensionAPI & { getAllTools?: () => unknown[] }).getAllTools === "function"
+        ? (pi as ExtensionAPI & { getAllTools: () => unknown[] }).getAllTools()
+        : [];
+    const ownPath = "/pi-subagent/";
+    conflictInert = tools.some((tool) => {
+      if (!tool || typeof tool !== "object") return false;
+      const info = (tool as { sourceInfo?: unknown }).sourceInfo;
+      const source = typeof info === "string" ? info : JSON.stringify(info ?? "");
+      return (tool as { name?: unknown }).name === "feishu_notify" && source.length > 0 && !source.includes(ownPath);
+    });
+    if (conflictInert) log("旧 pi-ask-user/feishu-notify detected; notifications disabled");
     watched = false;
     notifyRequested = false;
     running = false;
@@ -406,7 +507,13 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(flushTimer);
       flushTimer = undefined;
     }
+    if (backgroundTimer) {
+      clearTimeout(backgroundTimer);
+      backgroundTimer = undefined;
+    }
+    pendings.clear();
     subagents.clear();
+    if (global[hostKey] === claim) delete global[hostKey];
   });
 
   // 检测 @notify / #notify 关键词，命中则开启本次通知并从 prompt 中移除
@@ -515,13 +622,33 @@ export default function (pi: ExtensionAPI) {
     const shouldNotify = gateOpen(); // 🔴-3：统一门控
     // 结果卡：仅用户发起的 run；续跑 run 抑制（/watch 不再刷屏）
     if (isUserRun && !notifiedThisRun && shouldNotify) {
-      await sendCard(ctx, hadError ? "error" : "success", extractSummary(ctx), errorMessage);
+      const status = hadError ? "error" : "success";
+      const summary = extractSummary(ctx);
+      if (config.requireBackgroundIdle !== false && !backgroundIdle()) {
+        const now = Date.now();
+        const card: FrozenCardInput = { status, summary, errorMessage };
+        queuePending({
+          key: `result:${taskStartedAt}`,
+          kind: "result",
+          card,
+          createdAt: now,
+          deadlineAt: now + Math.max(0, config.backgroundDeferCapMs ?? 600000),
+          state: "pending",
+        });
+      } else {
+        await sendCard(ctx, status, summary, errorMessage);
+      }
     }
     notifyRequested = false; // 单次关键词消费掉；/watch 与 taskGate 保持
     isUserRun = false;
 
     // 空闲 arm：统一 gateOpen()；notifiedThisRun 路径不再提前 return
-    if (shouldNotify && (config.idleNotifyTimeoutSec ?? 300) > 0 && subagents.runningCount(Date.now()) === 0) {
+    if (
+      shouldNotify &&
+      (config.idleNotifyTimeoutSec ?? 300) > 0 &&
+      subagents.runningCount(Date.now()) === 0 &&
+      (config.requireBackgroundIdle === false || backgroundIdle())
+    ) {
       armIdleTimer(ctx);
     }
   });
@@ -550,6 +677,7 @@ export default function (pi: ExtensionAPI) {
       );
       if (result.ok) {
         notifiedThisRun = true;
+        pendings.delete(`result:${taskStartedAt}`);
         return { content: [{ type: "text" as const, text: "飞书通知已发送。" }], details: {} };
       }
       return {
