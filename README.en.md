@@ -24,7 +24,7 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
 - **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
 - **`ask_user`** — the merged interactive clarification tool, registered only in the host session and available in both TUI and RPC modes.
-- **Feishu notifications** — `feishu_notify`, `/watch`, `/feishu-test`, result/summary/heartbeat/waiting cards. Completion cards wait for subagents and background bash to become idle; heartbeat, waiting, and explicit notifications are exempt.
+- **Feishu notifications** — `@notify` keyword, `/watch`, `/feishu-test`, result/summary/heartbeat/waiting cards (all passively triggered; no AI-callable tool). Completion cards wait for subagents and background bash to become idle; heartbeat, waiting, and explicit notifications are exempt.
 
 ## Migrating from standalone pi-ask-user
 

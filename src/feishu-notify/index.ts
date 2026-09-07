@@ -7,10 +7,9 @@
  * 详见 docs/dev/feishu-notify/feishu-notify-v2-plan.md（唯一权威规格）与
  * docs/dev/feishu-notify/feishu-notify-extension.md（用户文档）。
  *
- * 三种开启方式（任选）：
+ * 两种开启方式（均为被动触发，不提供 AI 主动调用工具）：
  *   1. 任务描述里带 @notify 关键词
- *   2. /skill:notify（AI 主动调用 feishu_notify 工具）
- *   3. /watch 命令（会话级关注）
+ *   2. /watch 命令（会话级关注）
  *
  * 配置（二选一）：
  *   1. 配置文件 ~/.pi/agent/feishu-notify.json
@@ -18,7 +17,6 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -92,7 +90,6 @@ export default function (pi: ExtensionAPI) {
   let hadError = false;
   let errorMessage = "";
   let taskGate = false; // 任务通知门闩
-  let notifiedThisRun = false; // feishu_notify 工具抢发标记（任务级）
 
   // ---- run 级状态 ----
   let running = false; // 基线已有
@@ -563,7 +560,6 @@ export default function (pi: ExtensionAPI) {
         toolErrors = 0;
         hadError = false;
         errorMessage = "";
-        notifiedThisRun = false;
         taskGate = watched || notifyRequested;
         clearWaitTimers();
       }
@@ -634,7 +630,7 @@ export default function (pi: ExtensionAPI) {
 
     const shouldNotify = gateOpen(); // 🔴-3：统一门控
     // 结果卡：仅用户发起的 run；续跑 run 抑制（/watch 不再刷屏）
-    if (isUserRun && !notifiedThisRun && shouldNotify) {
+    if (isUserRun && shouldNotify) {
       const status = hadError ? "error" : "success";
       const summary = extractSummary(ctx);
       if (config.requireBackgroundIdle !== false && !backgroundIdle()) {
@@ -655,7 +651,7 @@ export default function (pi: ExtensionAPI) {
     notifyRequested = false; // 单次关键词消费掉；/watch 与 taskGate 保持
     isUserRun = false;
 
-    // 空闲 arm：统一 gateOpen()；notifiedThisRun 路径不再提前 return
+    // 空闲 arm：统一 gateOpen()
     if (
       shouldNotify &&
       (config.idleNotifyTimeoutSec ?? 300) > 0 &&
@@ -664,44 +660,6 @@ export default function (pi: ExtensionAPI) {
     ) {
       armIdleTimer(ctx);
     }
-  });
-
-  // AI 主动通知工具（配合 notify skill 使用，摘要由 AI 撰写）
-  pi.registerTool({
-    name: "feishu_notify",
-    label: "Feishu Notify",
-    description:
-      "Send a Feishu (Lark) webhook notification about the final result of the current task. " +
-      "Call this ONCE when the task is fully complete (or has failed unrecoverably), with a concise summary of what was done.",
-    parameters: Type.Object({
-      status: Type.Union([Type.Literal("success"), Type.Literal("error")], {
-        description: "Final status of the task",
-      }),
-      summary: Type.String({
-        description: "Concise result summary in Chinese (1-3 sentences), will be sent to Feishu",
-      }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const result = await sendCard(
-        ctx,
-        params.status,
-        params.summary,
-        params.status === "error" ? params.summary : undefined,
-      );
-      if (result.ok) {
-        notifiedThisRun = true;
-        pendings.delete(`result:${taskStartedAt}`);
-        return { content: [{ type: "text" as const, text: "飞书通知已发送。" }], details: {} };
-      }
-      const errorText = conflictInert
-        ? "飞书通知不可用：检测到旧版 pi-ask-user，请先卸载旧包。"
-        : `飞书通知发送失败: ${result.error}`;
-      return {
-        content: [{ type: "text" as const, text: errorText }],
-        details: {},
-        isError: true,
-      };
-    },
   });
 
   pi.registerCommand("watch", {

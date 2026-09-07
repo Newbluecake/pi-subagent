@@ -50,7 +50,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   tool scoping.
 - `src/service/` — spawn/query services, run registry, target resolution (exact → prefix → label), and the global background-status provider shared with feishu-notify.
 - `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input.
-- `src/feishu-notify/` — merged Feishu notification cards, explicit notification tool, `/watch` and `/feishu-test`; completion-class cards are background-idle gated.
+- `src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated.
 - `src/bash/` — bash auto-background: the same-name `bash` override, `BashJobManager` (spawn →
   log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
   setting is off, pi's built-in bash stays untouched.

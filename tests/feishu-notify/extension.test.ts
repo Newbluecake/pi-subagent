@@ -248,23 +248,6 @@ describe("background gating", () => {
     expect(fetchMock.mock.calls.some((call) => call[1].body.includes("后台任务：subagent 1 个，bash 1 个"))).toBe(true);
   });
 
-  it("sends feishu_notify while busy and cancels the pending result card", async () => {
-    const { fetchMock } = installFetchMock();
-    const { emit, tools, setBackgroundStatus } = setup();
-    setBackgroundStatus({ runningSubagents: 1, runningBashJobs: 0 });
-    const ctx = makeCtx();
-    await emit("session_start", {}, ctx);
-    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
-    await emit("agent_start", {}, ctx);
-    await emit("agent_settled", {}, ctx);
-    const tool = tools.find((candidate) => candidate.name === "feishu_notify");
-    await tool.execute("explicit", { status: "success", summary: "explicit" }, undefined, undefined, ctx);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    setBackgroundStatus({ runningSubagents: 0, runningBashJobs: 0 });
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
   it("keeps multiple result keys and sends each exactly once", async () => {
     const { fetchMock } = installFetchMock();
     const { emit, setBackgroundStatus } = setup();
@@ -308,13 +291,10 @@ describe("background gating", () => {
     const ctx = makeCtx();
     await fake.emit("session_start", {}, ctx);
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("卸载旧包"), "warning");
-    const tool = fake.tools.find((candidate) => candidate.name === "feishu_notify");
-    await expect(
-      tool.execute("id", { status: "success", summary: "blocked" }, undefined, undefined, ctx),
-    ).resolves.toMatchObject({
-      isError: true,
-      content: [{ text: expect.stringContaining("卸载旧包") }],
-    });
+    // 冲突惰性：即使被动触发（@notify + 任务结束）也不发送任何通知
+    await fake.emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
+    await fake.emit("agent_start", {}, ctx);
+    await fake.emit("agent_settled", {}, ctx);
     expect(fetchState.fetchMock).not.toHaveBeenCalled();
   });
 
@@ -960,27 +940,6 @@ describe("26. baseline regression", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![1].body).toContain("等待输入");
     expect(fetchMock.mock.calls[0]![1].body).toContain("pick one");
-  });
-
-  it("notifiedThisRun prevents duplicate: feishu_notify tool then settled sends nothing extra", async () => {
-    const { fetchMock } = installFetchMock();
-    const { emit, tools } = setup();
-    const ctx = makeCtx();
-    await emit("session_start", {}, ctx);
-    await emit("input", { type: "input", text: "@notify task", source: "interactive" }, ctx);
-    await emit("agent_start", {}, ctx);
-    const feishuNotify = tools.find((t) => t.name === "feishu_notify");
-    const result = await feishuNotify.execute(
-      "call1",
-      { status: "success", summary: "done by AI" },
-      undefined,
-      undefined,
-      ctx,
-    );
-    expect(result.isError).toBeUndefined();
-    fetchMock.mockClear();
-    await emit("agent_settled", {}, ctx);
-    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 
   it("ask-user:activity cancels the wait timer", async () => {

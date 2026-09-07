@@ -8,7 +8,9 @@
 
 - 在任务输入中加入 `@notify` 或 `#notify`，只关注本次任务。
 - `/watch` 切换会话级关注。
-- 模型调用 `feishu_notify`，或使用 `/feishu-test` 验证 webhook。
+- 使用 `/feishu-test` 验证 webhook。
+
+通知均为被动触发，不再提供 AI 主动调用的 `feishu_notify` 工具。
 
 ## 后台门控
 
@@ -18,7 +20,7 @@
 `backgroundDeferCapMs` 后会补发并在卡片中注明后台任务尚未结束。空闲提醒在忙时
 直接丢弃，并在定时器触发时再次检查。
 
-心跳卡、等待输入卡以及 `feishu_notify`、`/feishu-test`、`/watch` 等显式触发不受
+心跳卡、等待输入卡以及 `/feishu-test`、`/watch` 等显式触发不受
 后台门控影响。`bashJobs.autoBackgroundS` 为零时，后台 bash 计数为 `null`，该条件
 按恒真处理。provider 缺失时受门控通知 fail-closed，并写入
 `~/.pi/agent/feishu-notify.log`；豁免通知仍可发送。

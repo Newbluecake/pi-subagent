@@ -22,6 +22,5 @@ describe("pi-subagent extension entries", () => {
     const tools = loaded.extensions.flatMap((extension: any) => [...extension.tools.keys()]);
     expect(tools).toContain("Agent");
     expect(tools).toContain("ask_user");
-    expect(tools).toContain("feishu_notify");
   }, 30_000);
 });
