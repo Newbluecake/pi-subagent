@@ -1,6 +1,6 @@
 import { withDeadline } from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
-import type { RunId, RunOutcome, RunPhase, RunSnapshot, RunStatus, StopCause } from "../core/types.js";
+import type { RunId, RunOutcome, RunPhase, RunSnapshot, RunStatus, SetModelOutcome, StopCause } from "../core/types.js";
 import type { Runner, RunRegistry } from "./ports.js";
 
 export type StopResult =
@@ -21,6 +21,12 @@ export interface QueryService {
     runId: RunId,
     text: string,
   ): Promise<{ ok: true } | { ok: false; reason: "not_running" | "steer_timeout" | "steer_rejected"; detail?: string }>;
+  /** set_model: mid-run model switch for a running run (plan §4.6). */
+  setModel(
+    runId: RunId,
+    model: { provider: string; id: string },
+    opts?: { thinking?: string },
+  ): Promise<SetModelOutcome>;
   stop(runId: RunId, cause?: StopCause): Promise<StopResult>;
 }
 export interface QueryServiceDeps {
@@ -102,6 +108,18 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
         return { ok: true };
       } catch (error) {
         return { ok: false, reason: "steer_rejected", detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async setModel(id, model, opts) {
+      const snapshot = deps.registry.get(id);
+      if (!snapshot || snapshot.status !== "running" || !deps.runner.setModel)
+        return { ok: false, reason: "not_running" };
+      try {
+        // The timeout bound lives inside the runner (SET_MODEL_TIMEOUT_MS);
+        // this layer deliberately does not re-time it.
+        return await deps.runner.setModel(id, model, opts);
+      } catch (error) {
+        return { ok: false, reason: "rejected", detail: error instanceof Error ? error.message : String(error) };
       }
     },
     async stop(id, cause = "user_stop") {

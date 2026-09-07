@@ -1,4 +1,4 @@
-import type { DeadlineBudget } from "../core/types.js";
+import type { DeadlineBudget, SetModelOutcome } from "../core/types.js";
 import type {
   AgentTypeConfig,
   DriverEvent,
@@ -54,6 +54,14 @@ export interface Runner {
   run(spec: RunnerSpec, callbacks?: RunnerCallbacks): Promise<RunOutcome>;
   abort?(runId: RunId, cause?: StopCause): Promise<{ ok: boolean; escalatedTo: "L2" | "L3" | "L4" }>;
   steer?(runId: RunId, text: string): Promise<void>;
+  /** set_model: bounded mid-run model switch. Returns a reason union instead of
+   *  throwing (unlike steer) so "unknown_model" stays distinguishable from
+   *  "the session refused" — the tool turns the two into different, self-correcting messages. */
+  setModel?(
+    runId: RunId,
+    model: { provider: string; id: string },
+    opts?: { thinking?: string },
+  ): Promise<SetModelOutcome>;
   /** M4: EventWatchdog tick 读取运行态（子阶段超时接线后不再是空壳）。 */
   getRunState?(runId: RunId, generation?: number): RunState | undefined;
   /** M4: EventWatchdog 的超时入口——折进状态机并解除 prompt guard 的阻塞。 */

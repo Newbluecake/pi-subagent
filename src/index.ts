@@ -417,6 +417,7 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     wait: (runId, opts) => requireStack(holder).query.wait(runId, opts),
     waitAll: (opts) => requireStack(holder).query.waitAll(opts),
     steer: (runId, text) => requireStack(holder).query.steer(runId, text),
+    setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts),
     stop: (runId, cause) => requireStack(holder).query.stop(runId, cause),
   };
 }

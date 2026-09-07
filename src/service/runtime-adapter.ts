@@ -511,6 +511,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     steer(runId, text) {
       return runtime.steerRun(runId, text);
     },
+    setModel(runId, model, opts) {
+      return runtime.setModelForRun(runId, model, opts ?? {});
+    },
     // M4: EventWatchdog 接线——stack.ts 通过这两个可选方法把 watchdog 的
     // getState/dispatch 晚绑定到真实的 run 状态机上。
     getRunState(runId, generation) {
