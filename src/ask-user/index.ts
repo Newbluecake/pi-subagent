@@ -49,9 +49,12 @@ async function runTuiInteraction(
   questions: Question[],
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
+  pi: ExtensionAPI,
 ): Promise<Result | null> {
   return ctx.ui.custom<Result | null>((tui, theme, _keybindings, done) => {
-    const component = new AskUserComponent(questions, tui, theme as ThemeLike, done);
+    const component = new AskUserComponent(questions, tui, theme as ThemeLike, done, {
+      onActivity: () => pi.events?.emit("ask-user:activity", {}),
+    });
     if (signal) signal.addEventListener("abort", () => component.cancel(), { once: true });
     return component;
   });
@@ -160,7 +163,7 @@ export default function (pi: ExtensionAPI): void {
         interactionResult =
           ctx.mode === "rpc"
             ? await runRpcInteraction(questions, signal, ctx)
-            : await runTuiInteraction(questions, signal, ctx);
+            : await runTuiInteraction(questions, signal, ctx, pi);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (ctx.mode === "rpc") disableAskUser(pi);

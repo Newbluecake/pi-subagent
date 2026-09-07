@@ -40,12 +40,20 @@ export class AskUserComponent implements Component {
   private cachedLines: string[] | undefined;
   private _resolved = false;
   private sanitizer = createChunkSanitizer();
+  private readonly onActivity: (() => void) | undefined;
 
-  constructor(questions: Question[], tui: TUILike, theme: ThemeLike, done: (result: Result | null) => void) {
+  constructor(
+    questions: Question[],
+    tui: TUILike,
+    theme: ThemeLike,
+    done: (result: Result | null) => void,
+    options: { onActivity?: (() => void) | undefined } = {},
+  ) {
     this.questions = questions;
     this.tui = tui;
     this.theme = theme;
     this.done = done;
+    this.onActivity = options.onActivity;
     this.states = questions.map(() => createQuestionState());
   }
 
@@ -140,6 +148,7 @@ export class AskUserComponent implements Component {
 
   handleInput(data: string): void {
     if (this._resolved) return;
+    this.onActivity?.();
     if (this.pendingCancel) {
       if (matchesKey(data, "escape")) this.cancel();
       else {

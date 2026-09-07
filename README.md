@@ -22,6 +22,17 @@
 - **`@mention` 引导** —— 在编辑器输入 `@<label> <消息>`,可引导运行中的子 agent,或复活已结束的。
 - **成本核算** —— 每个 run 的用量汇入 pi 的会话总计;`/agent costs` 查看明细。后台 run 的用量在首次读取终态结果时附加。
 - **Agent 类型** —— 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义;注入系统提示词,让模型知道合法的 `subagent_type` 取值。frontmatter `model:` 支持严格 `provider/id` 或模糊 hint(如 `sonnet`)。
+- **`ask_user` 工具** —— 合并版交互式澄清工具，仅主会话注册；TUI/RPC 均支持，并在用户输入时发出 `ask-user:activity` 事件。
+- **飞书通知** —— `feishu_notify`、`/watch`、`/feishu-test` 与结果/汇总/心跳/等待输入卡片。完成类通知默认等待后台 subagent 和后台 bash 全部空闲；心跳、等待输入和显式触发不等待。
+
+## 从旧 pi-ask-user 迁移
+
+合并版与独立 `@bluecake/pi-ask-user` 不支持同时安装。迁移步骤：
+
+1. 执行 `pi uninstall @bluecake/pi-ask-user`，或从 pi 配置的 packages 中移除旧包。
+2. 升级/安装本包；`pi.extensions` 已包含 `index.ts`、`ask-user.ts` 和 `feishu-notify.ts` 三个入口。
+3. 保留原有 `~/.pi/agent/feishu-notify.json` 配置；新增门控项 `requireBackgroundIdle`、`backgroundIdleRecheckMs`、`backgroundDeferCapMs` 可按需调整。
+4. 若启动时看到冲突 warning，说明旧包仍被加载；完成卸载并重新 `/reload`。
 
 ## Message fabric
 

@@ -22,6 +22,12 @@ Subagent runs fail in ways a naive "spawn + await" wrapper cannot see: the model
 - **`@mention` steering** — `@<label> <message>` in the editor steers a running subagent, or resumes a finished one.
 - **Cost accounting** — per-run usage flows into pi's session totals; `/agent costs` shows the breakdown. Background usage is attached on the first terminal result read.
 - **Agent types** — `.md` definitions discovered from `.pi/agents/`, `.agents/agents/`, `~/.pi/agent/agents/`; injected into the system prompt so the model knows the valid `subagent_type` values. Frontmatter `model:` accepts a strict `provider/id` or a fuzzy hint (e.g. `sonnet`).
+- **`ask_user`** — the merged interactive clarification tool, registered only in the host session and available in both TUI and RPC modes.
+- **Feishu notifications** — `feishu_notify`, `/watch`, `/feishu-test`, result/summary/heartbeat/waiting cards. Completion cards wait for subagents and background bash to become idle; heartbeat, waiting, and explicit notifications are exempt.
+
+## Migrating from standalone pi-ask-user
+
+The merged package must not be installed alongside `@bluecake/pi-ask-user`. Remove the old package from pi (`pi uninstall @bluecake/pi-ask-user` or remove it from package settings), install/update this package, keep the existing `~/.pi/agent/feishu-notify.json`, and reload pi. A startup conflict warning means the old package is still active and must be removed before reloading.
 
 ## Message fabric
 

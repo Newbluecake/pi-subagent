@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Merged `ask_user` and Feishu notifications** — the package now exposes the interactive clarification tool and Feishu notification extension through three pi entries. Completion, subagent-summary, and idle cards wait for a background-idle session; heartbeat, waiting-input, and explicit notifications remain immediate.
+- **Background status provider** — the host publishes live subagent and background-bash counts through a reload-safe global provider.
+
+### Breaking / Migration
+
+- Remove the standalone `@bluecake/pi-ask-user` package before enabling the merged entries. Existing Feishu configuration is reused; a startup conflict warning indicates the old package is still loaded.
+
 ### Changed
 
 - **`get_subagent_result` description** — now states the poll-guard contract explicitly (reads never consume the run; rapid repeated polling of the same run returns a warning — await the completion notification), matching the wording `bash_job` has carried since the guard landed.
