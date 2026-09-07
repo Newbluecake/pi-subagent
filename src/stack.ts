@@ -407,8 +407,18 @@ export interface CompactHintState {
   hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
 }
 
+/** set_model (plan §4.10): single model-registry port shared by spawn admission,
+ *  the injected run-form set_model tool, and the host-form tool (index.ts). */
+export interface StackModelPort {
+  resolveHint(hint: string): { provider: string; id: string } | undefined;
+  find(provider: string, id: string): unknown | undefined;
+  available(): readonly { provider: string; id: string; name?: string }[];
+}
+
 export interface Stack {
   compactHint: CompactHintState;
+  /** Shared model-hint/registry port (spawn admission + set_model, plan §4.10). */
+  models: StackModelPort;
   spawn: SpawnService;
   query: QueryService;
   orphans: OrphanRegistry;
@@ -775,6 +785,20 @@ export function buildSessionStack(
   // X3: lazy ref — nested Agent tool + abort-cascade need SpawnService, built just below.
   // M-D: runIds whose "subagent:started" event has already been emitted (once per run).
   const announcedStarts = new Set<string>();
+  // Fuzzy model hints (frontmatter `model: sonnet`, Agent tool `model: "kimi-k3"`,
+  // set_model) resolve against pi's available models — getAvailable() already
+  // filters to authenticated/usable entries, so a hint can never land on a
+  // model the session couldn't actually run. One port, three consumers:
+  // spawn admission, the per-run injected set_model tool, the host tool.
+  const models: StackModelPort = {
+    resolveHint: (hint) =>
+      resolveModelHint(
+        hint,
+        ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
+      ),
+    find: (p, id) => ctx.modelRegistry.find(p, id),
+    available: () => ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
+  };
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,
     driver: new PiSessionDriver(settings.rememberAgents, (p, id) => ctx.modelRegistry.find(p, id)),
@@ -797,6 +821,8 @@ export function buildSessionStack(
     nestedSpawn: () => spawnRef.current,
     resultMaxChars: () => settings.resultMaxChars,
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
+    resolveModelHint: models.resolveHint,
+    availableModels: models.available,
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
@@ -806,15 +832,9 @@ export function buildSessionStack(
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
     runIdTaken: (id) => taken.has(id),
-    // Fuzzy model hints (frontmatter `model: sonnet`, Agent tool
-    // `model: "kimi-k3"`) resolve against pi's available models —
-    // getAvailable() already filters to authenticated/usable entries, so a
-    // hint can never land on a model the session couldn't actually run.
-    resolveModelHint: (hint) =>
-      resolveModelHint(
-        hint,
-        ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
-      ),
+    // Fuzzy model-hint resolution is the shared Stack.models port (above);
+    // spawn admission reuses it unchanged (plan §4.10).
+    resolveModelHint: models.resolveHint,
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),
@@ -1047,6 +1067,7 @@ export function buildSessionStack(
   };
   return {
     compactHint,
+    models,
     spawn,
     query,
     contextReceipt,

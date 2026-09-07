@@ -38,6 +38,7 @@ import { publishBackgroundStatus } from "./service/background-status.js";
 import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
+import { createSetModelTool } from "./tools/set-model-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
@@ -200,6 +201,29 @@ export default function activate(pi: ExtensionAPI): void {
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // set_model host form (plan §4.11): self-switch goes through the ExtensionAPI
+  // (only available when the pi build exposes it — otherwise `host` stays
+  // absent and self-switching degrades to a clear error while switching a
+  // running subagent keeps working). All stack reads go through the holder at
+  // call time so the tool survives session_start rebuilds.
+  pi.registerTool(
+    createSetModelTool({
+      ...(caps.canSetModel
+        ? {
+            host: {
+              setModel: (model) => pi.setModel(model as never),
+              getThinkingLevel: () => pi.getThinkingLevel(),
+              setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
+              findModel: (p, id) => holder.current?.models.find(p, id),
+            },
+          }
+        : {}),
+      runs: { setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts) },
+      resolveHint: (hint) => holder.current?.models.resolveHint(hint),
+      available: () => holder.current?.models.available() ?? [],
+      resolveRun: forwardResolveRun(holder),
+    }),
+  );
   pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
   // HOST_KEY guard above means this registration is visible only in the main session.
   if (settings.compact.enabled) {

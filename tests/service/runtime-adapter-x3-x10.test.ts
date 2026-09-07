@@ -185,7 +185,10 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
     const p = runner.run(spec(plainType));
     await drain(clock, 10);
     await p;
-    expect(capturedTools ?? []).toHaveLength(0);
+    // set_model is injected unconditionally (set-model plan §4.7); the X3
+    // assertion is specifically about the nested Agent tool's absence.
+    const names = (capturedTools ?? []).map((t) => (t as { name: string }).name);
+    expect(names).not.toContain("Agent");
   });
 
   it("the injected nested tool, when invoked, calls the spawn port with parentRunId=this run and slotless=true", async () => {

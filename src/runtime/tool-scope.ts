@@ -24,6 +24,12 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   "steer_subagent",
   "StructuredOutput",
   "message_agent",
+  // set_model (set-model plan, review m3): the HOST_KEY activate() guard
+  // already keeps the host-registered form out of child sessions, so "the
+  // host version leaking into a child" is not the threat here — the real
+  // targets are MCP/late-registered same-name tools and future registration
+  // changes; deny-by-default strips them from any run not granted the name.
+  "set_model",
 ];
 
 export interface ToolScopePolicy {

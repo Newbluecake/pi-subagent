@@ -32,6 +32,7 @@ import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
+import { createSetModelTool } from "../tools/set-model-tool.js";
 import type { FabricRouter } from "../fabric/router.js";
 import { createMentionChannel } from "../fabric/mention.js";
 import type { MentionRegistry } from "../mention/registry.js";
@@ -64,6 +65,11 @@ export interface RuntimeAdapterDeps {
   resultMaxChars?: () => number;
   /** X3: forwarded to RunnerDeps.onChildAbort (see runtime/runner.ts) — called whenever this run's cancellation is triggered, so the caller can cascade-abort its children. */
   onChildAbort?: (runId: RunId, cause: StopCause) => void;
+  /** set_model: fuzzy model-hint resolver (same instance spawn admission uses — stack.ts Stack.models). */
+  resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
+  /** set_model (review m4): available-model candidates (stack.models.available passthrough) so the
+   *  subagent-side resolution-failure candidate listing matches the host form's E2 text. */
+  availableModels?: () => readonly { provider: string; id: string; name?: string }[];
   /** Optional fabric surface; absent means no message_agent injection. */
   fabric?: {
     router: FabricRouter;
@@ -366,6 +372,22 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           );
           grantedReserved.push("message_agent");
         }
+        // set_model (plan §4.7): every run gets the self-scoped form (the tool
+        // itself rejects foreign run_ids, D-2). Injection is unconditional,
+        // but for agent types declaring a `tools:` allowlist it only TAKES
+        // EFFECT because of the grantedReserved merge into sessionSpec.tools
+        // below (M1). All deps are injected explicitly — no ExtensionContext
+        // reads (unreliable inside child sessions) — which also keeps the
+        // tool 100% unit-testable.
+        customTools.push(
+          createSetModelTool({
+            selfRunId: spec.runId,
+            runs: { setModel: (runId, model, opts) => runtime.setModelForRun(runId, model, opts ?? {}) },
+            ...(deps.resolveModelHint ? { resolveHint: deps.resolveModelHint } : {}),
+            ...(deps.availableModels ? { available: deps.availableModels } : {}),
+          }),
+        );
+        grantedReserved.push("set_model");
         if (spec.type.canSpawn?.length && deps.nestedSpawn) {
           const port = deps.nestedSpawn();
           if (port) {
@@ -397,6 +419,17 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         }
         if (customTools.length)
           sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };
+        // M1 (set_model review): pi filters customTools against the session's
+        // `tools` allowlist when (re)building its tool registry
+        // (agent-session.js _refreshToolRegistry → isAllowedTool, fed by
+        // sdk.js `allowedToolNames = options.tools`), so for agent types that
+        // declare `tools:` an injected reserved tool is silently dropped —
+        // grantedReserved only feeds the enforcer policy below and cannot
+        // rescue pi's registry filter. Merge the granted names into the
+        // pi-level allowlist as well. (A pre-existing latent defect for
+        // message_agent/Agent/StructuredOutput, cured here by the same merge.)
+        if (sessionSpec.tools !== undefined && grantedReserved.length > 0)
+          sessionSpec = { ...sessionSpec, tools: [...new Set([...sessionSpec.tools, ...grantedReserved])] };
         // H2: resolveSessionSpec runs before any slot/session resource is
         // acquired and is bounded by startupMs; a throw or timeout fails the
         // run outright ("failed(config)", not a silent fallback to the

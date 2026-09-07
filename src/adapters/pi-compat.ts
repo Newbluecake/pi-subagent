@@ -22,6 +22,8 @@ export interface PiCapabilities {
   canReadBackEntries: boolean;
   canUseEvents: boolean;
   canRetargetTools: boolean;
+  /** set_model host form: ExtensionAPI.setModel/getThinkingLevel/setThinkingLevel (types.d.ts:1003-1007). */
+  canSetModel: boolean;
   eventsPresent: Record<
     | "tool_execution_start"
     | "tool_execution_end"
@@ -39,6 +41,9 @@ export interface MinimalPiHost {
   registerEntryRenderer?: unknown;
   setActiveTools?: unknown;
   getActiveTools?: unknown;
+  setModel?: unknown;
+  getThinkingLevel?: unknown;
+  setThinkingLevel?: unknown;
   events?: { on?: unknown; emit?: unknown };
   sessionManager?: { getEntries?: unknown };
 }
@@ -73,6 +78,10 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
     canReadBackEntries: typeof pi.sessionManager?.getEntries === "function",
     canUseEvents: typeof pi.events?.on === "function" && typeof pi.events?.emit === "function",
     canRetargetTools: typeof pi.setActiveTools === "function" && typeof pi.getActiveTools === "function",
+    canSetModel:
+      typeof pi.setModel === "function" &&
+      typeof pi.getThinkingLevel === "function" &&
+      typeof pi.setThinkingLevel === "function",
     eventsPresent: { ...ASSUMED_EVENTS_PRESENT },
   };
 }
