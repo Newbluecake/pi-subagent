@@ -34,6 +34,7 @@ import { createQueryService, type QueryService } from "./service/query-service.j
 import { createRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
+import { publishBackgroundStatus } from "./service/background-status.js";
 import { createAgentTool } from "./tools/agent-tool.js";
 import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
@@ -93,11 +94,24 @@ export default function activate(pi: ExtensionAPI): void {
   // Registered before the compat gate below so even the disabled-stub path
   // releases its claim (otherwise a bad-compat activation would wedge every
   // later reload into the inert branch).
+  const settings = loadSettingsFromFile();
+  const holder: { current?: Stack } = {};
+  const releaseBackgroundStatus = publishBackgroundStatus(() => {
+    const stack = holder.current;
+    const runningSubagents = stack
+      ? stack.query.list().filter((snapshot) => ["queued", "starting", "running", "stopping"].includes(snapshot.status))
+          .length
+      : 0;
+    return {
+      runningSubagents,
+      runningBashJobs: bashJobsEnabled(settings) ? (stack?.bashJobs?.backgroundJobCount() ?? 0) : null,
+    };
+  });
   pi.on("session_shutdown", () => {
+    releaseBackgroundStatus();
     if (g[HOST_KEY] === claim) delete g[HOST_KEY];
   });
 
-  const settings = loadSettingsFromFile();
   wireCacheTtl(pi, settings);
   // Built FRESH per activate(): depending on pi's version, /reload either
   // re-runs activate on the cached module or re-imports a FRESH module (jiti
@@ -116,7 +130,6 @@ export default function activate(pi: ExtensionAPI): void {
   void types.reload();
   const caps = detectPiCapabilities(pi);
   const compat = assertCompatible(caps);
-  const holder: { current?: Stack } = {};
   // Registered once per activate() (never inside buildSessionStack, which is
   // rebuilt per session_start and would accumulate duplicate handlers).
   // Handler lives in stack.ts so integration tests cover the real filter path.
