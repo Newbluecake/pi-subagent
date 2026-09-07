@@ -81,6 +81,90 @@ describe("wiring: available agent types are injected into the system prompt", ()
     await emit("session_shutdown", { reason: "exit" });
   });
 
+  it("appends available models from the before_agent_start ctx before session_start (first-prompt window)", async () => {
+    const { pi, emit, first } = fakePi();
+    activate(pi as never);
+
+    const hook = first("before_agent_start");
+    expect(hook, "before_agent_start must be hooked").toBeTypeOf("function");
+    expect(hook!({ systemPrompt: "BASE" }, { modelRegistry: { getAvailable: () => [] } })).toBeUndefined();
+
+    const result = hook!(
+      { systemPrompt: "BASE" },
+      {
+        modelRegistry: {
+          getAvailable: () => [
+            {
+              provider: "anthropic",
+              id: "claude-sonnet",
+              name: "Claude Sonnet",
+              reasoning: true,
+              contextWindow: 200_000,
+            },
+          ],
+        },
+      },
+    ) as { systemPrompt: string };
+    expect(result.systemPrompt.startsWith("BASE\n\n")).toBe(true);
+    expect(result.systemPrompt).toContain("## Available models (pi-subagent)");
+    expect(result.systemPrompt).toContain("- anthropic/claude-sonnet — Claude Sonnet (ctx 200k, reasoning)");
+
+    await emit("session_shutdown", { reason: "exit" });
+  });
+
+  it("prefers the session stack's model port once session_start has built it", async () => {
+    const { pi, emit, first } = fakePi();
+    activate(pi as never);
+    const hook = first("before_agent_start");
+
+    const stackRegistry = {
+      getAvailable: () => [{ provider: "stack", id: "from-holder", name: "Holder model" }],
+      find: () => undefined,
+    };
+    await emit("session_start", {}, { modelRegistry: stackRegistry });
+
+    const eventRegistry = {
+      getAvailable: () => [{ provider: "event", id: "from-ctx", name: "Ctx model" }],
+    };
+    const result = hook!({ systemPrompt: "BASE" }, { modelRegistry: eventRegistry }) as { systemPrompt: string };
+    expect(result.systemPrompt).toContain("- stack/from-holder — Holder model");
+    expect(result.systemPrompt).not.toContain("- event/from-ctx");
+
+    await emit("session_shutdown", { reason: "exit" });
+  });
+
+  it("prefers ctx.scopedModels over the full registry list (an unscoped install truncates away the useful ids)", async () => {
+    const { pi, emit, first } = fakePi();
+    activate(pi as never);
+    const hook = first("before_agent_start");
+
+    // 40 registry models: with MAX_PROMPT_MODELS=30 the tail would be elided,
+    // which is exactly how droid-completion/kimi-k3 disappeared in the wild.
+    const bulk = Array.from({ length: 40 }, (_, index) => ({
+      provider: "amazon-bedrock",
+      id: `filler-${index}`,
+    }));
+    await emit("session_start", {}, { modelRegistry: { getAvailable: () => bulk, find: () => undefined } });
+
+    const result = hook!(
+      { systemPrompt: "BASE" },
+      {
+        modelRegistry: { getAvailable: () => bulk },
+        scopedModels: [
+          { model: { provider: "droid-completion", id: "kimi-k3", name: "Kimi K3" }, thinkingLevel: "high" },
+          { model: { provider: "cloudrouter-anthropic", id: "claude-opus-5" } },
+        ],
+      },
+    ) as { systemPrompt: string };
+
+    expect(result.systemPrompt).toContain("- droid-completion/kimi-k3 — Kimi K3");
+    expect(result.systemPrompt).toContain("- cloudrouter-anthropic/claude-opus-5");
+    expect(result.systemPrompt).not.toContain("amazon-bedrock/filler-0");
+    expect(result.systemPrompt).not.toContain("more");
+
+    await emit("session_shutdown", { reason: "exit" });
+  });
+
   it("stays inert inside child sessions (HOST_KEY guard: no duplicate hook)", () => {
     const first = fakePi();
     activate(first.pi as never);

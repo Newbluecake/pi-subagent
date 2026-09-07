@@ -35,9 +35,10 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 export const SetModelParams = Type.Object({
   model: Type.String({
     description:
-      "Target model: a strict 'provider/id' from the 'Available models' section of the system prompt, or a " +
-      "fuzzy hint — a bare model id ('kimi-k3') or a case-insensitive substring alias ('sonnet', 'haiku') — " +
-      "resolved against the same list. The resolved provider/id is reported back in the result.",
+      "Target model: the FULL 'provider/id' exactly as listed in the 'Available models' section of the system " +
+      "prompt — the provider prefix is mandatory. A bare model id or substring alias ('kimi-k3', 'sonnet') is a " +
+      "fallback only and may be rejected, so copy the exact pair whenever the list is available. The resolved " +
+      "provider/id is reported back in the result.",
   }),
   run_id: Type.Optional(
     Type.String({

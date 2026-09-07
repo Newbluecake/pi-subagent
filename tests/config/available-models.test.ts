@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   appendAvailableModelsToSystemPrompt,
+  availableModelsFromRegistry,
   formatAvailableModelsForPrompt,
+  readScopedModels,
   type AvailableModelEntry,
 } from "../../src/config/available-models.js";
 
@@ -69,11 +71,86 @@ describe("available models prompt", () => {
     expect(formatAvailableModelsForPrompt([])).toBe("");
   });
 
+  it("demands the full provider/id (the provider prefix is not optional)", () => {
+    const output = formatAvailableModelsForPrompt([model()]);
+    expect(output).toContain("## Available models (pi-subagent)");
+    expect(output).toMatch(/FULL `provider\/id`/);
+    expect(output).toContain("the provider prefix is mandatory");
+  });
+
   it("appends the section and preserves identity when there is nothing to append", () => {
     const prompt = "base system prompt";
     expect(appendAvailableModelsToSystemPrompt(prompt, [])).toBe(prompt);
     expect(appendAvailableModelsToSystemPrompt(prompt, [model()])).toBe(
       `${prompt}\n\n${formatAvailableModelsForPrompt([model()])}`,
     );
+  });
+});
+
+describe("readScopedModels", () => {
+  it("returns an empty list when no scoping is configured", () => {
+    expect(readScopedModels(undefined)).toEqual([]);
+    expect(readScopedModels([])).toEqual([]);
+  });
+
+  it("unwraps ScopedModel.model and keeps only the prompt-entry fields", () => {
+    expect(
+      readScopedModels([
+        {
+          model: {
+            provider: "droid-completion",
+            id: "kimi-k3",
+            name: "Kimi K3",
+            contextWindow: 256_000,
+            extra: "must not leak",
+          } as never,
+          thinkingLevel: "high",
+        } as never,
+        { model: { provider: "cloudrouter-anthropic", id: "claude-opus-5" } },
+      ]),
+    ).toEqual([
+      { provider: "droid-completion", id: "kimi-k3", name: "Kimi K3", contextWindow: 256_000 },
+      { provider: "cloudrouter-anthropic", id: "claude-opus-5" },
+    ]);
+  });
+
+  it("skips malformed entries instead of throwing", () => {
+    expect(readScopedModels([undefined as never, { model: { provider: "p", id: "m" } }])).toEqual([
+      { provider: "p", id: "m" },
+    ]);
+  });
+});
+
+describe("availableModelsFromRegistry", () => {
+  it("returns an empty list for a missing or malformed registry", () => {
+    expect(availableModelsFromRegistry(undefined)).toEqual([]);
+    expect(availableModelsFromRegistry({} as never)).toEqual([]);
+  });
+
+  it("fails open when the registry throws", () => {
+    const registry = {
+      getAvailable() {
+        throw new Error("models.json broke");
+      },
+    };
+    expect(availableModelsFromRegistry(registry)).toEqual([]);
+  });
+
+  it("copies only the prompt-entry fields", () => {
+    const registry = {
+      getAvailable: () => [
+        {
+          provider: "anthropic",
+          id: "claude-sonnet",
+          name: "Claude Sonnet",
+          reasoning: true,
+          contextWindow: 200_000,
+          extra: "must not leak",
+        },
+      ],
+    };
+    expect(availableModelsFromRegistry(registry)).toEqual([
+      { provider: "anthropic", id: "claude-sonnet", name: "Claude Sonnet", reasoning: true, contextWindow: 200_000 },
+    ]);
   });
 });

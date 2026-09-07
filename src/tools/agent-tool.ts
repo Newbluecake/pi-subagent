@@ -123,9 +123,10 @@ export const AgentToolParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Optional model override: a strict 'provider/id' from the 'Available models' section of the system prompt, or " +
-        "a fuzzy hint — bare model id ('kimi-k3') or case-insensitive substring alias ('sonnet', 'haiku') — resolved " +
-        "against the same list. Defaults to the agent type's configured model (frontmatter 'model').",
+        "Optional model override: the FULL 'provider/id' exactly as listed in the 'Available models' section of " +
+        "the system prompt — the provider prefix is mandatory. A bare model id or substring alias ('kimi-k3', " +
+        "'sonnet') is a fallback only and may be rejected. Defaults to the agent type's configured model " +
+        "(frontmatter 'model').",
     }),
   ),
   thinking: Type.Optional(

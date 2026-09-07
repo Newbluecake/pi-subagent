@@ -7,7 +7,11 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
-import { appendAvailableModelsToSystemPrompt } from "./config/available-models.js";
+import {
+  appendAvailableModelsToSystemPrompt,
+  availableModelsFromRegistry,
+  readScopedModels,
+} from "./config/available-models.js";
 import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
 import {
   defaultSettingsPath,
@@ -254,11 +258,25 @@ export default function activate(pi: ExtensionAPI): void {
   // on every session_start; list() is read at event time so .md edits are
   // picked up on the next turn. Child sessions never see this hook — their
   // activate() returns early on the HOST_KEY guard above.
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", (event, ctx) => {
     let systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list(), {
       foregroundAutoBackgroundMs: settings.foregroundAutoBackgroundMs,
     });
-    systemPrompt = appendAvailableModelsToSystemPrompt(systemPrompt, holder.current?.models.available() ?? []);
+    // Model list source, in priority order:
+    //  1. ctx.scopedModels — the session's `--models`/`enabledModels` scope. This
+    //     is the ONLY source that stays listable in full: an unscoped install can
+    //     expose 500+ models, of which MAX_PROMPT_MODELS shows 30 in registry
+    //     order, so the models the user actually spawns with were silently cut
+    //     (and set_model/Agent need the exact provider/id, not a guess).
+    //  2. the stack's model port (available registry snapshot).
+    //  3. the event ctx registry — holder.current is only assigned after
+    //     session_start builds the stack, so the very first prompt needs this.
+    const scoped = readScopedModels(ctx?.scopedModels);
+    const models =
+      scoped.length > 0
+        ? scoped
+        : (holder.current?.models.available() ?? availableModelsFromRegistry(ctx?.modelRegistry));
+    systemPrompt = appendAvailableModelsToSystemPrompt(systemPrompt, models);
     return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
   });
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear
