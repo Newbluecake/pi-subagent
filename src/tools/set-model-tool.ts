@@ -35,9 +35,9 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 export const SetModelParams = Type.Object({
   model: Type.String({
     description:
-      "Target model: a strict 'provider/id', or a fuzzy hint — a bare model id ('kimi-k3') or a " +
-      "case-insensitive substring alias ('sonnet', 'haiku') — resolved against the models available " +
-      "in this installation. The resolved provider/id is reported back in the result.",
+      "Target model: a strict 'provider/id' from the 'Available models' section of the system prompt, or a " +
+      "fuzzy hint — a bare model id ('kimi-k3') or a case-insensitive substring alias ('sonnet', 'haiku') — " +
+      "resolved against the same list. The resolved provider/id is reported back in the result.",
   }),
   run_id: Type.Optional(
     Type.String({
@@ -102,7 +102,9 @@ const RUN_SNIPPET = "set_model(model, thinking?) - switch your own session's mod
 
 function availableSuffix(deps: SetModelToolDeps): string {
   const list = deps.available?.().slice(0, 8) ?? [];
-  return list.length ? ` Available: ${list.map((m) => `${m.provider}/${m.id}`).join(", ")}` : "";
+  return list.length
+    ? ` Available: ${list.map((m) => `${m.provider}/${m.id}`).join(", ")} (live list — the system-prompt section may be stale)`
+    : "";
 }
 
 function thinkingText(effective: string | undefined, desired: string | undefined): string {
@@ -217,7 +219,7 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
       const ref = parseStrictModelRef(params.model) ?? deps.resolveHint?.(params.model);
       if (!ref)
         throw new Error(
-          `unknown model: "${params.model}" — pass a strict provider/id, or a bare id/substring of an available model.` +
+          `unknown model: "${params.model}" — pass a strict provider/id from the 'Available models' section, or a bare id/substring of an available model.` +
             availableSuffix(deps),
         );
       const opts = thinking === undefined ? {} : { thinking };

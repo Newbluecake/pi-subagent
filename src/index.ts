@@ -7,6 +7,7 @@ import { assertCompatible, detectPiCapabilities, probeReadBackEntries } from "./
 import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
 import { wrapWithRunLog } from "./adapters/pi-run-log.js";
+import { appendAvailableModelsToSystemPrompt } from "./config/available-models.js";
 import { appendAgentTypesToSystemPrompt, createAgentTypeRegistry } from "./config/agent-types.js";
 import {
   defaultSettingsPath,
@@ -254,9 +255,10 @@ export default function activate(pi: ExtensionAPI): void {
   // picked up on the next turn. Child sessions never see this hook — their
   // activate() returns early on the HOST_KEY guard above.
   pi.on("before_agent_start", (event) => {
-    const systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list(), {
+    let systemPrompt = appendAgentTypesToSystemPrompt(event.systemPrompt, types.list(), {
       foregroundAutoBackgroundMs: settings.foregroundAutoBackgroundMs,
     });
+    systemPrompt = appendAvailableModelsToSystemPrompt(systemPrompt, holder.current?.models.available() ?? []);
     return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
   });
   // CC3/M3.6: the workflow engine stays entirely inert (stub tool, clear

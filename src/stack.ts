@@ -412,7 +412,13 @@ export interface CompactHintState {
 export interface StackModelPort {
   resolveHint(hint: string): { provider: string; id: string } | undefined;
   find(provider: string, id: string): unknown | undefined;
-  available(): readonly { provider: string; id: string; name?: string }[];
+  available(): readonly {
+    provider: string;
+    id: string;
+    name?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+  }[];
 }
 
 export interface Stack {
@@ -797,7 +803,14 @@ export function buildSessionStack(
         ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
       ),
     find: (p, id) => ctx.modelRegistry.find(p, id),
-    available: () => ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id, name: m.name })),
+    available: () =>
+      ctx.modelRegistry.getAvailable().map((m) => ({
+        provider: m.provider,
+        id: m.id,
+        name: m.name,
+        reasoning: m.reasoning,
+        contextWindow: m.contextWindow,
+      })),
   };
   const runner = createRuntimeRunnerAdapter({
     clock: systemClock,

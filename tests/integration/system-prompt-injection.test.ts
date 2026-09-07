@@ -71,7 +71,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
     expect(hook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
 
     // session_start reloads the registry (built-ins always present).
-    await emit("session_start");
+    await emit("session_start", {}, { modelRegistry: { getAvailable: () => [], find: () => undefined } });
     const result = hook!({ systemPrompt: "BASE" }, {}) as { systemPrompt: string };
     expect(result.systemPrompt.startsWith("BASE\n\n")).toBe(true);
     expect(result.systemPrompt).toContain("## Available subagent types (pi-subagent)");
