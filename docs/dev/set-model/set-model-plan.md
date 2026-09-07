@@ -1,5 +1,7 @@
 # set_model 实施方案（运行中切换模型：自己 / 指定 subagent run）· v2（评审修订版）
 
+> **状态：已实现（§11 第 1–6 步已完成并提交）；§10 真机验证 V1–V12 待人工回填。**
+
 > v2 修订说明：评审结论「修订后可实施」（0 Blocker / 1 Major / 8 Minor）已全部落入本文档——
 > **M1**（Major：agent type 声明 `tools:` 白名单时 pi 层会在 customTools 进注册表前按白名单过滤，
 > `grantedReserved` 只喂 enforcer policy、救不回注册表过滤，run 形态的 set_model 会被静默丢弃；

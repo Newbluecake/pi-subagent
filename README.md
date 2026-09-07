@@ -14,6 +14,7 @@
 - **`get_subagent_result`** —— 默认非阻塞轮询;`wait: true` + `wait_ms` 为有界阻塞。
 - **`steer_subagent`** —— 向运行中的子 agent 发送追加指令。
 - **`abort_subagent`** —— 停止运行中的子 agent（包括自动转后台的 run）；对终态 run 幂等返回。
+- **`set_model`** —— 运行中切换模型（下一次 LLM 调用生效，不打断当前 turn）：缺省切自己（主会话或 subagent 自身），也可按 run_id / 前缀 / label 切运行中的子 agent；`model` 支持严格 `provider/id` 或模糊 hint（与 `Agent` 同一解析），可选 `thinking` 档位（不指定则保持当前档位，由 pi clamp）；切换写入 transcript，resume 后沿用。
 - **前台自动转后台** —— 前台 Agent 调用超过 `foregroundAutoBackgroundS`（默认 10 分钟）会提前返回，run 不会停止，稍后用 `get_subagent_result` 收取结果。
 - **bash 自动转后台** —— 覆盖 pi 内置 `bash` 工具:命令跑过 `bashJobs.autoBackgroundS`(默认 290 秒 = 4 分 50 秒,低于 5 分钟 prompt 缓存 TTL,提前返回不会因缓存失效涨价)后调用提前返回 `job_id`,**进程不杀**、输出继续落日志,结束时推送完成通知;用 `bash_job`(status / wait / kill / list)管理,日志本身是普通文件,可以直接 read/tail/grep。仅 POSIX,详见下文。
 - **`SubagentWorkflow`** —— 沙箱化 JS 编排(`agent()` / `parallel()` / `pipeline()` / `phase()`),带独立 wall-clock 预算和可回放 journal。默认关闭(`workflow.enabled`)。
