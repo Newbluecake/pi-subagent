@@ -31,6 +31,14 @@ export interface SessionHandle {
   getTurnError?(): string | undefined;
   /** M-B2: the session's *actual* model (ground truth — covers runs with no spawn-time override/type default). */
   getModelRef?(): { provider: string; id: string } | undefined;
+  /** set_model: switch this live session's model. `model` is an opaque pi Model
+   *  (resolved by the driver — core/service layers never see pi types, I1).
+   *  Rejects when pi refuses the switch (e.g. no auth for the provider). */
+  setModel?(model: unknown): Promise<void>;
+  /** Current thinking level ("off" | "low" | …), when the driver exposes one. */
+  getThinkingLevel?(): string | undefined;
+  /** Apply a thinking level; pi clamps it to the model's capabilities. */
+  setThinkingLevel?(level: string): void;
   getUsage(): RunOutcome["usage"];
 }
 export interface SessionDriver {
@@ -39,6 +47,8 @@ export interface SessionDriver {
   resume?(sessionFile: string, spec: SessionSpec): Promise<SessionHandle>;
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void): Promise<void>;
   onLateArrival(p: Promise<SessionHandle>, cb: (h: SessionHandle) => void): void;
+  /** set_model: {provider,id} → opaque pi Model for a mid-run switch (create() resolves the same way). */
+  resolveModelRef?(provider: string, id: string): unknown | undefined;
 }
 
 /**
@@ -228,6 +238,16 @@ class PiSessionHandle implements SessionHandle {
   getUsage() {
     return undefined;
   }
+  /** set_model: thin wrappers, same style as steer/getModelRef above. */
+  setModel(model: unknown) {
+    return this.session.setModel(model as never);
+  }
+  getThinkingLevel(): string | undefined {
+    return this.session.thinkingLevel as string | undefined;
+  }
+  setThinkingLevel(level: string) {
+    this.session.setThinkingLevel(level as never);
+  }
 }
 
 export type ModelResolver = (provider: string, id: string) => unknown | undefined;
@@ -254,6 +274,12 @@ export class PiSessionDriver implements SessionDriver {
     if (!resolved)
       throw new Error(`unknown model: ${m.provider}/${m.id} (not in pi's model registry — check provider/auth)`);
     return { ...spec, model: resolved };
+  }
+
+  /** set_model: expose the constructor-wired registry resolver for mid-run
+   *  switches (method name avoids clashing with the private field). */
+  resolveModelRef(provider: string, id: string): unknown | undefined {
+    return this.resolveModel?.(provider, id);
   }
 
   create(spec: SessionSpec) {

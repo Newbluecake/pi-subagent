@@ -185,6 +185,156 @@ describe("runner hang bounds", () => {
   });
 });
 
+describe("set_model: RuntimeRunner.setModelForRun", () => {
+  const target = { provider: "anthropic", id: "claude-haiku-4" };
+  /** Start a run whose prompt hangs, leaving the handle active; caller settles via clock. */
+  async function start(overrides: Partial<SessionHandle>, driverExtra: Partial<SessionDriver> = {}) {
+    const clock = new FakeClock();
+    const h = handle({ prompt: () => never(), ...overrides });
+    const driver: SessionDriver = {
+      create: async () => h,
+      bind: async () => undefined,
+      onLateArrival() {},
+      ...driverExtra,
+    };
+    const d = deps(clock, driver);
+    const runner = new RuntimeRunner(d);
+    const runPromise = runner.run({ ...request, runId: "r-sm" }, budget);
+    // Flush microtasks until create/bind have run and activeHandles is populated.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    return { clock, runner, runPromise, d };
+  }
+
+  it("switches the active run's model, reports the read-back ref, and patches diag.model", async () => {
+    let switchedTo: unknown;
+    const { clock, runner, runPromise } = await start(
+      {
+        setModel: async (m) => {
+          switchedTo = m;
+        },
+        getModelRef: () => ({ provider: "anthropic", id: "actual-readback" }),
+        getThinkingLevel: () => "low",
+      },
+      { resolveModelRef: (p, id) => ({ resolved: `${p}/${id}` }) },
+    );
+    const outcome = await runner.setModelForRun("r-sm", target);
+    expect(switchedTo).toEqual({ resolved: "anthropic/claude-haiku-4" });
+    expect(outcome).toEqual({ ok: true, model: { provider: "anthropic", id: "actual-readback" }, thinking: "low" });
+    expect(runner.getRunState("r-sm")?.diag.model).toEqual({ provider: "anthropic", id: "actual-readback" });
+    await settle(runPromise, clock, 31);
+  });
+
+  it("returns not_running when no active handle exists (never spawned / already settled)", async () => {
+    const clock = new FakeClock();
+    const runner = new RuntimeRunner(deps(clock, { create: async () => handle(), bind: async () => undefined }));
+    expect(await runner.setModelForRun("nope", target)).toEqual({ ok: false, reason: "not_running" });
+    // And after a run settles, activeHandles is cleaned by generation.
+    const outcome = await runner.run({ ...request, runId: "r-settled" }, budget);
+    expect(outcome.status).toBe("completed");
+    expect(await runner.setModelForRun("r-settled", target)).toEqual({ ok: false, reason: "not_running" });
+  });
+
+  it("returns unsupported when the driver/handle lack the capability", async () => {
+    const { clock, runner, runPromise } = await start({}); // no setModel on handle, no resolveModelRef on driver
+    expect(await runner.setModelForRun("r-sm", target)).toEqual({ ok: false, reason: "unsupported" });
+    await settle(runPromise, clock, 31);
+  });
+
+  it("returns unknown_model without calling handle.setModel when the registry misses", async () => {
+    let called = false;
+    const { clock, runner, runPromise } = await start(
+      {
+        setModel: async () => {
+          called = true;
+        },
+      },
+      { resolveModelRef: () => undefined },
+    );
+    expect(await runner.setModelForRun("r-sm", target)).toEqual({
+      ok: false,
+      reason: "unknown_model",
+      detail: "anthropic/claude-haiku-4",
+    });
+    expect(called).toBe(false);
+    await settle(runPromise, clock, 31);
+  });
+
+  it("maps a rejecting session.setModel to rejected + detail", async () => {
+    const { clock, runner, runPromise } = await start(
+      {
+        setModel: async () => {
+          throw new Error("No API key for anthropic/claude-haiku-4");
+        },
+      },
+      { resolveModelRef: (p, id) => ({ p, id }) },
+    );
+    const outcome = await runner.setModelForRun("r-sm", target);
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok && outcome.reason === "rejected") expect(outcome.detail).toContain("No API key");
+    else throw new Error("expected rejected");
+    await settle(runPromise, clock, 31);
+  });
+
+  it("times out a hung session.setModel within SET_MODEL_TIMEOUT_MS (zero-hang)", async () => {
+    const { clock, runner, runPromise } = await start(
+      { setModel: () => never() },
+      { resolveModelRef: (p, id) => ({ p, id }) },
+    );
+    const p = runner.setModelForRun("r-sm", target);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    clock.advance(5_000);
+    expect(await p).toEqual({ ok: false, reason: "timeout" });
+    await settle(runPromise, clock, 31);
+  });
+
+  it("writes back the pre-switch thinking level when none is requested (pi recomputes to its default)", async () => {
+    let level: string | undefined = "high";
+    const written: string[] = [];
+    const { clock, runner, runPromise } = await start(
+      {
+        // Simulate pi: the switch itself re-applies the global default (medium).
+        setModel: async () => {
+          level = "medium";
+        },
+        getThinkingLevel: () => level,
+        setThinkingLevel: (l) => {
+          written.push(l);
+          level = l;
+        },
+        getModelRef: () => target,
+      },
+      { resolveModelRef: (p, id) => ({ p, id }) },
+    );
+    const outcome = await runner.setModelForRun("r-sm", target);
+    expect(written).toEqual(["high"]); // previous level written back over pi's recompute
+    expect(outcome).toEqual({ ok: true, model: target, thinking: "high" });
+    await settle(runPromise, clock, 31);
+  });
+
+  it("an explicit thinking param wins over the previous level", async () => {
+    let level: string | undefined = "high";
+    const written: string[] = [];
+    const { clock, runner, runPromise } = await start(
+      {
+        setModel: async () => {
+          level = "medium";
+        },
+        getThinkingLevel: () => level,
+        setThinkingLevel: (l) => {
+          written.push(l);
+          level = l;
+        },
+        getModelRef: () => target,
+      },
+      { resolveModelRef: (p, id) => ({ p, id }) },
+    );
+    const outcome = await runner.setModelForRun("r-sm", target, { thinking: "low" });
+    expect(written).toEqual(["low"]);
+    expect(outcome).toEqual({ ok: true, model: target, thinking: "low" });
+    await settle(runPromise, clock, 31);
+  });
+});
+
 describe("final assistant text", () => {
   it("prefers the final assistant message over streamed narrative deltas", async () => {
     const clock = new FakeClock();

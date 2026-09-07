@@ -1,4 +1,4 @@
-import { remainingFor } from "../core/deadline.js";
+import { remainingFor, withDeadline, SET_MODEL_TIMEOUT_MS } from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
 import type {
@@ -14,6 +14,7 @@ import type {
   RunSnapshot,
   RunState,
   RunDisplayMeta,
+  SetModelOutcome,
   StampedInput,
   StopCause,
 } from "../core/types.js";
@@ -255,6 +256,49 @@ export class RuntimeRunner implements Runner {
     const entry = this.activeHandles.get(runId);
     if (!entry) throw new Error(`no active session for run ${runId}`);
     await entry.handle.steer(text);
+  }
+  /** set_model: switch an active run's model. Bounded (SET_MODEL_TIMEOUT_MS) —
+   *  session.setModel awaits a provider auth check, and no anti-hang path may
+   *  await an unbounded pi call. (steerRun itself is unbounded — steerMs only
+   *  feeds fabric/reaper; that unboundedness is a known defect this path does
+   *  not repeat.) Returns a reason union instead of throwing so the tool can
+   *  turn each failure into a distinct self-correcting message (plan §6). */
+  async setModelForRun(
+    runId: string,
+    model: { provider: string; id: string },
+    opts: { thinking?: string } = {},
+  ): Promise<SetModelOutcome> {
+    const entry = this.activeHandles.get(runId);
+    if (!entry) return { ok: false, reason: "not_running" };
+    const { gen, handle } = entry;
+    if (!handle.setModel || !this.d.driver.resolveModelRef) return { ok: false, reason: "unsupported" };
+    const resolved = this.d.driver.resolveModelRef(model.provider, model.id);
+    if (!resolved) return { ok: false, reason: "unknown_model", detail: `${model.provider}/${model.id}` };
+    const previousThinking = handle.getThinkingLevel?.();
+    const applied = await withDeadline(handle.setModel(resolved), SET_MODEL_TIMEOUT_MS, this.d.clock, "set_model");
+    if (!applied.ok)
+      return applied.reason === "timeout"
+        ? { ok: false, reason: "timeout" }
+        : { ok: false, reason: "rejected", detail: applied.error.message };
+    // Requirement 3: pi's setModel recomputes the thinking level (per-model
+    // override → global defaultThinkingLevel → current), so "keep the current
+    // level" must be written back explicitly; clamping stays with pi core.
+    const desired = opts.thinking ?? previousThinking;
+    if (desired !== undefined && handle.setThinkingLevel) {
+      try {
+        handle.setThinkingLevel(desired);
+      } catch {
+        /* non-fatal: the model may not support the level; pi already clamped */
+      }
+    }
+    const effective = handle.getModelRef?.() ?? model;
+    this.dispatchExternal(runId, gen, {
+      kind: "session_event",
+      at: this.d.clock.now(),
+      event: { t: "model_changed", model: effective },
+    });
+    const level = handle.getThinkingLevel?.();
+    return { ok: true, model: effective, ...(level === undefined ? {} : { thinking: level }) };
   }
   /**
    * M4: EventWatchdog 的超时入口。两步缺一不可：
