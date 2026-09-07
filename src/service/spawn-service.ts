@@ -3,6 +3,7 @@ import { newRunId, isRunId } from "../core/ids.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
 import { toErrorInfo } from "../core/errors.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
+import { formatModelCandidates, type ModelCandidate } from "../config/model-hint.js";
 import type {
   DeadlineBudget,
   ErrorInfo,
@@ -76,6 +77,8 @@ export interface SpawnServiceDeps {
    * a config error (fail-closed, never silently inherited).
    */
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
+  /** Optional live candidate list for self-correcting unknown-hint errors. */
+  availableModels?: () => readonly ModelCandidate[];
   runIdTaken?: (id: string) => boolean;
   /** Test seam for pre-populating the process-local label index. */
   labelIndex?: Map<string, SpawnLabelTarget>;
@@ -275,14 +278,18 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         const modelHint = req.modelHintOverride ?? config.modelHint;
         if (modelHint) {
           const resolved = deps.resolveModelHint?.(modelHint);
-          if (!resolved)
+          if (!resolved) {
+            const suffix = formatModelCandidates(deps.availableModels?.() ?? []);
             return {
               error: {
                 kind: "config",
-                message: `unknown model hint: "${modelHint}" — pass a strict provider/id, or a bare id/substring of an available model (pi /model lists what's available)`,
+                message:
+                  `unknown model hint: "${modelHint}" — pass a strict provider/id, or a bare id/substring of an available model ` +
+                  `(pi /model lists what's available).${suffix ? ` ${suffix}` : ""}`,
                 retryable: false,
               },
             };
+          }
           admittedModel = resolved;
         }
       }

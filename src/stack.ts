@@ -846,8 +846,10 @@ export function buildSessionStack(
     maxNestedDepth: settings.maxNestedDepth,
     runIdTaken: (id) => taken.has(id),
     // Fuzzy model-hint resolution is the shared Stack.models port (above);
-    // spawn admission reuses it unchanged (plan §4.10).
+    // spawn admission reuses it unchanged (plan §4.10). The same live list also
+    // feeds self-correcting unknown-hint errors.
     resolveModelHint: models.resolveHint,
+    availableModels: models.available,
     onLabel: (label, target, info) =>
       info.resumed ? mentionRef.current?.reassign(label, target) : mentionRef.current?.register(label, target),
     ...(fabric ? { onSpawnEdge: (parent, child) => fabric.tree.appendEdge(parent, child) } : {}),

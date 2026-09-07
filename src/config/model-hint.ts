@@ -20,6 +20,16 @@ export interface ModelCandidate extends ModelRef {
   name?: string;
 }
 
+/** Short, self-correcting candidate list for config errors. Empty input → empty string. */
+export function formatModelCandidates(candidates: readonly ModelCandidate[], limit = 8): string {
+  const visible = candidates.slice(0, limit);
+  if (visible.length === 0) return "";
+  const rest = candidates.length - visible.length;
+  return `Available: ${visible.map((candidate) => `${candidate.provider}/${candidate.id}`).join(", ")}${
+    rest > 0 ? `, … +${rest} more` : ""
+  }`;
+}
+
 /**
  * Strict `provider/id` split — the only form that needs no registry lookup.
  * Returns undefined for bare ids, empty sides, or missing "/".

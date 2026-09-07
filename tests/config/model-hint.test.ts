@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseStrictModelRef, resolveModelHint, type ModelCandidate } from "../../src/config/model-hint.js";
+import {
+  formatModelCandidates,
+  parseStrictModelRef,
+  resolveModelHint,
+  type ModelCandidate,
+} from "../../src/config/model-hint.js";
 
 const CANDIDATES: ModelCandidate[] = [
   { provider: "cloudrouter-anthropic", id: "claude-opus-5", name: "Claude Opus 5" },
@@ -53,5 +58,21 @@ describe("resolveModelHint", () => {
     expect(resolveModelHint("gpt-99", CANDIDATES)).toBeUndefined();
     expect(resolveModelHint("   ", CANDIDATES)).toBeUndefined();
     expect(resolveModelHint("sonnet", [])).toBeUndefined();
+  });
+});
+
+describe("formatModelCandidates", () => {
+  it("returns an empty string for no candidates", () => {
+    expect(formatModelCandidates([])).toBe("");
+  });
+
+  it("lists provider/id pairs and truncates with a remainder count", () => {
+    const many = Array.from({ length: 10 }, (_, index) => ({ provider: "p", id: `m-${index}` }));
+    expect(formatModelCandidates(CANDIDATES.slice(0, 2))).toBe(
+      "Available: cloudrouter-anthropic/claude-opus-5, cloudrouter-anthropic/claude-sonnet-5",
+    );
+    expect(formatModelCandidates(many)).toBe(
+      "Available: p/m-0, p/m-1, p/m-2, p/m-3, p/m-4, p/m-5, p/m-6, p/m-7, … +2 more",
+    );
   });
 });

@@ -414,6 +414,7 @@ describe("SpawnService: model hints", () => {
   const hintedDeps = (
     runner: Runner,
     resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined,
+    availableModels?: () => readonly { provider: string; id: string; name?: string }[],
   ) => ({
     ...deps(runner),
     types: {
@@ -422,6 +423,7 @@ describe("SpawnService: model hints", () => {
       reload: async () => ({ types: [hintedType], errors: [] }),
     },
     ...(resolveModelHint ? { resolveModelHint } : {}),
+    ...(availableModels ? { availableModels } : {}),
   });
   it("resolves a request-level fuzzy hint via the injected resolver", async () => {
     let seenModel: unknown;
@@ -477,6 +479,22 @@ describe("SpawnService: model hints", () => {
       prompt: "x",
     });
     expect("error" in result && result.error.message).toContain('unknown model hint: "sonnet"');
+  });
+  it("lists live available-model candidates when a hint cannot be resolved", async () => {
+    const result = await createSpawnService(
+      hintedDeps(
+        { run: async () => outcome },
+        () => undefined,
+        () => [
+          { provider: "cloudrouter-anthropic", id: "claude-sonnet-5" },
+          { provider: "droid-completion", id: "kimi-k3" },
+        ],
+      ),
+    ).spawn({ type: "hinted", prompt: "x" });
+    expect("error" in result && result.error.message).toContain('unknown model hint: "sonnet"');
+    expect("error" in result && result.error.message).toContain(
+      "Available: cloudrouter-anthropic/claude-sonnet-5, droid-completion/kimi-k3",
+    );
   });
   it("a strict modelOverride pair wins over hints and skips resolution", async () => {
     let seenModel: unknown;
