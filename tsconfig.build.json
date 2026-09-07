@@ -5,5 +5,12 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "exclude": ["src/workflow/orchestrator.testing.ts", "index.ts", "ask-user.ts", "node_modules", "dist"]
+  "exclude": [
+    "src/workflow/orchestrator.testing.ts",
+    "index.ts",
+    "ask-user.ts",
+    "feishu-notify.ts",
+    "node_modules",
+    "dist"
+  ]
 }

@@ -15,5 +15,5 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*", "index.ts", "ask-user.ts"]
+  "include": ["src/**/*", "index.ts", "ask-user.ts", "feishu-notify.ts"]
 }

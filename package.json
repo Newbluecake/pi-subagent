@@ -29,7 +29,8 @@
   "pi": {
     "extensions": [
       "./index.ts",
-      "./ask-user.ts"
+      "./ask-user.ts",
+      "./feishu-notify.ts"
     ]
   },
   "exports": {

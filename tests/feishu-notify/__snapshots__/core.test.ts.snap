@@ -1,0 +1,71 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildCard > builds a card with correct header for status=error 1`] = `
+{
+  "template": "red",
+  "title": {
+    "content": "🔴 任务出错 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=heartbeat 1`] = `
+{
+  "template": "turquoise",
+  "title": {
+    "content": "💓 仍在运行 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=idle 1`] = `
+{
+  "template": "grey",
+  "title": {
+    "content": "💤 空闲提醒 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=subagents 1`] = `
+{
+  "template": "indigo",
+  "title": {
+    "content": "🤖 Subagent 汇总 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=success 1`] = `
+{
+  "template": "green",
+  "title": {
+    "content": "✅ 任务完成 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=test 1`] = `
+{
+  "template": "blue",
+  "title": {
+    "content": "🔔 测试消息 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
+
+exports[`buildCard > builds a card with correct header for status=waiting 1`] = `
+{
+  "template": "orange",
+  "title": {
+    "content": "⏰ 等待输入 · pi",
+    "tag": "plain_text",
+  },
+}
+`;
