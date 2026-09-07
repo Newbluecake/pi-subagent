@@ -17,6 +17,12 @@ export const DEFAULT_BUDGET: DeadlineBudget = {
   startupRetries: 2,
   retrySlackMs: 5_000,
 };
+/**
+ * set_model 的固定上界：切换只等 pi 的一次 auth 校验 + 状态写入，与 run 预算无关
+ * （per-run budget 只在 run() 内可见），故不进 DeadlineBudget。与 steerMs 同取 5s
+ * （一次 provider 往返的量级），理由各自独立（plan m1：steerRun 无界是已知缺陷）。
+ */
+export const SET_MODEL_TIMEOUT_MS = 5_000;
 export function remainingFor(
   phaseBudgetMs: Millis,
   now: Millis,

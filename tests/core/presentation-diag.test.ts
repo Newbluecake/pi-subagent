@@ -156,6 +156,68 @@ describe("M-A: tool trail (toolHistory / toolCounts)", () => {
   });
 });
 
+describe("set_model: model_changed diag patch", () => {
+  const switched = { provider: "anthropic", id: "claude-haiku-4" };
+  /** runningState() with session_created carrying an actual model (session_created is legal exactly once). */
+  function runningWithModel(): RunState {
+    let s = createInitialState("r", 1, 0);
+    s = apply(s, { kind: "enqueued", at: 0, budget });
+    s = apply(s, { kind: "slot_acquired", at: 1 });
+    s = apply(s, { kind: "phase_entered", at: 2, phase: "session_create" });
+    s = apply(s, { kind: "session_created", at: 3, sessionId: "s1", model: { provider: "pi", id: "old" } });
+    s = apply(s, { kind: "phase_entered", at: 4, phase: "extension_bind" });
+    s = apply(s, { kind: "phase_entered", at: 5, phase: "prompt_dispatch" });
+    s = sessionEvent(s, { t: "turn_start" }, 6);
+    return s;
+  }
+
+  it("overrides the diag.model written by session_created", () => {
+    let s = runningWithModel();
+    expect(s.diag.model).toEqual({ provider: "pi", id: "old" });
+    s = sessionEvent(s, { t: "model_changed", model: switched }, 8);
+    expect(s.diag.model).toEqual(switched);
+  });
+
+  it("emits no effects and leaves phase/status/lastEventType untouched", () => {
+    let s = runningState();
+    s = sessionEvent(s, { t: "turn_start" }, 7); // sets lastEventType
+    const before = s;
+    const out = reduce(
+      s,
+      {
+        generation: s.generation,
+        input: { kind: "session_event", at: 8, event: { t: "model_changed", model: switched } },
+      },
+      budget,
+    );
+    expect(out.effects).toEqual([]);
+    expect(out.state.phase).toBe(before.phase);
+    expect(out.state.status).toBe(before.status);
+    expect(out.state.diag.lastEventType).toBe(before.diag.lastEventType);
+    expect(out.state.diag.lastEventAt).toBe(before.diag.lastEventAt);
+    expect(out.state.armedTimers).toBe(before.armedTimers);
+  });
+
+  it("is ignored after a terminal status (the outcome snapshot is already sealed)", () => {
+    let s = runningWithModel();
+    s = apply(s, { kind: "prompt_settled", at: 9, text: "done" });
+    expect(s.status).toBe("completed");
+    const sealedDiag = s.diag;
+    const sealedOutcome = s.outcome;
+    s = sessionEvent(s, { t: "model_changed", model: switched }, 10);
+    expect(s.diag).toBe(sealedDiag);
+    expect(s.diag.model).toEqual({ provider: "pi", id: "old" });
+    expect(s.outcome).toBe(sealedOutcome);
+  });
+
+  it("a switch before settle lands in outcome.diag.model (finish copies diag)", () => {
+    let s = runningWithModel();
+    s = sessionEvent(s, { t: "model_changed", model: switched }, 8);
+    s = apply(s, { kind: "prompt_settled", at: 9, text: "done" });
+    expect(s.outcome?.diag.model).toEqual(switched);
+  });
+});
+
 describe("M-A: previewToolArgs", () => {
   it("prefers the informative scalar field", () => {
     expect(previewToolArgs({ command: "npm test", timeout: 5 })).toBe("npm test");

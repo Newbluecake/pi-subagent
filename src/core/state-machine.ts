@@ -393,6 +393,17 @@ export function reduce(
   // emitting a persistence effect.
   if (input.kind === "session_event" && input.event.t === "context_usage")
     return { state: { ...state, diag: { ...state.diag, contextUsage: input.event.usage } }, effects: [] };
+  // set_model: a mid-run model switch is a display-only diagnostics patch —
+  // it must not enter/re-arm any phase timer (plan D-5) and emits no effects.
+  // Kept next to context_usage for the same reason: it is best-effort
+  // metadata, not a lifecycle transition. lastEventType is deliberately left
+  // untouched (same as context_usage: do not pollute idle/timeout event
+  // semantics). Terminal states are left untouched (the outcome snapshot is
+  // already sealed — finish() copied diag at settle time).
+  if (input.kind === "session_event" && input.event.t === "model_changed")
+    return terminal(state.status)
+      ? { state, effects: [] }
+      : { state: { ...state, diag: { ...state.diag, model: input.event.model } }, effects: [] };
   if (stamped.generation !== state.generation)
     return { state: { ...state, diag: { ...state.diag, staleInputs: state.diag.staleInputs + 1 } }, effects: [] };
   // effect_failed is a recovery protocol, including after settlement. It must

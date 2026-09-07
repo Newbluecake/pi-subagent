@@ -228,7 +228,27 @@ export type DriverEvent =
   | { t: "compaction_end"; aborted: boolean }
   | { t: "settled" }
   | { t: "text_delta"; delta: string }
-  | { t: "thinking_delta"; delta: string };
+  | { t: "thinking_delta"; delta: string }
+  /** set_model: the live session's model was switched mid-run (display-only diag patch; see state-machine.ts reduce's early-return branch). */
+  | { t: "model_changed"; model: { provider: string; id: string } };
+/**
+ * set_model switch result union (docs/dev/set-model/set-model-plan.md §4.1).
+ * The runner returns a reason union instead of throwing (unlike steer) so
+ * "unknown_model" stays distinguishable from "the session refused" — the
+ * tool turns the two into different, self-correcting messages (§6).
+ * Defined here (not in runtime/runner.ts) because core has no pi imports
+ * (I1) and runner / ports / query-service / the tool layer all share it.
+ */
+export type SetModelOutcome =
+  | { ok: true; model: { provider: string; id: string }; thinking?: string }
+  | { ok: false; reason: "not_running" }
+  /** driver/handle does not expose the set_model capability. */
+  | { ok: false; reason: "unsupported" }
+  /** Not in pi's model registry / no auth configured for the provider. */
+  | { ok: false; reason: "unknown_model"; detail: string }
+  | { ok: false; reason: "timeout" }
+  /** pi refused the switch (e.g. no API key for the provider). */
+  | { ok: false; reason: "rejected"; detail: string };
 export interface RunOutcome {
   runId: RunId;
   status: Extract<RunStatus, "completed" | "failed" | "timed_out" | "aborted">;
