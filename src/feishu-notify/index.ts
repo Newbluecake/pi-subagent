@@ -667,7 +667,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       watched = !watched;
       ctx.ui.notify(watched ? "已关注本会话，每次任务结束都将通知飞书" : "已取消关注", "info");
-      ctx.ui.setStatus("feishu-notify", watched ? "👁 已关注" : "");
+      ctx.ui.setStatus("feishu-notify", watched ? "✨ watching" : "");
     },
   });
 
