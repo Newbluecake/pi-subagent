@@ -580,3 +580,74 @@ describe("wait timeout streak (repeated wait timeouts escalate guidance)", () =>
     expect(err.message).not.toContain("consecutive timeouts"); // back to first-timeout wording
   });
 });
+
+describe("renderResult (notification-style card)", () => {
+  const theme = {
+    fg: (_color: string, s: string) => s,
+    bold: (s: string) => s,
+  } as never;
+  const ctx = {} as never;
+  const componentText = (c: unknown) => (c as { render(width: number): string[] }).render(100).join("\n");
+
+  it("attaches a stats summary to details on terminal get and wait", async () => {
+    const snap = completedSnapshot();
+    snap.diag = { ...snap.diag, label: "demo" };
+    snap.outcome = {
+      ...snap.outcome!,
+      diag: { ...snap.outcome!.diag, label: "demo" },
+    };
+    const getTool = createResultTool({ query: queryForSnapshot(snap) });
+    const got = await getTool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    expect(got.details).toMatchObject({ summary: expect.stringContaining("1 turn"), label: "demo" });
+    const waitTool = createResultTool({ query: queryForSnapshot(snap) });
+    const waited = await waitTool.execute("tc2", { run_id: "r1", wait: true }, undefined, () => undefined, {} as never);
+    expect(waited.details).toMatchObject({ summary: expect.stringContaining("1 turn"), label: "demo" });
+  });
+
+  it("renders a ✓ summary line and collapses long bodies", async () => {
+    const snap = completedSnapshot();
+    snap.outcome = { ...snap.outcome!, text: Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n") };
+    const tool = createResultTool({ query: queryForSnapshot(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const rendered = componentText(
+      tool.renderResult!(result as never, { isPartial: false, expanded: false } as never, theme, ctx),
+    );
+    expect(rendered).toContain("✓ ");
+    expect(rendered).toContain("… +6 more lines");
+    const expanded = componentText(
+      tool.renderResult!(result as never, { isPartial: false, expanded: true } as never, theme, ctx),
+    );
+    expect(expanded).toContain("line 9");
+  });
+
+  it("renders failures with ✗", async () => {
+    const snap = completedSnapshot();
+    snap.status = "failed";
+    snap.outcome = { ...snap.outcome!, status: "failed", error: { kind: "schema", message: "invalid" } };
+    const tool = createResultTool({ query: queryForSnapshot(snap) });
+    const result = await tool.execute("tc1", { run_id: "r1" }, undefined, () => undefined, {} as never);
+    const rendered = componentText(
+      tool.renderResult!(result as never, { isPartial: false, expanded: false } as never, theme, ctx),
+    );
+    expect(rendered).toContain("✗ ");
+    expect(rendered).toContain("invalid");
+  });
+
+  it("renders wait-path partial updates from details.progress", () => {
+    const tool = createResultTool({ query: queryForSnapshot(completedSnapshot()) });
+    const rendered = componentText(
+      tool.renderResult!(
+        {
+          content: [{ type: "text", text: "⏳ waiting" }],
+          details: { runId: "r1", progress: ["⏳ header", "✓ done", "▸ running", "✗ oops"] },
+        } as never,
+        { isPartial: true } as never,
+        theme,
+        ctx,
+      ),
+    );
+    expect(rendered).toContain("⏳ header");
+    expect(rendered).toContain("✗ oops");
+    expect(rendered).not.toContain("more lines");
+  });
+});

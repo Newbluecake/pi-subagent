@@ -6,7 +6,7 @@ import type { ResolveRunResult } from "../service/resolve-target.js";
 import { deliveryKey, type Notifier } from "../delivery/notifier.js";
 import type { RunOutcome } from "../core/types.js";
 import { formatDuration } from "../ui/fleet-panel.js";
-import { buildProgressLines } from "./agent-tool.js";
+import { buildProgressLines, formatOutcomeSummary } from "./agent-tool.js";
 import {
   createPollGuard,
   createTimeoutStreak,
@@ -59,6 +59,21 @@ export type { PollGuardOptions } from "./poll-guard.js";
 
 /** Default blocking-wait budget for get_subagent_result when wait:true and no explicit wait_ms (5 minutes). */
 export const DEFAULT_WAIT_MS = 300_000;
+
+/** Partial-update / final-result details consumed by renderResult (mirrors AgentToolDetails in agent-tool.ts). */
+export interface ResultToolDetails {
+  runId?: string;
+  label?: string;
+  status?: string;
+  durationMs?: number;
+  /** Partial (isPartial) updates from the wait path: preformatted live progress lines. */
+  progress?: string[];
+  /** Final result: one-line stats summary (model · turns · tools · cost · duration). */
+  summary?: string;
+  structuredResult?: unknown;
+  truncated?: true;
+  totalChars?: number;
+}
 
 export function createResultTool(deps: {
   query: QueryService;
@@ -122,6 +137,53 @@ export function createResultTool(deps: {
       text.setText(meta ? `${title}\n${theme.fg("muted", meta)}` : title);
       return text;
     },
+    /**
+     * Renders like the Agent tool's card (M-B), so collecting a result looks
+     * the same as the completion notification's stats line:
+     *  - partial (wait path, 1 Hz): the live progress lines, tone-mapped per
+     *    mark (✗ error / ▸ accent / ✓ muted);
+     *  - final: a status-marked summary line (✓ completed / ✗ otherwise,
+     *    label + model · turns · tools · cost · duration), then the result
+     *    text collapsed to a handful of lines unless the entry is expanded.
+     */
+    renderResult(result, options, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const details = (result.details ?? {}) as ResultToolDetails;
+      const body = result.content
+        .map((c) => (c.type === "text" ? c.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      if (options.isPartial && details.progress) {
+        const rendered = details.progress
+          .map((line) => {
+            if (line.startsWith("✗")) return theme.fg("error", line);
+            if (line.startsWith("▸")) return theme.fg("accent", line);
+            if (line.startsWith("✓")) return theme.fg("muted", line);
+            return line;
+          })
+          .join("\n");
+        text.setText(rendered);
+        return text;
+      }
+      const parts: string[] = [];
+      if (details.summary) {
+        const ok = details.status === "completed";
+        const who = details.label ? `"${details.label}" · ` : "";
+        parts.push(theme.fg(ok ? "muted" : "error", `${ok ? "✓" : "✗"} ${who}${details.summary}`));
+      }
+      if (body) {
+        const lines = body.split("\n");
+        const cap = 6;
+        if (!options.expanded && lines.length > cap) {
+          parts.push(lines.slice(0, cap).join("\n"));
+          parts.push(theme.fg("muted", `… +${lines.length - cap} more lines`));
+        } else {
+          parts.push(body);
+        }
+      }
+      text.setText(parts.join("\n"));
+      return text;
+    },
     // §2.7: the pi harness may invoke execute() with signal === undefined; the
     // wait path below tolerates that (QueryService.wait's opts.signal is optional).
     async execute(_toolCallId, params, signal, onUpdate) {
@@ -153,7 +215,14 @@ export function createResultTool(deps: {
             runId,
             status: snapshot.status,
             usage: snapshot.diag.usage,
-            ...(snapshot.outcome ? { durationMs: snapshot.outcome.durationMs } : {}),
+            ...(snapshot.outcome
+              ? {
+                  durationMs: snapshot.outcome.durationMs,
+                  // Presentation stats for renderResult + history replay (M-D).
+                  summary: formatOutcomeSummary(snapshot.outcome),
+                  ...(snapshot.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
+                }
+              : {}),
             ...(snapshot.outcome ? truncationDetails(snapshot.outcome, maxChars) : {}),
             ...(snapshot.outcome?.structuredResult !== undefined
               ? { structuredResult: snapshot.outcome.structuredResult }
@@ -212,6 +281,9 @@ export function createResultTool(deps: {
           runId,
           status: waited.outcome.status,
           durationMs: waited.outcome.durationMs,
+          // Presentation stats for renderResult + history replay (M-D).
+          summary: formatOutcomeSummary(waited.outcome),
+          ...(waited.outcome.diag.label !== undefined ? { label: waited.outcome.diag.label } : {}),
           usage: waited.outcome.usage,
           ...truncationDetails(waited.outcome, maxChars),
           ...(waited.outcome.structuredResult !== undefined
