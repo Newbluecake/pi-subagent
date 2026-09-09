@@ -159,7 +159,7 @@ describe("service/runtime-adapter: X3 nested Agent tool injection", () => {
       subagent_type: "worker",
     });
     expect((result as { content: Array<{ text: string }> }).content[0]!.text).toContain(
-      "showing first 100 of 120 chars",
+      "middle 20 of 120 chars omitted",
     );
   });
 

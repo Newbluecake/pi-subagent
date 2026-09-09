@@ -156,7 +156,7 @@ describe("result consumption", () => {
       {} as never,
     );
     const getText = (get.content[0] as { text: string }).text;
-    expect(getText).toContain("showing first 100 of 120 chars");
+    expect(getText).toContain("middle 20 of 120 chars omitted — showing first 70 + last 30");
     expect(getText).toContain("full session transcript: /tmp/session.jsonl");
     expect(getText).toContain("(duration: 10ms");
     expect(get.details).toMatchObject({ truncated: true, totalChars: 120 });
@@ -167,7 +167,7 @@ describe("result consumption", () => {
       () => undefined,
       {} as never,
     );
-    expect((waited.content[0] as { text: string }).text).toContain("showing first 100 of 120 chars");
+    expect((waited.content[0] as { text: string }).text).toContain("middle 20 of 120 chars omitted");
     expect(waited.details).toMatchObject({ truncated: true, totalChars: 120 });
   });
 

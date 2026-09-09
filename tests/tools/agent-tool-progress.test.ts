@@ -66,7 +66,7 @@ describe("result text presentation", () => {
       undefined,
       undefined,
     );
-    expect((result.content[0] as { text: string }).text).toContain("showing first 100 of 120 chars");
+    expect((result.content[0] as { text: string }).text).toContain("middle 20 of 120 chars omitted");
     expect((result.content[0] as { text: string }).text).toContain("full session transcript: /tmp/session.jsonl");
   });
 });
