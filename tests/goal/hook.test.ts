@@ -221,6 +221,27 @@ describe("goal loop brakes", () => {
     expect(h.sent.some((t) => t.includes("评估次数上限"))).toBe(true);
   });
 
+  it("stops with max-turns when the iteration cap is reached (real turn brake)", async () => {
+    const h = harness({ record: { maxTurns: 2, iteration: 2 }, execResult: { code: 1, killed: false } });
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    expect(h.execCalls).toEqual(["npm test"]); // 评估照常执行（达成判定优先）
+    expect(h.record?.state).toBe("stopped");
+    expect(h.record?.stopReason).toBe("max-turns");
+    expect(h.record?.iteration).toBe(2); // 不再 +1
+    expect(h.record?.lastEvalNote).toContain("exit 1"); // 终止报告携带最后一轮评估结论
+    expect(h.sent).toHaveLength(1); // 只有终止报告，无续跑
+    expect(h.sent[0]).toContain("轮数上限");
+    expect(h.sent[0]).not.toContain("续跑");
+  });
+
+  it("achieved takes precedence over the max-turns brake", async () => {
+    const h = harness({ record: { maxTurns: 2, iteration: 2 }, execResult: { code: 0, killed: false } });
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    expect(h.record?.stopReason).toBe("achieved");
+  });
+
   it("stops with budget when tokens/cost/minutes are blown before evaluation", async () => {
     const byTokens = harness({ record: { budgetTokens: 100, tokensUsed: 100 } });
     byTokens.hook.onAgentSettled(byTokens.settled, byTokens.ctx());

@@ -15,7 +15,7 @@ import {
  * 迁移矩阵测试。非法迁移一律期望 undefined。
  */
 describe("goal state machine transition matrix", () => {
-  const brakeReasons = ["budget", "max-evals", "delivery-failed", "eval-failures"] as const;
+  const brakeReasons = ["budget", "max-turns", "max-evals", "delivery-failed", "eval-failures"] as const;
   const cases: Array<{
     from: GoalPhase;
     stop?: GoalStopReason;
@@ -61,6 +61,7 @@ describe("goal state machine transition matrix", () => {
     { from: "stopped", stop: "achieved", event: { type: "rehydrate" }, to: "stopped" },
     // stopped(其他 reason)：可 resume（--reset-budget 门槛在命令层）
     { from: "stopped", stop: "budget", event: { type: "resume" }, to: "active" },
+    { from: "stopped", stop: "max-turns", event: { type: "resume" }, to: "active" },
     { from: "stopped", stop: "max-evals", event: { type: "resume" }, to: "active" },
     { from: "stopped", stop: "delivery-failed", event: { type: "resume" }, to: "active" },
     { from: "stopped", stop: "eval-failures", event: { type: "resume" }, to: "active" },
@@ -149,5 +150,9 @@ describe("goal record helpers", () => {
     expect(clean?.stopReason).toBeUndefined();
     expect(clean?.lastEvalNote).toBeUndefined();
     expect(clean?.untilText).toBeUndefined();
+    // 合法 stopReason 原样保留（含 max-turns 轮次刹车）。
+    expect(sanitizeGoalRecord({ objective: "o", state: "stopped", stopReason: "max-turns" })?.stopReason).toBe(
+      "max-turns",
+    );
   });
 });

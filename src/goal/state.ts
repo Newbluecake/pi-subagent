@@ -17,7 +17,7 @@
 
 export type GoalPhase = "none" | "active" | "paused" | "stopped";
 
-export type GoalStopReason = "achieved" | "budget" | "max-evals" | "delivery-failed" | "eval-failures";
+export type GoalStopReason = "achieved" | "budget" | "max-turns" | "max-evals" | "delivery-failed" | "eval-failures";
 
 /** session_start 读回时的来源（对齐 pi 的 SessionStartEvent.reason，此处用纯字符串避免 pi import）。 */
 export type GoalSessionStartReason = "startup" | "reload" | "new" | "resume" | "fork";
@@ -189,6 +189,7 @@ export function sanitizeGoalRecord(raw: unknown): GoalRecord | undefined {
   const validStop =
     stopReason === "achieved" ||
     stopReason === "budget" ||
+    stopReason === "max-turns" ||
     stopReason === "max-evals" ||
     stopReason === "delivery-failed" ||
     stopReason === "eval-failures"

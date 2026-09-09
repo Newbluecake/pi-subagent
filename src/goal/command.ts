@@ -166,15 +166,19 @@ export function createGoalCommand(deps: GoalCommandDeps): Omit<RegisteredCommand
           notify(ctx, "已达成的 goal 不能恢复；用 /goal <新目标> 设置新 goal。", "warning");
           return;
         }
-        if (record.state === "stopped" && (record.stopReason === "budget" || record.stopReason === "max-evals")) {
-          // v4 状态机：预算类恢复需显式 --reset-budget。
+        if (
+          record.state === "stopped" &&
+          (record.stopReason === "budget" || record.stopReason === "max-turns" || record.stopReason === "max-evals")
+        ) {
+          // v4 状态机：预算/上限类恢复需显式 --reset-budget。
           if (!tokens.includes("--reset-budget")) {
-            notify(ctx, "预算/上限类停止：恢复需 /goal resume --reset-budget（清零预算与评估计数）。", "warning");
+            notify(ctx, "预算/上限类停止：恢复需 /goal resume --reset-budget（清零预算/轮数/评估计数）。", "warning");
             return;
           }
           record.tokensUsed = 0;
           record.costUsdUsed = 0;
           record.evalCount = 0;
+          record.iteration = 0;
           record.createdAt = now();
         }
         const next = transition(record.state, { type: "resume" }, record.stopReason);

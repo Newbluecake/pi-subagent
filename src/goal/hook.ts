@@ -327,8 +327,14 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
       stopGoal(ctx, record, { type: "achieved" });
       return;
     }
-    record.iteration += 1;
     record.lastEvalNote = verdict.gap ?? "（评估未给出差距说明）";
+    // 轮次刹车：max-turns 兑现为真迭代上限（达成判定优先——本轮达标已在上面收尾）。
+    // evalCount×2 的硬上限仍在门检兜底（BLK-3 防被动 run 绕过），两者是叠加关系。
+    if (record.iteration >= record.maxTurns) {
+      stopGoal(ctx, record, { type: "brake", reason: "max-turns" });
+      return;
+    }
+    record.iteration += 1;
     deps.persist(record);
     updateBadge(ctx, record);
     const text = buildContinuationText(record, verdict.gap);

@@ -23,6 +23,8 @@ export function stopReasonLabel(reason: GoalStopReason): string {
       return "目标达成";
     case "budget":
       return "预算/时长耗尽";
+    case "max-turns":
+      return "轮数上限";
     case "max-evals":
       return "评估次数上限";
     case "delivery-failed":
