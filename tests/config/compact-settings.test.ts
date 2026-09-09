@@ -5,7 +5,7 @@ const defaults = DEFAULT_SETTINGS.compact;
 
 describe("compact settings", () => {
   it("pins the enabled-by-default value", () => {
-    expect(defaults).toEqual({ enabled: true, hintThresholdPercent: 75, forceAtPercent: 88 });
+    expect(defaults).toEqual({ enabled: true, hintThresholdPercent: 75, forceAtPercent: 88, usageTickStepPercent: 10 });
   });
 
   it("falls back for missing and non-object blocks", () => {
@@ -23,6 +23,7 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      usageTickStepPercent: 10,
     });
   });
 
@@ -35,18 +36,21 @@ describe("compact settings", () => {
       enabled: false,
       hintThresholdPercent: 75,
       forceAtPercent: 88,
+      usageTickStepPercent: 10,
     });
     expect(loadSettings({ compact: "invalid" }).compact).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 60, assumedReserveTokens: 32768 })).toEqual({
       enabled: true,
       hintThresholdPercent: 60,
       forceAtPercent: 88,
+      usageTickStepPercent: 10,
       assumedReserveTokens: 32768,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0 })).toEqual({
       enabled: true,
       hintThresholdPercent: 0,
       forceAtPercent: 88,
+      usageTickStepPercent: 10,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 0.5 })).toEqual(defaults);
     expect(parseCompactSettings({ hintThresholdPercent: 75, forceAtPercent: 0 })).toMatchObject({ forceAtPercent: 0 });
@@ -60,5 +64,13 @@ describe("compact settings", () => {
       forceAtPercent: 88,
     });
     expect(parseCompactSettings({ hintThresholdPercent: 101, assumedReserveTokens: -1 })).toEqual(defaults);
+  });
+
+  it("parses usageTickStepPercent with 0=off and a 5% minimum", () => {
+    expect(parseCompactSettings({ usageTickStepPercent: 0 }).usageTickStepPercent).toBe(0);
+    expect(parseCompactSettings({ usageTickStepPercent: 15 }).usageTickStepPercent).toBe(15);
+    for (const invalid of [1, 4, -10, 101, "10", null, Number.NaN]) {
+      expect(parseCompactSettings({ usageTickStepPercent: invalid }).usageTickStepPercent).toBe(10);
+    }
   });
 });

@@ -430,3 +430,46 @@ pi 撞墙线（contextWindow − reserveTokens）        → 兜底不变
   进行中的工具调用批次——turn_end 时批次已落地，预期安全，实测确认）；
 - V9：强制压缩后任务经 resume 消息真实续跑；
 - V10（行为观察）：新警告文案下模型是否/何时自主压缩、instructions 质量。
+
+## 12. v3.3 增量：阶梯式用量通报（usage tick，用户拍板 2026-09-06）
+
+**动机**：L1 警告（75%）之前模型对上下文用量完全无感知——pi core 不把用量写进系统提示，
+footer 只有用户可见，`set_compact_threshold()` 无参查询虽返回当前用量但需要模型"想起去查"
+（不知道自己不知道）。模型因此无法做"阶段刚完成、用量已 60%，主动压一波再开新阶段"的规划决策。
+
+### 12.1 语义
+
+```
+percent < 30（USAGE_TICK_FLOOR_PERCENT）        → 不通报（早期用量无信息量）
+percent 跨过 step 网格（usageTickStepPercent，默认 10）→ 一行通报，不催促
+percent ≥ L1 阈值 / L2 强制线                    → L1/L2 机制接管，tick 止步
+```
+
+- 通报文案（`buildUsageTickText`，customType `subagent:usage-tick`，display:false + triggerTurn:false，
+  与 L1 同通道）：
+  `[pi-subagent 上下文通报] 上下文已使用约 X%。达到 Y% 时会再提醒你考虑 compact_context；现在无需操作。`
+- **闩锁**：`CompactHintState.lastTickStep` 记录已通报的最高阶梯，同阶梯不重复。
+- **滞回复位**：percent 回落至 `lastTickStep − 5`（USAGE_TICK_HYSTERESIS_PERCENT）以下才重新武装——
+  区分真实压缩（掉几十个点）与边界抖动（±1–2 点），后者绝不重报。
+- **天花板**：`ceiling = effective(L1) || effectiveForce || 100`；threshold=0（L1 关闭）时 tick 可在
+  force 线以下继续工作（纯通报模式）；三者全 0 时 hook 整体短路（原早退条件扩展）。
+- 发送失败不落闩锁，下个 turn_end 重试（与 L1 一致）。
+
+### 12.2 配套：主动查询引导（方案 B）
+
+- `compact_context` promptGuidelines 新增一条：决策前可 `set_compact_threshold()` 无参查询当前用量。
+- `set_compact_threshold` description 点明无参调用即"读当前用量与阈值，不改任何状态"。
+
+### 12.3 settings / 状态
+
+- `compact.usageTickStepPercent`：默认 10，0=关闭，合法域 {0} ∪ [5,100]（<5 的步长通报过密，parse 层回落默认）。
+- `CompactHintState` 加 `tickStepPercent`（compact.enabled=false 时归 0）与 `lastTickStep`（初始 0）。
+- tick 不暴露工具参数——与 `assumedReserveTokens` 一致，settings 文件即配置面。
+
+### 12.4 测试增量
+
+- 纯函数：usageTickStep 地板/天花板/自定义步长/0 关闭；buildUsageTickText 有无 ceiling 两形态。
+- wiring：30% 起逐阶梯通报且消息契约精确（customType/display:false/triggerTurn:false/details.tickStep）/
+  同阶梯不重复 / 边界抖动不重报、真实回落（压缩级）后重新武装 / 75% 处 L1 接管（customType 切换）/
+  threshold=0 时 tick 续命至 force 线 / tickStepPercent=0 全静默。
+- settings：usageTickStepPercent 解析（0、15、非法值回落默认）。

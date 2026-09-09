@@ -8,6 +8,31 @@ export const COMPACT_HINT_COOLDOWN_MS = 600_000;
 export const PI_DEFAULT_RESERVE_TOKENS = 16_384;
 /** Default raw threshold for forced compaction. */
 export const DEFAULT_FORCE_THRESHOLD_PERCENT = 88;
+/** Usage-tick message custom type (lightweight stepped usage reports, no action urged). */
+export const USAGE_TICK_CUSTOM_TYPE = "subagent:usage-tick";
+/** Default step between usage-tick reports. 0 disables ticks. */
+export const DEFAULT_USAGE_TICK_STEP_PERCENT = 10;
+/** Lowest percent at which usage ticks start reporting. */
+export const USAGE_TICK_FLOOR_PERCENT = 30;
+/** Drop (in percent points) below the last tick step that re-arms the latch.
+ *  Distinguishes a real context drop (compaction) from boundary wobble. */
+export const USAGE_TICK_HYSTERESIS_PERCENT = 5;
+
+/** Current tick step for a usage percent: multiples of `step` at or above the
+ *  floor, 0 below it. Ticks never fire at/above `ceiling` (the L1 hint / force
+ *  zone takes over there). */
+export function usageTickStep(percent: number, step: number, ceiling: number): number {
+  if (step <= 0 || percent < USAGE_TICK_FLOOR_PERCENT || percent >= ceiling) return 0;
+  return Math.floor(percent / step) * step;
+}
+
+export function buildUsageTickText(percent: number, ceiling: number): string {
+  const hintLine =
+    ceiling > 0 && ceiling <= 100
+      ? `达到 ${ceiling}% 时会再提醒你考虑 compact_context；现在无需操作。`
+      : "现在无需操作。";
+  return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}`;
+}
 
 export function maxThresholdPercent(contextWindow: number, reserveTokens: number): number {
   if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0;

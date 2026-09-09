@@ -22,6 +22,8 @@ function harness(initial: Partial<CompactHintState> = {}) {
     reserveTokens: 16384,
     lastHintAt: 0,
     hintedAt: undefined,
+    tickStepPercent: 0,
+    lastTickStep: 0,
     ...initial,
   };
   const sent: Array<{ message: Record<string, unknown>; options: Record<string, unknown> }> = [];
@@ -74,6 +76,8 @@ describe("compact hint turn_end wiring", () => {
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
+      tickStepPercent: 0,
+      lastTickStep: 0,
     };
     const sent: unknown[] = [];
     let clock = 1;
@@ -190,6 +194,8 @@ describe("compact hint turn_end wiring", () => {
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
+      tickStepPercent: 0,
+      lastTickStep: 0,
     };
     const sendMessage = vi.fn(() => {
       throw new Error("offline");
@@ -260,6 +266,8 @@ describe("compact hint turn_end wiring", () => {
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
+      tickStepPercent: 0,
+      lastTickStep: 0,
     };
     const sent: unknown[] = [];
     const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
@@ -290,6 +298,8 @@ describe("compact hint turn_end wiring", () => {
         reserveTokens: 16384,
         lastHintAt: 0,
         hintedAt: undefined,
+        tickStepPercent: 0,
+        lastTickStep: 0,
       };
       const hook = createCompactHintHook(
         { current: { compactHint: state } as Stack },
@@ -315,6 +325,8 @@ describe("compact hint turn_end wiring", () => {
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
+      tickStepPercent: 0,
+      lastTickStep: 0,
     };
     const compact = vi.fn((options: { onComplete: () => void }) => options.onComplete());
     const resume = vi.fn();
@@ -341,9 +353,75 @@ describe("compact hint turn_end wiring", () => {
       reserveTokens: 16384,
       lastHintAt: 0,
       hintedAt: undefined,
+      tickStepPercent: 0,
+      lastTickStep: 0,
     };
     const hook = createCompactHintHook(holder(state), { sendMessage: () => undefined, now: () => 0 });
     expect(() => hook({}, ctx(80, "interactive", false))).not.toThrow();
     expect(state.hintedAt).toEqual({ effectivePercent: 75, contextWindow: 200000 });
+  });
+
+  it("reports usage ticks at each 10% step from 30% with the exact message contract", () => {
+    const h = harness({ tickStepPercent: 10 });
+    h.hook({}, ctx(25));
+    expect(h.sent).toHaveLength(0); // below the 30% floor
+    h.hook({}, ctx(32));
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({
+      message: { customType: "subagent:usage-tick", display: false, details: { tickStep: 30 } },
+      options: { triggerTurn: false },
+    });
+    expect((h.sent[0]?.message.content as string) ?? "").toContain("无需操作");
+    h.hook({}, ctx(38)); // same step, latched
+    expect(h.sent).toHaveLength(1);
+    h.hook({}, ctx(41));
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 40 });
+  });
+
+  it("does not re-notify on boundary wobble but re-arms after a real drop", () => {
+    const h = harness({ tickStepPercent: 10 });
+    h.hook({}, ctx(61));
+    expect(h.sent).toHaveLength(1);
+    h.hook({}, ctx(59.9)); // wobble below the step, within hysteresis
+    h.hook({}, ctx(60.4));
+    expect(h.sent).toHaveLength(1);
+    h.hook({}, ctx(25)); // compaction-scale drop re-arms the latch
+    expect(h.state.lastTickStep).toBe(0);
+    h.hook({}, ctx(31));
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 30 });
+  });
+
+  it("hands ticks over to the L1 hint at the threshold and skips the covered step", () => {
+    const h = harness({ tickStepPercent: 10 });
+    h.hook({}, ctx(70));
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.message.customType).toBe("subagent:usage-tick");
+    h.hook({}, ctx(75));
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.customType).toBe("subagent:compact-hint"); // L1, not a tick
+  });
+
+  it("keeps ticking when the hint threshold is disabled and stops at the force ceiling", () => {
+    const h = harness({ tickStepPercent: 10, thresholdPercent: 0, forceAtPercent: 50 });
+    const compact = vi.fn();
+    const withCompact = (percent: number) => ({ ...ctx(percent), compact }) as never;
+    h.hook({}, withCompact(31));
+    expect(h.sent).toHaveLength(1);
+    h.hook({}, withCompact(45)); // 40 < ceiling(50): tick still fires without an L1 threshold
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1]?.message.customType).toBe("subagent:usage-tick");
+    h.hook({}, withCompact(51)); // at the force ceiling: L2 owns this zone
+    expect(compact).toHaveBeenCalledOnce();
+    expect(h.sent).toHaveLength(2);
+  });
+
+  it("does not tick when tickStepPercent is 0", () => {
+    const h = harness({ tickStepPercent: 0 });
+    h.hook({}, ctx(30));
+    h.hook({}, ctx(50));
+    h.hook({}, ctx(70));
+    expect(h.sent).toHaveLength(0);
   });
 });

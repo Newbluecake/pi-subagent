@@ -9,6 +9,8 @@ function state(): CompactHintState {
     reserveTokens: 16384,
     lastHintAt: 123,
     hintedAt: { effectivePercent: 75, contextWindow: 200000 },
+    tickStepPercent: 10,
+    lastTickStep: 0,
   };
 }
 function ctx(overrides: Record<string, unknown> = {}) {

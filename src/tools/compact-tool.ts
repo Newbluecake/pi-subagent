@@ -83,6 +83,7 @@ export function createCompactTool(deps: CompactToolDeps): ToolDefinition<typeof 
     promptGuidelines: [
       "Use compact_context when a distinct phase of work has completed and its detailed history is no longer needed, or when context is cluttered with large outdated tool outputs.",
       "Pass compact_context an `instructions` argument describing what the summary must preserve (current goal, key decisions, open tasks, important file paths).",
+      "To check current context usage before deciding, call set_compact_threshold with no arguments — it reports current usage without changing anything.",
       "Never call compact_context twice in a row; after a compaction, continue working from the summary.",
     ],
     parameters: CompactToolParams,

@@ -4,7 +4,11 @@ import { homedir } from "node:os";
 import { DEFAULT_BUDGET } from "../core/deadline.js";
 import type { AgentTypeConfig, DeadlineBudget, Millis } from "../core/types.js";
 import { migrateTimeUnitsToSeconds, normalizeTimeUnits, secondsKeyOf } from "./time-units.js";
-import { DEFAULT_FORCE_THRESHOLD_PERCENT, DEFAULT_HINT_THRESHOLD_PERCENT } from "../compact-hint/threshold.js";
+import {
+  DEFAULT_FORCE_THRESHOLD_PERCENT,
+  DEFAULT_HINT_THRESHOLD_PERCENT,
+  DEFAULT_USAGE_TICK_STEP_PERCENT,
+} from "../compact-hint/threshold.js";
 
 /**
  * CC3 (workflow design §3.2/§8.2): forward-declared budget shape for the
@@ -82,6 +86,10 @@ export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
   forceAtPercent: number;
+  /** Step (percent points) between lightweight usage-tick reports below the
+   *  hint threshold; 0 disables ticks. Keeps the model aware of context usage
+   *  before the reminder fires. */
+  usageTickStepPercent: number;
   assumedReserveTokens?: number;
 }
 
@@ -177,6 +185,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     enabled: true,
     hintThresholdPercent: DEFAULT_HINT_THRESHOLD_PERCENT,
     forceAtPercent: DEFAULT_FORCE_THRESHOLD_PERCENT,
+    usageTickStepPercent: DEFAULT_USAGE_TICK_STEP_PERCENT,
   },
   fabric: {
     enabled: false,
@@ -395,10 +404,15 @@ export function parseCompactSettings(input: unknown): CompactSettings {
       ? Math.floor(force)
       : defaults.forceAtPercent;
   const reserve = value.assumedReserveTokens;
+  const tick = value.usageTickStepPercent;
   return {
     enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
     hintThresholdPercent,
     forceAtPercent,
+    usageTickStepPercent:
+      typeof tick === "number" && Number.isFinite(tick) && (tick === 0 || (tick >= 5 && tick <= 100))
+        ? Math.floor(tick)
+        : defaults.usageTickStepPercent,
     ...(typeof reserve === "number" && Number.isFinite(reserve) && reserve > 0
       ? { assumedReserveTokens: Math.floor(reserve) }
       : {}),

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCompactHintText,
+  buildUsageTickText,
   effectiveThresholdPercent,
   maxThresholdPercent,
+  usageTickStep,
 } from "../../src/compact-hint/threshold.js";
 
 describe("compact hint thresholds", () => {
@@ -36,5 +38,22 @@ describe("compact hint thresholds", () => {
     expect(buildCompactHintText(80, 75, 88)).toContain("- 若用量继续涨至 88%");
     expect(buildCompactHintText(80, 75, 88)).toContain("- 压缩不是终止");
     expect(buildCompactHintText(80, 75, 0)).not.toContain("强制压缩");
+  });
+
+  it("computes usage tick steps with floor and ceiling", () => {
+    expect(usageTickStep(25, 10, 75)).toBe(0); // below the 30% floor
+    expect(usageTickStep(30, 10, 75)).toBe(30);
+    expect(usageTickStep(39.9, 10, 75)).toBe(30);
+    expect(usageTickStep(70, 10, 75)).toBe(70);
+    expect(usageTickStep(75, 10, 75)).toBe(0); // at/above the L1 ceiling
+    expect(usageTickStep(45, 15, 75)).toBe(45); // custom step grid
+    expect(usageTickStep(50, 0, 75)).toBe(0); // disabled
+  });
+
+  it("builds the usage tick text with and without a hint ceiling", () => {
+    expect(buildUsageTickText(42, 75)).toContain("42%");
+    expect(buildUsageTickText(42, 75)).toContain("75%");
+    expect(buildUsageTickText(42, 75)).toContain("无需操作");
+    expect(buildUsageTickText(42, 0)).not.toContain("compact_context");
   });
 });

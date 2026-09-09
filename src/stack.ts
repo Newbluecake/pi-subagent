@@ -4,9 +4,13 @@ import { resolveReserveTokens } from "./compact-hint/pi-settings.js";
 import {
   COMPACT_HINT_COOLDOWN_MS,
   COMPACT_HINT_CUSTOM_TYPE,
+  USAGE_TICK_CUSTOM_TYPE,
+  USAGE_TICK_HYSTERESIS_PERCENT,
   buildCompactHintText,
+  buildUsageTickText,
   effectiveThresholdPercent,
   maxThresholdPercent,
+  usageTickStep,
 } from "./compact-hint/threshold.js";
 import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -405,6 +409,13 @@ export interface CompactHintState {
   reserveTokens: number;
   lastHintAt: number;
   hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
+  /** Step (percent points) between lightweight usage-tick reports below the
+   *  hint threshold; 0 disables ticks. */
+  tickStepPercent: number;
+  /** Highest tick step already reported (0 = none). Re-armed downward only by
+   *  a real drop larger than USAGE_TICK_HYSTERESIS_PERCENT (e.g. compaction),
+   *  so boundary wobble never re-notifies. */
+  lastTickStep: number;
 }
 
 /** set_model (plan §4.10): single model-registry port shared by spawn admission,
@@ -476,7 +487,7 @@ export function createCompactHintHook(
   return (_event, ctx) => {
     if (ctx.mode === "print" || ctx.mode === "json") return;
     const state = holder.current?.compactHint;
-    if (!state || (state.thresholdPercent <= 0 && state.forceAtPercent <= 0)) return;
+    if (!state || (state.thresholdPercent <= 0 && state.forceAtPercent <= 0 && state.tickStepPercent <= 0)) return;
     const usage = ctx.getContextUsage();
     const percent = usage?.percent;
     const debug = process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1";
@@ -529,6 +540,32 @@ export function createCompactHintHook(
     }
     if (effective <= 0 || percent < effective) {
       state.hintedAt = undefined;
+      // Usage ticks: lightweight stepped reports so the model stays aware of
+      // context usage below the hint threshold (L1/L2 own the zone at/above
+      // the ceiling). Latched per step; re-armed only by a real drop larger
+      // than the hysteresis (e.g. compaction), never by boundary wobble.
+      const ceiling = effective > 0 ? effective : effectiveForce > 0 ? effectiveForce : 100;
+      const tick = usageTickStep(percent, state.tickStepPercent, ceiling);
+      if (tick < state.lastTickStep && percent <= state.lastTickStep - USAGE_TICK_HYSTERESIS_PERCENT) {
+        state.lastTickStep = tick;
+      }
+      if (tick > state.lastTickStep) {
+        try {
+          deps.sendMessage(
+            {
+              customType: USAGE_TICK_CUSTOM_TYPE,
+              content: buildUsageTickText(percent, effective > 0 ? effective : 0),
+              display: false,
+              details: { percent, tickStep: tick },
+            },
+            { triggerTurn: false },
+          );
+          state.lastTickStep = tick;
+          if (debug) console.warn(`[pi-subagent] usage-tick sent percent=${percent} step=${tick} ceiling=${ceiling}`);
+        } catch (error) {
+          console.warn(`[pi-subagent] usage-tick send failed: ${String(error)}`);
+        }
+      }
       return;
     }
     if (state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow) return;
@@ -609,6 +646,8 @@ export function buildSessionStack(
     reserveTokens: resolveReserveTokens(settings.compact.assumedReserveTokens, ctx.cwd),
     lastHintAt: 0,
     hintedAt: undefined,
+    tickStepPercent: settings.compact.enabled ? settings.compact.usageTickStepPercent : 0,
+    lastTickStep: 0,
   };
   const widgetRef: { current?: FleetWidgetController } = {};
   const widgetPoints: SubagentExtensionPoints = { onLifecycle: () => widgetRef.current?.refresh() };

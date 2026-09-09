@@ -55,7 +55,8 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   log tee → settle → notify → recover after restart), persisted job store. POSIX only; when the
   setting is off, pi's built-in bash stays untouched.
 - `src/compact-hint/` — turn_end hook that watches context usage and nudges the model toward
-  `compact_context` at a configurable threshold (with a forced-compaction warning level).
+  `compact_context` at a configurable threshold (with a forced-compaction warning level), plus
+  stepped usage-tick reports below the threshold so the model can perceive context usage at all.
 - `src/cache-ttl/` — prompt-cache TTL mode (auto/on/off) wiring: status-bar indicator plus
   persisted settings override.
 - `src/fabric/` — inter-agent message fabric: router (admission, per-kind quotas, dead letters),

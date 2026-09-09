@@ -31,7 +31,8 @@ export function createSetCompactThresholdTool(
     name: "set_compact_threshold",
     label: "Set Compact Threshold",
     description:
-      "Query, set, or disable the context-usage percentage at which pi-subagent reminds you to call compact_context.",
+      "Query, set, or disable the context-usage percentage at which pi-subagent reminds you to call compact_context. " +
+      "Calling it with no arguments reports the current context usage and thresholds without changing anything.",
     promptSnippet: "set_compact_threshold(percent?) - query or set the model-triggered compaction reminder threshold",
     promptGuidelines: [
       "This is a reminder threshold, never forced compression; use compact_context when you decide to compact.",
