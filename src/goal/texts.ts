@@ -128,6 +128,26 @@ export function buildGeneralEvaluatorPrompt(record: GoalRecord): string {
   ].join("\n");
 }
 
+/** /goal 设置确认的多行文本（左边框树形风格，与 fleet widget 的 ╰ hook 一致；
+ * 不用封闭边框：CJK 双宽字符下右侧 │ 无法对齐）。 */
+export function buildSetConfirmText(record: GoalRecord, replaced: boolean): string {
+  const conditions: string[] = [];
+  if (record.untilCmd !== undefined) conditions.push(`until-cmd: ${record.untilCmd}`);
+  if (record.untilText !== undefined) conditions.push(`until: ${record.untilText}`);
+  const brakes =
+    `${record.maxTurns} 轮 · ${record.maxTurns * 2} 次评估 · ` +
+    (record.maxMinutes > 0 ? `${record.maxMinutes} 分钟` : "不限时");
+  const lines = [`╭ 🎯 goal 已设置${replaced ? "（替换原 goal）" : ""}：${record.objective}`];
+  if (conditions.length > 0) {
+    lines.push(`│ 完成条件：${conditions.join("；")}`);
+  } else {
+    lines.push("│ ⚠️ 未设完成条件，只能靠刹车停止（建议补 --until-cmd/--until）");
+  }
+  lines.push(`│ 刹车：${brakes}`);
+  lines.push("╰ /goal status 查看 · /goal pause 暂停 · /goal clear 清除");
+  return lines.join("\n");
+}
+
 /** 状态栏徽标文本（cache-ttl 先例；返回 undefined = 清除）。 */
 export function goalBadgeText(record: GoalRecord | undefined): string | undefined {
   if (!record) return undefined;

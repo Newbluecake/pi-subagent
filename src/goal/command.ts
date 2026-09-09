@@ -13,7 +13,7 @@
 
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { createGoalRecord, transition, type GoalRecord, type GoalSession } from "./state.js";
-import { buildStatusText, goalBadgeText } from "./texts.js";
+import { buildSetConfirmText, buildStatusText, goalBadgeText } from "./texts.js";
 
 export interface GoalCommandDeps {
   /** 当前 session 的 goal 槽位（holder 透传，session 重建后仍指向新栈）。 */
@@ -230,14 +230,7 @@ export function createGoalCommand(deps: GoalCommandDeps): Omit<RegisteredCommand
       const conditions: string[] = [];
       if (record.untilCmd !== undefined) conditions.push(`until-cmd: ${record.untilCmd}`);
       if (record.untilText !== undefined) conditions.push(`until: ${record.untilText}`);
-      notify(
-        ctx,
-        `goal 已设置${replaced ? "（已替换原 goal）" : ""}：${record.objective}\n` +
-          (conditions.length > 0
-            ? `完成条件：${conditions.join("；")}\n`
-            : "⚠️ 未配置完成条件（--until-cmd/--until），goal 只能靠刹车停止。\n") +
-          `刹车：${record.maxTurns} 轮 / 评估上限 ${record.maxTurns * 2} 次 / ${record.maxMinutes > 0 ? `${record.maxMinutes} 分钟` : "不限时"}。`,
-      );
+      notify(ctx, buildSetConfirmText(record, replaced), conditions.length > 0 ? "info" : "warning");
     },
   };
 }
