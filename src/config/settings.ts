@@ -165,7 +165,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   fleetWidget: true,
   fleetTerminalLingerMs: 5_000,
   fleetAwaitNotificationMs: 600_000,
-  resultMaxChars: 8_000,
+  resultMaxChars: 16_000,
   workflow: {
     enabled: false,
     budget: {},

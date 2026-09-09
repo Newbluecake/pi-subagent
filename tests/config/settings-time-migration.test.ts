@@ -40,13 +40,13 @@ describe("settings file time-unit migration", () => {
 
   it("loads and exposes resultMaxChars with the v3 validation rules", () => {
     expect(loadSettings({ resultMaxChars: 100 }).resultMaxChars).toBe(100);
-    expect(loadSettings({ resultMaxChars: Number.NaN }).resultMaxChars).toBe(8_000);
-    expect(loadSettings({ resultMaxChars: Number.POSITIVE_INFINITY }).resultMaxChars).toBe(8_000);
-    expect(loadSettings({ resultMaxChars: -5 }).resultMaxChars).toBe(8_000);
-    expect(loadSettings({ resultMaxChars: "100" }).resultMaxChars).toBe(8_000);
+    expect(loadSettings({ resultMaxChars: Number.NaN }).resultMaxChars).toBe(16_000);
+    expect(loadSettings({ resultMaxChars: Number.POSITIVE_INFINITY }).resultMaxChars).toBe(16_000);
+    expect(loadSettings({ resultMaxChars: -5 }).resultMaxChars).toBe(16_000);
+    expect(loadSettings({ resultMaxChars: "100" }).resultMaxChars).toBe(16_000);
     expect(loadSettings({ resultMaxChars: 3.9 }).resultMaxChars).toBe(3);
     expect(SETTING_SPECS.resultMaxChars).toMatchObject({ path: "resultMaxChars", live: true });
-    expect(loadSettings({}).resultMaxChars).toBe(8_000);
+    expect(loadSettings({}).resultMaxChars).toBe(16_000);
   });
 
   it("every duration key is covered by the path list, and only durations", () => {
