@@ -173,6 +173,25 @@ queue_wait → resolve_config → session_create → extension_bind
 
 重试有独立的 backoff 相位,不会误触 idle 计时器;并行工具调用会让 run 停留在 `tool_exec` 直到**最后一个**兄弟调用结束。
 
+## /goal 目标驱动持续运行
+
+给一个目标和结束条件，让 agent 每轮结束后自动评估并续跑，直到达成或撞线（类 Codex `/goal`）：
+
+```
+/goal 修复 issue #42 并补测试 --until-cmd "npm test" --max-turns 15
+/goal 完成订单模块重构 --until "npm run build 通过且旧 api 目录已删除" --budget-tokens 2000000
+/goal                  # 查看状态（同 /goal status）
+/goal pause | resume | clear
+/goal resume --reset-budget   # 预算/上限类停止后清零计数再恢复
+```
+
+- **判定器两种可叠加**（AND 语义，`--until-cmd` 零模型成本先行短路）：`--until-cmd` 每轮跑确定性命令，exit 0 = 通过；`--until "自然语言条件"` 由独立 verifier subagent 评估（默认模型 `cloudrouter-anthropic/claude-sonnet-5`，与干活模型隔离，只读取证，结果经 schema 结构化提交），未达成时其差距说明会作为下轮指引注入。
+- **触发时机**：挂在 `agent_settled`（run 完全落定后），评估为异步 fire-and-forget，不阻塞事件泵；续跑经 `followUp` 注入。仅交互 TUI 模式生效（`pi -p`/rpc 下惰性）。
+- **刹车系统**：轮数（`--max-turns`，默认 20）、评估硬上限（maxTurns×2，被动 run 也计数）、token/成本预算（token 仅计 input+output，成本为 `cost.total`，verifier 成本计入总账）、时长（`--max-minutes`，默认 120，评估点检查、滞后一整轮）。撞线后 goal 停止并注入一条终止报告指令让 agent 总结进展与卡点，不静默消失。
+- **急停**：运行中 Ctrl+C 中断会自动把 goal 暂停（不续跑），`/goal resume` 恢复；`/goal clear` 立即清除。
+- **持久化**：goal 随会话文件走（`subagent:goal` 条目），崩溃/`/reload` 后读回并**降级为 paused**（绝不自动续跑）；resume/fork 会话会提示，`/goal resume` 接管。
+- 运行期间状态栏显示 `🎯 goal 3/20` 徽标；goal 运行期间模型被明令禁止调用 `ask_user`（阻塞写进输出继续推进）。
+
 ## cache TTL
 
 `/cache-ttl on|off|auto` 会立即改变 Anthropic prompt cache 的处理方式,但只对当前进程生效。`on` 强制加入 `ttl: "1h"`,`off` 删除显式 TTL,使用 provider 默认值(当前为 5 分钟),`auto` 不改写请求。`/cache-ttl save` 将当前模式持久化到 `~/.pi/agent/pi-subagent.json` 的 `cacheTtl.mode`;写入失败时未保存标记会保留。状态栏显示 `⏱ cache: 1h` 或 `⏱ cache: 5m`,未保存时追加 `*`。
@@ -198,6 +217,18 @@ queue_wait → resolve_config → session_create → extension_bind
   "resultMaxChars": 8000, // 结果文本上限；0 不限，live 生效
   "worktree": { "enabled": false },
   "workflow": { "enabled": false },
+  "goal": {
+    "enabled": true, // /goal 总开关
+    "maxTurns": 20, // 默认迭代轮数上限
+    "maxMinutes": 120, // 默认时长上限（分钟）；0 不限
+    "budgetTokens": 0, // 默认 token 预算（仅 input+output）；0 不限
+    "budgetCostUsd": 0, // 默认成本预算（美元，cost.total）；0 不限
+    "verifierType": "verifier", // 自然语言评估的 agent 类型（缺失时降级 general + 内置 prompt）
+    "verifierModelHint": "cloudrouter-anthropic/claude-sonnet-5", // 评估器模型（应与干活模型不同）
+    "evalTimeoutS": 300, // 单次评估超时，超时计入连败（连败 2 次停止）
+    "untilCmdTimeoutS": 300, // until-cmd 执行超时
+    "deliveryWatchdogS": 30, // 续跑投递看门狗：未观察到新 run 则重试一次，再失败停止
+  },
   "budget": {
     "idleS": 240, // 模型 turn 静默（无任何 delta/事件）多久算超时
     "modelTurnS": 900, // 单轮模型调用硬上限（即使仍在产出）

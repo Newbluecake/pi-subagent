@@ -229,6 +229,36 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Minimum root context interval; 0 = unlimited, backpressure only",
   }),
   "fabric.rootInboxCap": count("fabric.rootInboxCap", 0, "Maximum pending root context messages"),
+  // /goal（goal-plan v4 条件 9）：goal.* 进白名单 + 设置编辑器可见。
+  "goal.enabled": bool("goal.enabled", "Enable the /goal objective-driven loop"),
+  "goal.maxTurns": count("goal.maxTurns", 1, "Default max continuation iterations per goal"),
+  "goal.maxMinutes": count("goal.maxMinutes", 0, "Wall-clock cap per goal in minutes; 0 = unlimited"),
+  "goal.budgetTokens": count("goal.budgetTokens", 0, "Token budget per goal (input+output); 0 = unlimited"),
+  "goal.budgetCostUsd": {
+    kind: "number",
+    path: "goal.budgetCostUsd",
+    min: 0,
+    description: "Cost budget per goal in USD (cost.total); 0 = unlimited",
+  },
+  "goal.verifierType": {
+    kind: "string",
+    path: "goal.verifierType",
+    description: "Agent type used for natural-language goal evaluation",
+  },
+  "goal.verifierModelHint": {
+    kind: "string",
+    path: "goal.verifierModelHint",
+    description: "Model hint for the goal evaluator (should differ from the working model)",
+  },
+  "goal.evalTimeoutS": seconds("goal.evalTimeoutMs", {
+    hint: "evaluation in-flight timeout; counts toward consecutive eval failures",
+    description: "Goal evaluator timeout",
+  }),
+  "goal.untilCmdTimeoutS": seconds("goal.untilCmdTimeoutMs", { description: "until-cmd execution timeout" }),
+  "goal.deliveryWatchdogS": seconds("goal.deliveryWatchdogMs", {
+    hint: "no new run observed within this window => retry once, then stop the goal",
+    description: "Continuation delivery watchdog",
+  }),
 };
 
 /** Live settings object + persistence port, shared by the command and the editor. */

@@ -60,6 +60,18 @@ export function probeReadBackEntries(host: { sessionManager?: { getEntries?: unk
   return typeof host?.sessionManager?.getEntries === "function";
 }
 
+/**
+ * /goal（goal-plan v4 M-f/M-g）依赖的未文档化 pi 行为假设，0.85 升级时回归：
+ *  1. 用户 Ctrl+C abort 当前 run 时仍照常 emit agent_end 与 agent_settled
+ *     （证据：chunk-OMWWHBTG.js abort 分支；若未来 abort 跳过这两个事件，
+ *     goal 只是当轮不评估——行为可接受，但自动暂停会失效）。
+ *  2. AgentEndEvent 没有 willRetry 字段；「是否有后续 retry/compaction」只能靠
+ *     agent_settled 的语义保证（这也是 goal 钩在 agent_settled 的原因）。
+ *  3. AgentSettledEvent 不携带消息载荷；abort 检测只能先在 agent_end 记录
+ *     末条 assistant 的 stopReason（"aborted"），再在 settled 时消费。
+ *  4. sendUserMessage 返回 void、异步失败经 emitError 走掉，扩展侧 try/catch
+ *     抓不到投递失败——goal 因此用投递看门狗（观察新 run 是否起来）而非错误回调。
+ */
 const ASSUMED_EVENTS_PRESENT = {
   tool_execution_start: true,
   tool_execution_end: true,

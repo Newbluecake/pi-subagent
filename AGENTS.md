@@ -65,6 +65,10 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   frontmatter (default: parent only).
 - `src/config/` — agent-type registry (Markdown frontmatter), fuzzy model hints, settings file.
 - `src/schedule/` — cron parser, scheduler, persisted schedule store.
+- `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), text builders,
+  appendEntry session store, `agent_settled` loop hook (until-cmd via `pi.exec`, verifier via
+  `spawnAndWait` + schema, delivery/eval watchdogs), `/goal` command. See
+  `docs/dev/goal/goal-plan.md` (v4 评审修订为最终施工口径).
 - `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed,
   with caller-ack suppression and a coalescer for hold-window merges.
 - `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, runaway detection.

@@ -52,6 +52,9 @@ import { createBashJobTool } from "./tools/bash-job-tool.js";
 import type { BashJobManager } from "./bash/manager.js";
 import { isTerminalJobStatus } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
+import { createGoalCommand } from "./goal/command.js";
+import { createGoalLoopHook } from "./goal/hook.js";
+import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import type { Orchestrator } from "./workflow/orchestrator.js";
 import type { WorkflowActivityRegistry } from "./workflow/activity.js";
@@ -285,6 +288,24 @@ export default function activate(pi: ExtensionAPI): void {
   pi.registerTool(
     settings.workflow.enabled ? createWorkflowTool(forwardWorkflow(holder)) : createDisabledWorkflowToolStub(),
   );
+  // /goal 目标驱动持续运行（goal-plan v4 条件 5）：循环钩子挂 agent_settled
+  // （唯一「无 retry/压缩/续跑待决」信号）；abort 检测所需的末条 stopReason
+  // 由 agent_end 记录（agent_settled 无消息载荷，见 goal/hook.ts 与
+  // adapters/pi-compat.ts 的未文档化行为假设登记）。两个注册各一次（I7）。
+  const goalHook = createGoalLoopHook(holder, {
+    exec: async (cmd, opts) => {
+      const result = await pi.exec("bash", ["-c", cmd], { timeout: opts.timeoutMs, cwd: opts.cwd });
+      return { code: result.code, killed: result.killed, stdout: result.stdout, stderr: result.stderr };
+    },
+    sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
+    persist: (record) => persistGoalRecord(pi, record),
+  });
+  pi.on("agent_end", goalHook.onAgentEnd);
+  pi.on("agent_settled", goalHook.onAgentSettled);
+  pi.registerCommand(
+    "goal",
+    createGoalCommand({ goal: () => holder.current?.goal, persist: (record) => persistGoalRecord(pi, record) }),
+  );
   pi.registerCommand(
     "agent",
     createStatusCommand({
@@ -339,7 +360,7 @@ export default function activate(pi: ExtensionAPI): void {
       holder.current.fabric?.dispose();
     }
     await types.reload();
-    const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)]);
+    const stack = buildSessionStack(pi, ctx, settings, types, [mergeExtensionPoints(extensionPoints)], _event.reason);
     holder.current = stack;
     if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {
       ctx.ui.addAutocompleteProvider((current) =>

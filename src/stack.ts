@@ -77,6 +77,9 @@ import { createLiveRunRegistry } from "./service/run-registry.js";
 import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
 import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { FleetWidgetController } from "./ui/fleet-widget.js";
+import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
+import { readBackGoalRecord } from "./goal/store.js";
+import { buildResumeHintText, goalBadgeText } from "./goal/texts.js";
 import { createWorkflowActivityRegistry, type WorkflowActivityRegistry } from "./workflow/activity.js";
 import { createWorkerHost } from "./workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
@@ -459,6 +462,8 @@ export interface Stack {
   /** bash auto-background job manager; absent when the feature is off (§2.6/R6). */
   bashJobs?: BashJobManager;
   fabric?: { dispose(): void; pump(): void };
+  /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
+  goal: GoalSession;
 }
 
 /** Build the per-session L2/L3 stack (extracted from index.ts to keep it
@@ -617,6 +622,8 @@ export function buildSessionStack(
   settings: AgentSettings,
   types: AgentTypeRegistry,
   mergedExtensions: readonly SubagentExtensionPoints[],
+  /** /goal 读回口径（v4 条件 8）需要 session_start 的 reason；默认 "reload"（静默读回）。 */
+  sessionReason: GoalSessionStartReason = "reload",
 ): Stack {
   // X7b: session rebuild — dispose the previous session's fleet widget
   // (stop its tick + setWidget(key, undefined)) before the new one mounts.
@@ -1034,6 +1041,28 @@ export function buildSessionStack(
     widgetRef.current = widget;
     previousFleetWidget = widget;
   }
+  // /goal：session 级运行态重建（goal-plan v4 条件 8）。读回走 getBranch()
+  // （MAJ-5：防 fork 废弃分支复活 goal）；读回到的 active 一律已降级 paused
+  // （条件 2，store 层完成）。readBack 不可用时仅内存态（G5a 同款降级）。
+  const goalBranch = readBack
+    ? ((ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [])
+    : [];
+  const rehydratedGoal = readBackGoalRecord(goalBranch, sessionReason);
+  const goal: GoalSession = { settings: settings.goal, record: rehydratedGoal.record };
+  if (rehydratedGoal.record) {
+    try {
+      if (typeof ctx.ui?.setStatus === "function") ctx.ui.setStatus("goal", goalBadgeText(rehydratedGoal.record));
+    } catch {
+      // 徽标 best effort
+    }
+    if (rehydratedGoal.notify && ctx.hasUI) {
+      try {
+        ctx.ui.notify(buildResumeHintText(rehydratedGoal.record), "info");
+      } catch {
+        // best effort
+      }
+    }
+  }
   const scheduler = createScheduler({ spawn });
   const rpc = createRPCServer({ events: pi.events, spawn, query });
   // §3.6: prepare the session directory before recover so migrated/orphaned
@@ -1132,6 +1161,7 @@ export function buildSessionStack(
     scheduler,
     rpc,
     workflow,
+    goal,
     ...(widgetRef.current ? { fleetWidget: widgetRef.current } : {}),
     ...(bashJobs ? { bashJobs } : {}),
     ...(fabric ? { fabric: { dispose: () => fabric.mailbox.dispose(), pump: () => fabric.mailbox.pump() } } : {}),
