@@ -497,8 +497,16 @@ describe("timeout grace & extendDeadline (runner)", () => {
     expect(runner.getRunState("r-gu")?.outcome).toBeUndefined();
     expect(runner.getRunState("r-gu")?.status).toBe("starting");
     expect(clock.pendingTimers).toBe(1); // exactly the re-armed guard timer — no new intervals (V14)
-    // Reaching the NEW deadline times the run out.
-    const outcome = await settle(runPromise, clock, 49); // now = 80
+    // At the new deadline the guard routes the expiry through the reducer,
+    // which grants a grace window (until min(80+20, 90) = 90) instead of killing.
+    clock.advance(49); // now = 80
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const inGrace = runner.getRunState("r-gu");
+    expect(inGrace?.outcome).toBeUndefined();
+    expect(inGrace?.status).toBe("starting"); // still alive — grace, not death
+    expect(inGrace?.deadlines.graceUntil).toBe(90);
+    // The run finally dies at the hard ceiling.
+    const outcome = await settle(runPromise, clock, 10); // now = 90
     expect(outcome.status).toBe("timed_out");
     expect(outcome.timeoutReason).toBe("total");
   });
@@ -626,8 +634,20 @@ describe("timeout grace & extendDeadline (runner)", () => {
     expect(s?.armedTimers).toContain("total");
     expect(s?.armedTimers).not.toContain("total_grace");
     expect(s?.diag.overtime).toMatchObject({ graces: 1, extensions: 1, lastReason: "needs the full test suite" });
-    const outcome = await settle(runPromise, clock, 70); // survives 30 and 50, dies at 70
+    // The re-armed guard fires at the old grace cutoff (50), re-reads the live
+    // deadline (70) and re-arms — the old instant no longer kills.
+    clock.advance(50); // now = 50
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-rescue")?.outcome).toBeUndefined();
+    expect(runner.getRunState("r-rescue")?.deadlines.graceUntil).toBeUndefined();
+    // At 70 the guard routes expiry through the reducer again: one extension
+    // slot remains, so a second grace window (until the ceiling 90) opens.
+    clock.advance(20); // now = 70
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-rescue")?.deadlines.graceUntil).toBe(90);
+    const outcome = await settle(runPromise, clock, 20); // now = 90: hard ceiling, no headroom left
     expect(outcome.status).toBe("timed_out");
+    expect(outcome.timeoutReason).toBe("total");
   });
 
   it("extension before the watchdog tick: the tick re-reads the live deadline and does not fire (arch §4.6)", async () => {
@@ -649,7 +669,65 @@ describe("timeout grace & extendDeadline (runner)", () => {
     expect(dispatched).toEqual([]);
     expect(runner.getRunState("r-ext-first")?.deadlines.graceUntil).toBeUndefined();
     wd.disarm("r-ext-first", 1);
-    const outcome = await settle(runPromise, clock, 70);
+    // The guard (not the disarmed watchdog) drives the rest: grace at 70, death at the 90 ceiling.
+    clock.advance(70);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-ext-first")?.deadlines.graceUntil).toBe(90);
+    const outcome = await settle(runPromise, clock, 20);
     expect(outcome.status).toBe("timed_out");
+  });
+
+  it("production path: the guard itself routes deadline expiry into grace — no external fireDeadline", async () => {
+    // No manual fireDeadline anywhere: the FakeWatchdog is inert, so every
+    // deadline_fired below is produced by the prompt guard itself.
+    const { clock, runner, runPromise, d } = await startHanging("r-prod");
+    clock.advance(30); // t=deadlineAt: guard fires → fireDeadline{total} → reducer grants grace
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const s = runner.getRunState("r-prod");
+    expect(s?.deadlines.graceUntil).toBe(50); // min(30+20, 90)
+    expect(s?.status).toBe("starting"); // still running — NOT stopping
+    expect(s?.phase).toBe("prompt_dispatch"); // unchanged
+    expect(s?.diag.stopCause).toBeUndefined(); // fireDeadline did not cancel the prompt
+    expect(s?.diag.overtime?.graces).toBe(1);
+    // the notify_deadline effect really flowed through the effect interpreter
+    expect(d.effects.audit.some((r) => r.kind === "notify_deadline" && r.ok)).toBe(true);
+    // …and when the grace window expires the guard fires again (total_grace)
+    // and the run dies with the original terminal semantics.
+    const outcome = await settle(runPromise, clock, 20); // now = 50
+    expect(outcome.status).toBe("timed_out");
+    expect(outcome.timeoutReason).toBe("total");
+  });
+
+  it("race both ways: watchdog-first and guard-first converge to the same terminal state", async () => {
+    // (a) guard first: covered by the production-path test above (watchdog inert).
+    // (b) watchdog first: a real EventWatchdog enters grace at its tick; the
+    // guard timer at the old deadline then just re-arms (no double dispatch).
+    const { clock, runner, runPromise } = await startHanging("r-race");
+    const wd = new EventWatchdog({
+      clock,
+      budget: graceBudget,
+      getState: (id, gen) => runner.getRunState(id, gen),
+      dispatch: (id, gen, input) =>
+        runner.fireDeadline(id, gen, input as Extract<RunInput, { kind: "deadline_fired" }>),
+      tickMs: 10,
+    });
+    wd.arm("r-race", 1);
+    wd.tick(30); // watchdog wins the race: grace entered via the tick
+    expect(runner.getRunState("r-race")?.deadlines.graceUntil).toBe(50);
+    const gracesAfterTick = runner.getRunState("r-race")?.diag.overtime?.graces;
+    clock.advance(30); // guard fires at the old deadline → re-reads graceUntil=50 → re-arms only
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const s = runner.getRunState("r-race");
+    expect(s?.diag.overtime?.graces).toBe(gracesAfterTick); // no double grace entry
+    expect(s?.status).toBe("starting");
+    expect(s?.diag.stopCause).toBeUndefined();
+    wd.disarm("r-race", 1);
+    const outcome = await settle(runPromise, clock, 20); // now = 50 → guard fires total_grace → kill
+    expect(outcome.status).toBe("timed_out");
+    expect(outcome.timeoutReason).toBe("total");
+    // late watchdog tick after settlement is a complete no-op (fireDeadline
+    // short-circuits on terminal state) — idempotency of the losing racer.
+    wd.tick(60);
+    expect(runner.getRunState("r-race")?.outcome?.status).toBe("timed_out");
   });
 });

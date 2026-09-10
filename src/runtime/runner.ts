@@ -528,6 +528,12 @@ export class RuntimeRunner implements Runner {
         () => effectiveDeadlineAt(state.deadlines),
         cancel,
         "prompt",
+        () => {
+          // Same due-source choice as the watchdog tick: total_grace while a
+          // grace window is armed, total otherwise.
+          const timer = state.deadlines.graceUntil !== undefined ? "total_grace" : "total";
+          this.fireDeadline(req.runId, gen, { kind: "deadline_fired", at: this.d.clock.now(), timer, reason: "total" });
+        },
       );
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
       // pi resolves prompt() even when the final turn errored (stopReason
@@ -619,14 +625,32 @@ export class RuntimeRunner implements Runner {
     });
   }
   /**
-   * timeout-notify (arch §4.6 ③): deadline-following guard. When the timer
-   * fires it does NOT immediately conclude timeout — it re-reads deadlineOf():
+   * timeout-notify (arch §4.6 ③ + guard-race fix): deadline-following guard.
+   * When the timer fires it does NOT immediately conclude timeout — it re-reads
+   * deadlineOf():
    *   - undefined → do not re-arm (defense only: D-11 forbids totalMs ≤ 0 at
    *     the config layer, so the normal path always has a deadline; this branch
    *     exists so directly-constructed RunDeadlines never cause setTimer(0)
    *     fake timeouts),
    *   - due > now → re-arm for due - now (the deadline was extended),
-   *   - due <= now → genuine timeout.
+   *   - due <= now → the deadline genuinely expired: invoke onExpired() (which
+   *     routes the expiry through the reducer via fireDeadline — the
+   *     grace-vs-kill decision lives in the state machine, not here) and then
+   *     re-read deadlineOf() once more: if it moved forward (grace entered, or
+   *     an extension landed) re-arm; if it is unchanged (reducer took the kill
+   *     path, or defensively ruled the fire illegal) resolve timeout — the
+   *     original semantics.
+   *
+   * This makes the prompt guard a second, EXACT producer of deadline_fired
+   * alongside the watchdog's 1Hz tick. Without it the guard (armed at the exact
+   * deadline) would always beat the watchdog's first qualifying tick (which
+   * lands strictly after the deadline) and kill the run before the grace
+   * window could ever be entered. The two producers are redundant and safe:
+   * whichever fires first triggers, the other is idempotent — the reducer
+   * rules a deadline_fired whose timer is no longer in armedTimers illegal,
+   * and fireDeadline() re-reads the state and only cancels when the run
+   * actually transitioned to stopping/terminal (so a guard-triggered fire
+   * that enters grace never cancels the prompt).
    * Rearming reuses the same Clock port and finish() clears the pending timer,
    * so no long-lived timer is added (pi -p print mode unaffected, R-12).
    */
@@ -635,6 +659,7 @@ export class RuntimeRunner implements Runner {
     deadlineOf: () => Millis | undefined,
     cancel: CancelHandle,
     label: string,
+    onExpired?: () => void,
   ): Promise<{ ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }> {
     let timer: ReturnType<Clock["setTimer"]> | undefined;
     return new Promise((resolve) => {
@@ -653,12 +678,23 @@ export class RuntimeRunner implements Runner {
       const arm = () => {
         const due = deadlineOf();
         if (due === undefined) return; // defense branch (D-11) — never setTimer(0)
-        const delay = due - this.d.clock.now();
-        if (delay <= 0) {
-          finish({ ok: false, reason: "timeout" });
+        const now = this.d.clock.now();
+        if (due > now) {
+          timer = this.d.clock.setTimer(due - now, onTimer);
           return;
         }
-        timer = this.d.clock.setTimer(delay, onTimer);
+        // Expired: let the reducer decide grace vs kill, then re-read.
+        onExpired?.();
+        const after = deadlineOf();
+        const afterNow = this.d.clock.now();
+        if (after !== undefined && after > afterNow) {
+          timer = this.d.clock.setTimer(after - afterNow, onTimer);
+          return;
+        }
+        // Note: when the reducer took the kill path, fireDeadline already
+        // cancelled the guard (onAbort → finish("cancelled") ran synchronously
+        // inside onExpired), so this finish() is a done-guarded no-op there.
+        finish({ ok: false, reason: "timeout" });
       };
       const onTimer = () => {
         timer = undefined;
