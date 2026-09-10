@@ -1,4 +1,4 @@
-import type { DeadlineBudget, SetModelOutcome } from "../core/types.js";
+import type { DeadlineBudget, ExtendOutcome, ExtendSource, SetModelOutcome } from "../core/types.js";
 import type {
   AgentTypeConfig,
   DriverEvent,
@@ -66,6 +66,12 @@ export interface Runner {
   getRunState?(runId: RunId, generation?: number): RunState | undefined;
   /** M4: EventWatchdog 的超时入口——折进状态机并解除 prompt guard 的阻塞。 */
   fireDeadline?(runId: RunId, generation: number, input: Extract<RunInput, { kind: "deadline_fired" }>): void;
+  /**
+   * timeout-notify：延长 run 的软截止（deadlineAt）。**同步**返回（D-9：检查—派发—回读之间
+   * 无 await，单线程事件循环内串行，消除与 watchdog tick 的 TOCTOU）。老实现缺席此方法
+   * 时调用方按 `{ ok: false, reason: "unsupported" }` 处理。
+   */
+  extendDeadline?(runId: RunId, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome;
 }
 export interface RunRegistry {
   get(runId: RunId): RunSnapshot | undefined;

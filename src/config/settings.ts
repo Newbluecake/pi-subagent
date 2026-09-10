@@ -99,6 +99,17 @@ export interface CacheTtlSettings {
 }
 
 /**
+ * timeout-notify：超时宽限 + 延长设置（arch §7.2）。逐字段容错解析见
+ * parseExtendSettings。
+ */
+export interface ExtendSettings {
+  /** 总开关。false 时：不注册 extend_subagent_timeout 工具，且 spawn 合并后钳 maxExtensions = 0（D-16）。Default true. */
+  enabled: boolean;
+  /** 宽限通知投递策略：background = 跳过仍在前台阻塞宿主的 caller-ack run；always = 调试用（D-17）；off = 不发（宽限仍生效）。 */
+  notify: "background" | "always" | "off";
+}
+
+/**
  * /goal 目标驱动持续运行（docs/dev/goal/goal-plan.md v4）。逐字段容错解析见
  * parseGoalSettings。时长字段（*Ms 内部毫秒、文件存 *S 秒）必须登记进
  * TIME_SETTING_MS_PATHS；maxMinutes 是分钟字段，不在时长规约内。
@@ -149,6 +160,8 @@ export interface AgentSettings {
   fleetTerminalLingerMs: number;
   /** Hard fallback while a delivered notification awaits context entry. */
   fleetAwaitNotificationMs: number;
+  /** Fleet 主行剩余时间低于该值时转 warn 色；0 = 关闭该预警层（arch §7.2）。 */
+  fleetDeadlineWarnMs: number;
   /** Max chars of a subagent result body returned to callers; 0 = unlimited. */
   resultMaxChars: number;
   /** CC3: workflow engine settings (M3.1+ feature surface). Default disabled. */
@@ -157,6 +170,8 @@ export interface AgentSettings {
   bashJobs: BashJobsSettings;
   /** Model-triggered context compaction. */
   compact: CompactSettings;
+  /** timeout-notify：超时宽限 + 延长（arch §7.2）。 */
+  extend: ExtendSettings;
   /** Message fabric settings; disabled by default for the MVP gray rollout. */
   fabric: FabricSettings;
   cacheTtl: CacheTtlSettings;
@@ -195,6 +210,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   fleetWidget: true,
   fleetTerminalLingerMs: 5_000,
   fleetAwaitNotificationMs: 600_000,
+  fleetDeadlineWarnMs: 60_000,
   resultMaxChars: 16_000,
   workflow: {
     enabled: false,
@@ -231,6 +247,7 @@ export const DEFAULT_SETTINGS: AgentSettings = {
     rootInboxCap: 12,
   },
   cacheTtl: { mode: "auto" },
+  extend: { enabled: true, notify: "background" },
   goal: {
     enabled: true,
     maxTurns: 20,
@@ -245,7 +262,16 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   },
 };
 export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefined>): DeadlineBudget {
-  return { ...DEFAULT_BUDGET, ...overrides.reduce((out, value) => ({ ...out, ...value }), {}) };
+  // D-11：totalMs 恒 > 0。某一层的 totalMs 非法（≤ 0 / 非有限数）时丢弃该层的
+  // 这一个键（其余键保留），回退下一层；DEFAULT_BUDGET.totalMs = 1_800_000 是
+  // 最后一层 ⇒ 返回值 totalMs 恒 > 0（tests/config/agent-config.test.ts 锁死）。
+  const sane = overrides.map((o) => {
+    if (o === undefined || !("totalMs" in o)) return o;
+    if (typeof o.totalMs === "number" && Number.isFinite(o.totalMs) && o.totalMs > 0) return o;
+    const { totalMs: _drop, ...rest } = o;
+    return rest;
+  });
+  return { ...DEFAULT_BUDGET, ...sane.reduce((out, value) => ({ ...out, ...value }), {}) };
 }
 export function mergeSettings(base: Partial<AgentSettings> = {}, config?: AgentTypeConfig): AgentSettings {
   return {
@@ -276,6 +302,7 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "ackWindowMs",
   "fleetTerminalLingerMs",
   "fleetAwaitNotificationMs",
+  "fleetDeadlineWarnMs",
   "worktree.gitTimeoutMs",
   "workflow.replayTtlMs",
   ...Object.keys(DEFAULT_WORKFLOW_BUDGET)
@@ -372,6 +399,12 @@ export function loadSettings(source: unknown): AgentSettings {
       value.fleetAwaitNotificationMs >= 0
         ? value.fleetAwaitNotificationMs
         : DEFAULT_SETTINGS.fleetAwaitNotificationMs,
+    fleetDeadlineWarnMs:
+      typeof value.fleetDeadlineWarnMs === "number" &&
+      Number.isFinite(value.fleetDeadlineWarnMs) &&
+      value.fleetDeadlineWarnMs >= 0
+        ? value.fleetDeadlineWarnMs
+        : DEFAULT_SETTINGS.fleetDeadlineWarnMs,
     resultMaxChars:
       typeof value.resultMaxChars === "number" && Number.isFinite(value.resultMaxChars) && value.resultMaxChars >= 0
         ? Math.floor(value.resultMaxChars)
@@ -391,6 +424,7 @@ export function loadSettings(source: unknown): AgentSettings {
     compact: parseCompactSettings(value.compact),
     fabric: parseFabricSettings(value.fabric),
     cacheTtl: parseCacheTtlSettings(value.cacheTtl),
+    extend: parseExtendSettings(value.extend),
     goal: parseGoalSettings(value.goal),
   });
 }
@@ -455,6 +489,19 @@ export function parseCacheTtlSettings(input: unknown): CacheTtlSettings {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const mode = (input as Record<string, unknown>).mode;
   return mode === "auto" || mode === "on" || mode === "off" ? { mode } : { ...defaults };
+}
+/** Parse the optional timeout grace/extension settings block（parseCacheTtlSettings 同款容错，never throws）。 */
+export function parseExtendSettings(input: unknown): ExtendSettings {
+  const defaults = DEFAULT_SETTINGS.extend;
+  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  const value = input as Record<string, unknown>;
+  return {
+    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
+    notify:
+      value.notify === "background" || value.notify === "always" || value.notify === "off"
+        ? value.notify
+        : defaults.notify,
+  };
 }
 /** Parse the optional model-triggered context compaction settings block. */
 export function parseCompactSettings(input: unknown): CompactSettings {
@@ -599,6 +646,15 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
           `[pi-subagent] failed to remove legacy cache TTL state ${cache.legacyPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+    // D-11：budget.totalS ≤ 0 不再是 "no cap"——加载层丢弃该值回退默认，这里 WARN 一次
+    // （只警告不改写文件；mergeBudget 保证最终 totalMs 恒 > 0）。legacy *Ms 键已在
+    // migrateSettingsFileTimeUnits 里转成 *S，此处只查 totalS 即可覆盖两种来源。
+    const budgetBlock = (cache.value as Record<string, unknown>).budget;
+    const rawTotalS =
+      budgetBlock && typeof budgetBlock === "object" ? (budgetBlock as Record<string, unknown>).totalS : undefined;
+    if (typeof rawTotalS === "number" && rawTotalS <= 0) {
+      console.warn(`[pi-subagent] budget.totalS must be > 0 (got ${rawTotalS}); using the default 1800s`);
     }
     return loadSettings(cache.value);
   } catch (error) {

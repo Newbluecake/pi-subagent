@@ -36,6 +36,7 @@ function fastBudget(totalMs: number) {
     idleMs: 2_000,
     toolMs: 2_000,
     totalMs,
+    totalGraceMs: 0, // S21 基线预置：关闭宽限，保持既有超时语义
     abortGraceMs: 20,
     steerMs: 10,
     reapMs: 30,

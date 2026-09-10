@@ -16,6 +16,7 @@ const budget = {
   startupMs: 10,
   bindMs: 10,
   totalMs: 30,
+  totalGraceMs: 0, // S21 基线预置：关闭宽限，保持既有超时语义
   abortGraceMs: 5,
   reapMs: 5,
   steerMs: 2,

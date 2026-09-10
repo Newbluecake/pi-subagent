@@ -46,14 +46,14 @@ export type SettingSpec = SettingSpecBase &
 /** Integer-second duration knob. `min` defaults to 0, where 0 disables the timeout. */
 function seconds(
   path: string,
-  options: { max?: number; live?: true; hint?: string; description?: string } = {},
+  options: { max?: number; min?: number; live?: true; hint?: string; description?: string } = {},
 ): SettingSpec {
   return {
     kind: "number",
     path,
     time: true,
     integer: true,
-    min: 0,
+    min: options.min ?? 0,
     ...(options.max === undefined ? {} : { max: options.max }),
     ...(options.live ? { live: options.live } : {}),
     ...(options.hint === undefined ? {} : { hint: options.hint }),
@@ -87,12 +87,15 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
   modelTurnMs: "Hard cap on one model turn; 0 = unlimited",
   toolMs: "Single tool call timeout",
   compactionMs: "Context compaction timeout",
-  totalMs: "Overall run cap; 0 = no cap",
+  totalMs: "Overall run cap (must be > 0; 0 falls back to the default)",
   abortGraceMs: "Grace after abort before force-kill",
   steerMs: "Steer message delivery timeout",
   reapMs: "Reaper sweep timeout",
   retrySlackMs: "Extra idle slack per startup retry",
   startupRetries: "Startup retry attempts",
+  totalGraceMs: "Grace after the total budget before force-kill (default-budget runs only); 0 = off",
+  maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
+  maxTotalFactor: "Hard ceiling as a multiple of the total budget (explicit timeouts are always 1)",
 };
 
 /** One-line per-leaf descriptions for the workflow engine budget. */
@@ -110,17 +113,30 @@ const WORKFLOW_BUDGET_DESCRIPTIONS: Record<keyof WorkflowBudget, string> = {
 };
 
 const BUDGET_SPECS: Record<string, SettingSpec> = Object.fromEntries(
-  (Object.keys(DEFAULT_BUDGET) as (keyof DeadlineBudget)[]).map((leaf) =>
-    leaf === "startupRetries"
-      ? ([`budget.${leaf}`, { ...count(`budget.${leaf}`, 0, BUDGET_DESCRIPTIONS[leaf]), live: true }] as [
-          string,
-          SettingSpec,
-        ])
-      : [
-          secondsKeyOf(`budget.${leaf}`),
-          seconds(`budget.${leaf}`, { live: true, description: BUDGET_DESCRIPTIONS[leaf] }),
-        ],
-  ),
+  (Object.keys(DEFAULT_BUDGET) as (keyof DeadlineBudget)[]).map((leaf) => {
+    // 计数类（非时长）：startupRetries / maxExtensions
+    if (leaf === "startupRetries" || leaf === "maxExtensions")
+      return [`budget.${leaf}`, { ...count(`budget.${leaf}`, 0, BUDGET_DESCRIPTIONS[leaf]), live: true }] as [
+        string,
+        SettingSpec,
+      ];
+    // 倍数（非时长、允许小数，≥ 1）：maxTotalFactor
+    if (leaf === "maxTotalFactor")
+      return [
+        `budget.${leaf}`,
+        { kind: "number", path: `budget.${leaf}`, min: 1, live: true, description: BUDGET_DESCRIPTIONS[leaf] },
+      ] as [string, SettingSpec];
+    // totalMs 禁止 0（D-11）；其余时长键 min 默认 0
+    if (leaf === "totalMs")
+      return [
+        secondsKeyOf(`budget.${leaf}`),
+        seconds(`budget.${leaf}`, { live: true, min: 1, description: BUDGET_DESCRIPTIONS[leaf] }),
+      ] as [string, SettingSpec];
+    return [
+      secondsKeyOf(`budget.${leaf}`),
+      seconds(`budget.${leaf}`, { live: true, description: BUDGET_DESCRIPTIONS[leaf] }),
+    ] as [string, SettingSpec];
+  }),
 );
 
 const WORKFLOW_BUDGET_SPECS: Record<string, SettingSpec> = Object.fromEntries(
@@ -170,6 +186,16 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   }),
   "worktree.enabled": bool("worktree.enabled", "Isolate subagents in git worktrees"),
   "compact.enabled": bool("compact.enabled", "Allow the model to trigger context compaction"),
+  "extend.enabled": bool("extend.enabled", "Timeout grace + extend_subagent_timeout tool"),
+  "extend.notify": choice(
+    "extend.notify",
+    ["background", "always", "off"],
+    "Grace notice delivery: background = skip foreground-blocking runs; always = debug only",
+  ),
+  fleetDeadlineWarnS: seconds("fleetDeadlineWarnMs", {
+    hint: "0 disables the deadline warn tier",
+    description: "Fleet row turns warn when remaining time drops below this",
+  }),
   "cacheTtl.mode": choice(
     "cacheTtl.mode",
     ["auto", "on", "off"],

@@ -66,7 +66,7 @@ describe("settings file time-unit migration", () => {
 
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {
     write({
-      budget: { idleS: 600, totalS: 0, startupRetries: 4 },
+      budget: { idleS: 600, totalS: 1800, startupRetries: 4 },
       foregroundAutoBackgroundS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },
@@ -74,7 +74,7 @@ describe("settings file time-unit migration", () => {
     });
     const s = loadSettingsFromFile(path);
     expect(s.budget.idleMs).toBe(600_000);
-    expect(s.budget.totalMs).toBe(0);
+    expect(s.budget.totalMs).toBe(1_800_000);
     expect(s.budget.startupRetries).toBe(4);
     expect(s.foregroundAutoBackgroundMs).toBe(120_000);
     expect(s.worktree).toEqual({ enabled: true, gitTimeoutMs: 45_000 });
@@ -85,7 +85,7 @@ describe("settings file time-unit migration", () => {
     expect(s.bashJobs.maxLogBytes).toBe(1_024);
     // nothing to migrate ⇒ file untouched, no WARN
     expect(readBack()).toEqual({
-      budget: { idleS: 600, totalS: 0, startupRetries: 4 },
+      budget: { idleS: 600, totalS: 1800, startupRetries: 4 },
       foregroundAutoBackgroundS: 120,
       worktree: { enabled: true, gitTimeoutS: 45 },
       workflow: { enabled: true, replayTtlS: 60, budget: { gateS: 30 } },

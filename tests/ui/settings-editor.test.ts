@@ -397,7 +397,8 @@ describe("renderSettingsEditor", () => {
   it("shows each row's description and the seconds unit on duration values", () => {
     const model = new SettingsEditorModel(store());
     focus(model, "concurrencyLimit");
-    const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 20 }).join("\n");
+    // 窗口以焦点行为中心；budget 块随新键增加而变长，窗口必须足够大才能同时看到 idleS。
+    const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 28 }).join("\n");
     expect(text).toContain("Max silence between session events");
     expect(text).toMatch(/budget\.idleS\s+240s/);
     // non-time values carry no unit

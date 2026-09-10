@@ -48,6 +48,7 @@ function fastBudget(overrides: Partial<typeof DEFAULT_BUDGET> = {}) {
     modelTurnMs: 400,
     toolMs: 200,
     totalMs: 500,
+    totalGraceMs: 0, // S21 基线预置：关闭宽限，保持既有超时语义
     abortGraceMs: 20,
     steerMs: 10,
     reapMs: 20,

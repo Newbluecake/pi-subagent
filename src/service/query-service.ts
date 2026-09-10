@@ -1,6 +1,16 @@
 import { withDeadline } from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
-import type { RunId, RunOutcome, RunPhase, RunSnapshot, RunStatus, SetModelOutcome, StopCause } from "../core/types.js";
+import type {
+  ExtendOutcome,
+  ExtendSource,
+  RunId,
+  RunOutcome,
+  RunPhase,
+  RunSnapshot,
+  RunStatus,
+  SetModelOutcome,
+  StopCause,
+} from "../core/types.js";
 import type { Runner, RunRegistry } from "./ports.js";
 
 export type StopResult =
@@ -28,6 +38,12 @@ export interface QueryService {
     opts?: { thinking?: string },
   ): Promise<SetModelOutcome>;
   stop(runId: RunId, cause?: StopCause): Promise<StopResult>;
+  /**
+   * timeout-notify：延长 run 的软截止（deadlineAt），extendMs 为追加毫秒数。
+   * **同步**返回 ExtendOutcome（arch §4.6：检查—派发—回读在单线程事件循环内
+   * 串行完成，没有 await 的必要；同步签名让工具层少一层 Promise 包装）。
+   */
+  extendTimeout(runId: RunId, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome;
 }
 export interface QueryServiceDeps {
   registry: RunRegistry;
@@ -136,6 +152,13 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       } catch {
         return { ok: false, reason: "stop_failed", escalatedTo: "L4" };
       }
+    },
+    extendTimeout(id, extendMs, opts) {
+      const snapshot = deps.registry.get(id);
+      if (!snapshot) return { ok: false, reason: "unknown_run" };
+      if (!deps.runner.extendDeadline) return { ok: false, reason: "unsupported" };
+      // 不重复 extendability 逻辑：runner/reducer 是唯一判定口径（arch §3.3）。
+      return deps.runner.extendDeadline(id, extendMs, opts);
     },
   };
 }

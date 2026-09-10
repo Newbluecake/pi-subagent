@@ -1,11 +1,14 @@
 import { remainingFor, withDeadline, SET_MODEL_TIMEOUT_MS } from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
+import { isTerminalStatus } from "../core/status.js";
 import type {
   DeadlineBudget,
   DeliveryPayload,
   EffectEnvelope,
   ErrorInfo,
+  ExtendOutcome,
+  ExtendSource,
   LifecycleEvent,
   Millis,
   RunEffect,
@@ -211,14 +214,13 @@ const error = (e: unknown, kind: ErrorInfo["kind"] = "internal"): ErrorInfo => (
   message: e instanceof Error ? e.message : String(e),
   retryable: false,
 });
-const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "aborted"]);
-function isTerminalStatus(status: string): boolean {
-  return TERMINAL_STATUSES.has(status);
-}
 export class RuntimeRunner implements Runner {
   private readonly states = new Map<string, RunState>();
   private generation = new Map<string, number>();
-  private readonly dispatchers = new Map<string, { gen: number; fn: (input: RunInput) => void }>();
+  private readonly dispatchers = new Map<
+    string,
+    { gen: number; fn: (input: RunInput) => void; budget: DeadlineBudget }
+  >();
   private readonly activeCancels = new Map<string, { gen: number; cancel: CancelHandle }>();
   private readonly activeHandles = new Map<string, { gen: number; handle: SessionHandle }>();
   constructor(private readonly d: RunnerDeps) {}
@@ -231,6 +233,15 @@ export class RuntimeRunner implements Runner {
   getRunState(runId: string, generation?: number): RunState | undefined {
     const s = this.states.get(runId);
     return generation === undefined || s?.generation === generation ? s : undefined;
+  }
+  /**
+   * P0 存根（timeout-notify）：Pkg A 填充真正实现。同步、零 await（D-9）。
+   */
+  extendDeadline(runId: string, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome {
+    void runId;
+    void extendMs;
+    void opts;
+    return { ok: false, reason: "unsupported" };
   }
   /** Feed a failed effect back into the state machine (5.6.1 R9 compensation / persist retry loop). */
   notifyEffectFailed(runId: string, generation: number, effect: RunEffect["kind"], err: Error): void {
@@ -351,7 +362,7 @@ export class RuntimeRunner implements Runner {
       }
       this.d.effects.apply(req.runId, gen, out.effects);
     };
-    this.dispatchers.set(req.runId, { gen, fn: dispatch });
+    this.dispatchers.set(req.runId, { gen, fn: dispatch, budget });
     try {
       dispatch({
         kind: "enqueued",

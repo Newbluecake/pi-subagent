@@ -10,7 +10,8 @@ import {
 } from "../../src/core/state-machine.js";
 import type { RunEffect, RunInput, RunPhase, RunState, RunStatus, TimerId } from "../../src/core/types.js";
 
-const budget = { ...DEFAULT_BUDGET, totalMs: 100, queueWaitMs: 20 };
+// S21 基线预置：totalGraceMs: 0 = 关闭宽限，保持"total 到点即杀"的既有语义。
+const budget = { ...DEFAULT_BUDGET, totalMs: 100, queueWaitMs: 20, totalGraceMs: 0 };
 
 /** Simple fixed-shape input builder used by the hand-written (non-matrix) tests below. */
 function input(kind: RunInput["kind"], at = 0): RunInput {

@@ -484,6 +484,7 @@ function forwardQuery(holder: { current?: Stack }): QueryService {
     steer: (runId, text) => requireStack(holder).query.steer(runId, text),
     setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts),
     stop: (runId, cause) => requireStack(holder).query.stop(runId, cause),
+    extendTimeout: (runId, extendMs, opts) => requireStack(holder).query.extendTimeout(runId, extendMs, opts),
   };
 }
 function forwardWorkflow(holder: { current?: Stack }): {

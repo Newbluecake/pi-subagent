@@ -41,6 +41,15 @@ describe("agent config", () => {
     expect(mergeBudget({ totalMs: 10 }, { idleMs: 20 })).toMatchObject({ totalMs: 10, idleMs: 20, startupMs: 30_000 });
     expect(loadSettings({ concurrencyLimit: -1 }).concurrencyLimit).toBe(6);
   });
+  it("mergeBudget drops an illegal totalMs layer and falls back (D-11); result totalMs is always > 0", () => {
+    expect(mergeBudget({ totalMs: 0 }).totalMs).toBe(1_800_000);
+    expect(mergeBudget({ totalMs: 3_600_000 }, { totalMs: -1 }).totalMs).toBe(3_600_000);
+    expect(mergeBudget({ totalMs: Number.NaN }).totalMs).toBe(1_800_000);
+    expect(mergeBudget({ totalMs: Number.POSITIVE_INFINITY }).totalMs).toBe(1_800_000);
+    // 非法层只丢 totalMs 这一个键，同层其它键保留
+    expect(mergeBudget({ totalMs: 0, idleMs: 20 })).toMatchObject({ totalMs: 1_800_000, idleMs: 20 });
+    expect(mergeBudget({ totalMs: 0 }, { totalMs: 5 }).totalMs).toBe(5);
+  });
   it("18: validates coalescing and ack window settings, including non-finite values", () => {
     // File keys are integer seconds (`*S`); internal AgentSettings stays in ms.
     expect(loadSettings({ coalesceWindowS: Number.NaN }).coalesceWindowMs).toBe(0);

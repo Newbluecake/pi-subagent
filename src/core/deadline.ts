@@ -1,6 +1,7 @@
 import type { Clock } from "./clock.js";
 import { toErrorInfo } from "./errors.js";
-import type { DeadlineBudget, ErrorInfo, Millis, RunDeadlines, RunDiagnostics, RunPhase } from "./types.js";
+import { isTerminalStatus } from "./status.js";
+import type { DeadlineBudget, ErrorInfo, Millis, RunDeadlines, RunDiagnostics, RunPhase, RunState } from "./types.js";
 export const DEFAULT_BUDGET: DeadlineBudget = {
   queueWaitMs: 600_000,
   startupMs: 30_000,
@@ -16,6 +17,9 @@ export const DEFAULT_BUDGET: DeadlineBudget = {
   reapMs: 5_000,
   startupRetries: 2,
   retrySlackMs: 5_000,
+  totalGraceMs: 90_000,
+  maxExtensions: 3,
+  maxTotalFactor: 2,
 };
 /**
  * set_model 的固定上界：切换只等 pi 的一次 auth 校验 + 状态写入，与 run 预算无关
@@ -78,6 +82,81 @@ export function dueAtFor(phase: RunPhase, diag: RunDiagnostics, budget: Deadline
 export function idleDueAt(diag: RunDiagnostics, budget: DeadlineBudget): Millis {
   const base = diag.lastEventAt ?? diag.phaseEnteredAt;
   return base + budget.idleMs + (diag.retry?.delayMs ?? 0) + budget.retrySlackMs;
+}
+
+/** 相位集合：既是“可进宽限”也是“可延长”（D-14）。state-machine 复用同一常量，不许各写各的。 */
+export const OVERTIME_PHASES: readonly RunPhase[] = [
+  "prompt_dispatch",
+  "model_turn",
+  "tool_exec",
+  "retry_backoff",
+  "compaction",
+];
+
+/** 当前生效的总截止：宽限中取 graceUntil，否则取 deadlineAt。所有 timer/guard 计算的唯一入口。 */
+export function effectiveDeadlineAt(d: RunDeadlines): Millis | undefined {
+  return d.graceUntil ?? d.deadlineAt;
+}
+
+/**
+ * spawn-service 在 mergeBudget 之后、传给 runner 之前调用一次（D-10 / D-16）。
+ * - explicitTotal：per-spawn 覆盖了 totalMs ⇒ 硬顶：maxTotalFactor = 1（H = deadlineAt ⇒ no_headroom ⇒ 无宽限无延长）
+ * - extensionsEnabled = false：maxExtensions = 0（宽限与延长一并关闭，任何层的覆盖都盖不回来）
+ */
+export function applyBudgetPolicy(
+  budget: DeadlineBudget,
+  opts: { explicitTotal: boolean; extensionsEnabled: boolean },
+): DeadlineBudget {
+  let out = budget;
+  if (opts.explicitTotal && out.maxTotalFactor !== 1) out = { ...out, maxTotalFactor: 1 };
+  if (!opts.extensionsEnabled && out.maxExtensions !== 0) out = { ...out, maxExtensions: 0 };
+  return out;
+}
+
+/** enqueue 时算一次。totalMs ≤ 0 只可能来自绕过 mergeBudget 的直接输入（测试）⇒ 防御性返回 undefined（D-11）。 */
+export function hardDeadlineAtFor(
+  enqueuedAt: Millis,
+  budget: DeadlineBudget,
+  capAt: Millis | undefined,
+): Millis | undefined {
+  if (!(budget.totalMs > 0)) return undefined;
+  const factor = Math.max(1, budget.maxTotalFactor);
+  const raw = enqueuedAt + Math.ceil(budget.totalMs * factor);
+  return capAt === undefined ? raw : Math.min(raw, capAt);
+}
+
+/**
+ * 延长/宽限的唯一判定口径：reducer 用它做决策，runner/工具层用它生成拒绝理由。
+ * 一份逻辑两处消费，不允许各写各的。
+ */
+export function extendability(
+  state: RunState,
+  budget: DeadlineBudget,
+  now: Millis,
+):
+  | { ok: true; headroomMs: Millis }
+  | {
+      ok: false;
+      reason: "already_terminal" | "stopping" | "not_started" | "uncapped" | "limit_reached" | "no_headroom";
+    } {
+  if (isTerminalStatus(state.status)) return { ok: false, reason: "already_terminal" };
+  if (state.phase === "abort_grace" || state.phase === "reap") return { ok: false, reason: "stopping" };
+  if (!OVERTIME_PHASES.includes(state.phase)) return { ok: false, reason: "not_started" }; // D-14
+  const { deadlineAt, hardDeadlineAt } = state.deadlines;
+  if (deadlineAt === undefined || hardDeadlineAt === undefined) return { ok: false, reason: "uncapped" }; // 防御
+  if ((state.diag.overtime?.extensions ?? 0) >= budget.maxExtensions) return { ok: false, reason: "limit_reached" };
+  const headroom = hardDeadlineAt - Math.max(now, deadlineAt);
+  if (headroom <= 0) return { ok: false, reason: "no_headroom" }; // 含 D-10：显式预算 run 恒落此处
+  return { ok: true, headroomMs: headroom };
+}
+
+/** 宽限窗口：夹在硬天花板之内（D-7）。返回 undefined = 没有可用宽限。 */
+export function graceWindow(state: RunState, budget: DeadlineBudget, at: Millis): Millis | undefined {
+  if (budget.totalGraceMs <= 0) return undefined;
+  if (!extendability(state, budget, at).ok) return undefined; // D-6：没额度就不宽限；D-14：非 OVERTIME 相位不宽限
+  const h = state.deadlines.hardDeadlineAt!; // extendability ok ⇒ 非 undefined
+  const until = Math.min(at + budget.totalGraceMs, h);
+  return until > at ? until : undefined;
 }
 export type DeadlineResult<T> =
   { ok: true; value: T } | { ok: false; reason: "timeout" } | { ok: false; reason: "error"; error: ErrorInfo };

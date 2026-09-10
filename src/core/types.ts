@@ -61,17 +61,33 @@ export interface DeadlineBudget {
   modelTurnMs: Millis;
   toolMs: Millis;
   compactionMs: Millis;
+  /** 总预算。恒 > 0：非法值（≤ 0 / 非有限数）由 mergeBudget 逐层丢弃并回退下一层（D-11）。 */
   totalMs: Millis;
   abortGraceMs: Millis;
   steerMs: Millis;
   reapMs: Millis;
   startupRetries: number;
   retrySlackMs: Millis;
+  /** 总预算到点后的续跑宽限；0 = 关闭宽限（到点即按原逻辑终止）。 */
+  totalGraceMs: Millis;
+  /** 单个 run 允许的 deadline 延长次数上限；0 = 禁止延长（同时也禁用宽限：graceWindow 经 extendability 判额度）。 */
+  maxExtensions: number;
+  /** 硬天花板倍数：hardDeadlineAt = enqueuedAt + ceil(totalMs * maxTotalFactor)（≥ 1）。显式预算 run 被 applyBudgetPolicy 钳为 1。 */
+  maxTotalFactor: number;
 }
 export interface RunDeadlines {
   readonly enqueuedAt: Millis;
+  /** 当前生效的软截止。**只可向后移动**，且只经由 deadline_extended，且 ≤ hardDeadlineAt。 */
   readonly deadlineAt: Millis | undefined;
   readonly queueDeadlineAt: Millis | undefined;
+  /** 续跑宽限截止；undefined = 不在宽限中。进宽限时置位，被延长时清除；**终态时保留作审计痕迹**（BL-5）。 */
+  readonly graceUntil?: Millis;
+  /**
+   * 绝对硬天花板：enqueue 时算一次、永久冻结（原 deadlineAt 的 B1 不变量迁移至此）。
+   * = min(enqueuedAt + ceil(totalMs * maxTotalFactor), SpawnRequest.deadlineAt ?? ∞)
+   * 配置层已禁止 totalMs ≤ 0（D-11），故正常路径下必有值；undefined 分支仅为防御（直接喂 reducer 的测试输入）。
+   */
+  readonly hardDeadlineAt?: Millis;
 }
 
 /**
@@ -140,6 +156,10 @@ export interface SpawnRequest {
    * runtime adapter, same pattern as `modelOverride`.
    */
   thinkingOverride?: ThinkingLevel;
+  /**
+   * Per-spawn budget override. `totalMs` 有值 ⇒ 该 run 为显式预算 run：
+   * spawn-service 用 applyBudgetPolicy 钳 maxTotalFactor = 1（硬顶，无宽限无延长）。
+   */
   budgetOverride?: Partial<DeadlineBudget>;
   slotless?: boolean;
   parentRunId?: RunId;
@@ -168,7 +188,10 @@ export interface SpawnRequest {
    * deadline. Semantics:
    *   ① the run's deadlines.deadlineAt = min(enqueuedAt + budget.totalMs, deadlineAt)
    *   ② only tightens, never loosens (min() makes this automatic)
-   *   ③ computed once at enqueue time, then frozen forever (core invariant B1)
+   *   ③ B1 "computed once at enqueue, then frozen forever" now protects
+   *      deadlines.hardDeadlineAt = min(enqueuedAt + ceil(totalMs * maxTotalFactor), deadlineAt);
+   *      deadlineAt itself is the initial soft cap — it may only move LATER,
+   *      only via deadline_extended, and never beyond hardDeadlineAt
    *   ④ if already expired at enqueue time -> failed(config, "deadlineAt already expired"),
    *      without acquiring a slot or creating a session (see CP1/CP2/CP3)
    *   ⑤ must be threaded through every hop explicitly (service/request-threading.ts)
@@ -249,6 +272,65 @@ export type SetModelOutcome =
   | { ok: false; reason: "timeout" }
   /** pi refused the switch (e.g. no API key for the provider). */
   | { ok: false; reason: "rejected"; detail: string };
+
+/** v1 只有工具一个来源（D-13）；预留联合类型扩展位。 */
+export type ExtendSource = "tool";
+
+/** 送往宿主通知层的纯数据；core 不做任何文案格式化（I1：core 无 pi 依赖）。 */
+export interface DeadlineNotice {
+  kind: "grace" | "extended";
+  runId: RunId;
+  generation: Generation;
+  at: Millis;
+  phase: RunPhase;
+  label?: string;
+  agentType?: string;
+  taskPreview?: string;
+  /** 变更后的软截止。 */
+  deadlineAt: Millis;
+  /** kind === "grace" 时必有：本次宽限的截止时刻。 */
+  graceUntil?: Millis;
+  hardDeadlineAt: Millis;
+  extensionsUsed: number;
+  maxExtensions: number;
+  /** kind === "grace" 时必有：文案里“可直接抄”的建议值 = min(totalMs, headroom)，core 一次算好（毫秒；文案层换成秒）。 */
+  suggestedExtendMs?: Millis;
+  /** kind === "extended" 时必有。 */
+  requestedMs?: Millis;
+  grantedMs?: Millis;
+  source?: ExtendSource;
+}
+
+/** 与 SetModelOutcome 同置（既有先例）：给工具层生成自纠错文案。 */
+export type ExtendOutcome =
+  | {
+      ok: true;
+      runId: RunId;
+      previousDeadlineAt: Millis;
+      deadlineAt: Millis;
+      requestedMs: Millis;
+      grantedMs: Millis;
+      /** grantedMs < requestedMs（被硬天花板夹过）。 */
+      clamped: boolean;
+      extensionsUsed: number;
+      extensionsRemaining: number;
+      hardDeadlineAt: Millis;
+      /** 本次延长把 run 从续跑宽限中救了出来。 */
+      rescuedFromGrace: boolean;
+    }
+  | {
+      ok: false;
+      reason:
+        | "unknown_run"
+        | "already_terminal"
+        | "stopping"
+        | "not_started" // queue_wait / resolve_config / session_create / extension_bind（D-14）
+        | "uncapped" // 防御性：deadlineAt/hardDeadlineAt 缺席（配置层已禁止 totalMs ≤ 0，见 D-11）
+        | "limit_reached"
+        | "no_headroom" // 含 D-10 显式预算 run（H = deadlineAt）
+        | "unsupported";
+      detail?: string;
+    };
 export interface RunOutcome {
   runId: RunId;
   status: Extract<RunStatus, "completed" | "failed" | "timed_out" | "aborted">;
@@ -315,6 +397,23 @@ export interface RunDiagnostics {
   orphaned: boolean;
   generation: number;
   deadlineAt?: Millis;
+  /** hardDeadlineAt 的展示镜像（与 diag.deadlineAt 同款），enqueue 时写一次；spawn-service 终态重建从此处恢复（BL-5）。 */
+  hardDeadlineAt?: Millis;
+  /** 超时宽限/延长的审计记录；从未发生过时整个字段缺席。 */
+  overtime?: {
+    /** 进入过几次续跑宽限。 */
+    graces: number;
+    /** 当前（或终态时最后一次）宽限窗口；被延长救出时删除。终态快照保留它 = 审计痕迹（BL-5）。 */
+    grace?: { startedAt: Millis; until: Millis };
+    /** 已批准的延长次数。 */
+    extensions: number;
+    /** 累计实际批准的延长毫秒（可能小于请求量，被天花板夹过）。 */
+    grantedMs: Millis;
+    /** 最近一次延长的 reason 参数（展示/审计用，截断 200 字符）。 */
+    lastReason?: string;
+    /** 最近一次延长的来源（v1 只有 "tool"，D-13）。 */
+    lastSource?: ExtendSource;
+  };
   degraded: Array<{ effect: RunEffect["kind"]; at: Millis; error: string; compensated: boolean }>;
   persistStatus?: "verifying" | "retrying" | "persisted" | "degraded_final";
   staleInputs: number;
@@ -409,6 +508,14 @@ export type RunInput =
   | { kind: "stop_requested"; at: Millis; cause: StopCause }
   | { kind: "escalation_done"; at: Millis; level: "L0" | "L1" | "L2" | "L3" | "L3p"; ok: boolean }
   | { kind: "reap_finished"; at: Millis; disposed: boolean; orphaned: boolean }
+  | {
+      kind: "deadline_extended";
+      at: Millis;
+      /** 请求追加的毫秒数（叠加在 max(at, deadlineAt) 之上）；由 reducer 负责夹紧。工具层已把 extend_s × 1000。 */
+      extendMs: Millis;
+      source: ExtendSource;
+      reason?: string;
+    }
   | { kind: "effect_failed"; at: Millis; effect: RunEffect["kind"]; error: ErrorInfo; timer?: TimerId };
 export interface StampedInput {
   readonly generation: number;
@@ -427,6 +534,7 @@ export type RunEffect =
   | { kind: "settle_waiters"; outcome: RunOutcome }
   | { kind: "emit_lifecycle"; event: LifecycleEvent }
   | { kind: "enqueue_delivery"; payload: DeliveryPayload }
+  | { kind: "notify_deadline"; notice: DeadlineNotice }
   | { kind: "persist_snapshot"; snapshot: RunSnapshot };
 export interface EffectEnvelope {
   readonly effectId: string;

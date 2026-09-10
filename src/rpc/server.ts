@@ -74,8 +74,9 @@ export function createRPCServer(deps: RPCServerDeps): RPCServer {
       const cap = caps[key as keyof DeadlineBudget];
       if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
       const bounded = Math.min(Math.max(0, raw), typeof cap === "number" ? cap : Number.MAX_SAFE_INTEGER);
-      // totalMs=0 disables the core deadline; RPC callers must not be able to
-      // turn a remotely-created run into an unbounded run.
+      // D-11: totalMs ≤ 0 is illegal everywhere (0 no longer means "no cap" —
+      // the config layer drops it back to the default). RPC keeps clamping to ≥ 1
+      // so a remote caller can never create an unbounded run.
       result[key] = key === "totalMs" ? Math.max(1, bounded) : bounded;
     }
     return result as SpawnRequest["budgetOverride"];
