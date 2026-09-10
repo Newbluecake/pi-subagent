@@ -3,8 +3,9 @@ import { FakeClock } from "../../src/core/clock.js";
 import { createNotifier as createNotifierImpl, type NotifierOptions } from "../../src/delivery/notifier.js";
 import { createCoalescer, isCoalescible } from "../../src/delivery/coalescer.js";
 import type { PersistedDelivery, OutboxStore } from "../../src/delivery/notifier.js";
-import type { DeliveryPayload } from "../../src/core/types.js";
+import type { DeadlineNotice, DeliveryPayload } from "../../src/core/types.js";
 import { MemoryOutboxStore } from "../../src/core/store.js";
+import { formatDeadlineNotice, shouldDeliverDeadlineNotice } from "../../src/delivery/deadline-notice.js";
 
 function createNotifier(
   options: Omit<NotifierOptions, "cancelBuffered"> & Partial<Pick<NotifierOptions, "cancelBuffered">>,
@@ -36,6 +37,58 @@ class FakeOutbox implements OutboxStore {
   }
 }
 describe("Notifier", () => {
+  /**
+   * D-4 regression (timeout-notify): a grace/extended deadline notice travels
+   * the side channel (pure helpers + pi.sendMessage in stack.ts) and must
+   * NEVER occupy the outbox key deliveryKey(runId, generation) — otherwise the
+   * run's terminal enqueue() would be silently swallowed by the
+   * "key already exists and not dropped/abandoned" early return. This test
+   * simulates the notice path (which must write nothing to the outbox) and
+   * then asserts the terminal enqueue for the SAME runId/generation still
+   * lands exactly one record.
+   */
+  it("D-4: a deadline notice for a run leaves the outbox untouched; the terminal enqueue still lands exactly one record", () => {
+    const clock = new FakeClock(1_000);
+    const store = new FakeOutbox();
+    const sent: DeliveryPayload[] = [];
+    const notifier = createNotifier({ store, clock, sender: (p) => sent.push(p) });
+    // ── The grace-notice path (stack.ts sendDeadlineNotice): pure helpers
+    //    plus a direct pi.sendMessage — the outbox is never consulted. ──
+    const notice: DeadlineNotice = {
+      kind: "grace",
+      runId: payload.runId,
+      generation: payload.generation,
+      at: 900,
+      phase: "tool_exec",
+      deadlineAt: 1_000,
+      graceUntil: 1_090,
+      hardDeadlineAt: 2_000,
+      extensionsUsed: 0,
+      maxExtensions: 3,
+      suggestedExtendMs: 600_000,
+    };
+    expect(
+      shouldDeliverDeadlineNotice(notice, {
+        policy: "always",
+        expectsAck: () => true,
+        autoBackgrounded: () => false,
+      }),
+    ).toBe(true);
+    const content = formatDeadlineNotice(notice, { now: 1_000 });
+    expect(content).toContain("extend_subagent_timeout");
+    expect(store.list()).toHaveLength(0); // the notice wrote NOTHING into the outbox
+    expect(notifier.stats.pending).toBe(0);
+    // ── The run then terminates: the terminal enqueue must succeed — exactly
+    //    one record under the canonical key (P10: one delivery per run). ──
+    notifier.enqueue(payload);
+    expect(store.list()).toHaveLength(1);
+    expect(store.records.get(payload.key)?.runId).toBe(payload.runId);
+    expect(sent.map((p) => p.key)).toEqual([payload.key]);
+    // And a duplicate terminal enqueue (e.g. reconcile replay) is still suppressed.
+    notifier.enqueue(payload);
+    expect(store.list()).toHaveLength(1);
+  });
+
   it("retries synchronous send failures with exponential FakeClock backoff", () => {
     const clock = new FakeClock();
     const store = new FakeOutbox();

@@ -78,11 +78,20 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       // (deadlineAt is absolute, set at enqueue — core/types.ts ①) → host
       // static default → hardcoded 30min. The dynamic default means a bare
       // wait normally settles WITH the run instead of timing out earlier
-      // (e.g. a 2h timeout_ms run awaited under a 30min static default).
-      const remaining =
-        snapshot.deadlines.deadlineAt !== undefined
-          ? Math.max(0, snapshot.deadlines.deadlineAt - clock.now()) + WAIT_SETTLEMENT_GRACE_MS
-          : undefined;
+      // (e.g. a 2h timeout_s run awaited under a 30min static default).
+      //
+      // RK-5 (timeout-notify): the deadline basis escalates to the hard
+      // ceiling ONLY for runs that actually entered grace or were extended
+      // (diag.overtime exists) — an extended run outlives its original
+      // deadlineAt, and a bare wait keyed on deadlineAt would race ahead and
+      // wait_timeout while the run is still legitimately alive. Runs without
+      // overtime keep the deadlineAt basis so their wait windows don't
+      // silently double to maxTotalFactor × totalMs.
+      const basis =
+        snapshot.diag.overtime !== undefined
+          ? (snapshot.deadlines.hardDeadlineAt ?? snapshot.deadlines.deadlineAt)
+          : snapshot.deadlines.deadlineAt;
+      const remaining = basis !== undefined ? Math.max(0, basis - clock.now()) + WAIT_SETTLEMENT_GRACE_MS : undefined;
       const waitMs = opts.waitMs ?? remaining ?? deps.defaultWaitMs ?? 1_800_000;
       const waiter = new Promise<RunOutcome>((resolve) => {
         const poll = () => {

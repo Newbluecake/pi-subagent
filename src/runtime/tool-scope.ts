@@ -30,6 +30,11 @@ export const RESERVED_TOOL_NAMES: readonly string[] = [
   // targets are MCP/late-registered same-name tools and future registration
   // changes; deny-by-default strips them from any run not granted the name.
   "set_model",
+  // extend_subagent_timeout (timeout-notify): same precedent as set_model
+  // above — the tool is host-registered only (never injected into child
+  // sessions), so deny-by-default strips MCP/late-registered same-name
+  // tools from every run.
+  "extend_subagent_timeout",
 ];
 
 export interface ToolScopePolicy {

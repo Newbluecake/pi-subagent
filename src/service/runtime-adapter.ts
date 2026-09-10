@@ -2,6 +2,7 @@ import type { Clock } from "../core/clock.js";
 import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
+  DeadlineNotice,
   ErrorInfo,
   LifecycleEvent,
   RunDiagnostics,
@@ -70,6 +71,13 @@ export interface RuntimeAdapterDeps {
   /** set_model (review m4): available-model candidates (stack.models.available passthrough) so the
    *  subagent-side resolution-failure candidate listing matches the host form's E2 text. */
   availableModels?: () => readonly { provider: string; id: string; name?: string }[];
+  /**
+   * timeout-notify: sink for `notify_deadline` effects (grace entered /
+   * deadline extended) of top-level runs. stack.ts wires this to the
+   * `subagent:timeout` channel (delivery/deadline-notice.ts); child runs are
+   * filtered before this sink is ever called (CC2 / D-8).
+   */
+  onDeadlineNotice?: (notice: DeadlineNotice) => void;
   /** Optional fabric surface; absent means no message_agent injection. */
   fabric?: {
     router: FabricRouter;
@@ -78,6 +86,26 @@ export interface RuntimeAdapterDeps {
       query: () => QueryService | undefined;
       spawn: () => SpawnService | undefined;
     };
+  };
+}
+
+/**
+ * timeout-notify: the `notify_deadline` effect handler, exported as a pure
+ * function so it can be unit-tested without a reducer (RK-10: feed a
+ * hand-built EffectEnvelope to a BasicEffectInterpreter that registers only
+ * this handler). Non-notify effects pass through untouched; child-run
+ * notices are dropped here (CC2 — same position and pattern as the
+ * enqueue_delivery child guard below): a child run is owned by its parent
+ * and must never push a deadline notice into the top-level context (D-8).
+ */
+export function deadlineNoticeHandler(
+  childRunIds: ReadonlySet<string>,
+  sink?: (notice: DeadlineNotice) => void,
+): (e: RunEffect) => void {
+  return (e) => {
+    if (e.kind !== "notify_deadline") return;
+    if (childRunIds.has(e.notice.runId)) return; // CC2 (D-8)
+    sink?.(e.notice);
   };
 }
 
@@ -212,6 +240,9 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         deps.onLifecycle?.(e.event);
         merged.onLifecycle?.(e.event); // H1: run lifecycle bypass observer
       },
+      // timeout-notify: grace/extended notices ride the effect bus
+      // (best_effort); CC2 filtering lives inside deadlineNoticeHandler.
+      notify_deadline: deadlineNoticeHandler(childRunIds, deps.onDeadlineNotice),
     },
     (runId, generation, kind, err) => runtime.notifyEffectFailed(runId, generation, kind as RunEffect["kind"], err),
   );
@@ -546,6 +577,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     },
     setModel(runId, model, opts) {
       return runtime.setModelForRun(runId, model, opts ?? {});
+    },
+    // timeout-notify: synchronous passthrough (D-9) — no logic here; the
+    // runner/reducer is the single source of truth for extendability.
+    extendDeadline(runId, extendMs, opts) {
+      return runtime.extendDeadline(runId, extendMs, opts);
     },
     // M4: EventWatchdog 接线——stack.ts 通过这两个可选方法把 watchdog 的
     // getState/dispatch 晚绑定到真实的 run 状态机上。

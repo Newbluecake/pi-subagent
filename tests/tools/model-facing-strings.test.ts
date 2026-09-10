@@ -8,6 +8,7 @@ import { createStructuredOutputTool } from "../../src/tools/structured-output-to
 import { createBashTool } from "../../src/tools/bash-tool.js";
 import { createBashJobTool } from "../../src/tools/bash-job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
+import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
   if (!schema || typeof schema !== "object") return out;
@@ -38,6 +39,7 @@ function tools() {
     createBashTool({ manager: () => undefined, autoBackgroundMs: () => 120_000 }),
     createBashJobTool({ manager: () => undefined }),
     createSetModelTool({}),
+    createExtendTimeoutTool({ query: {} as never }),
   ];
 }
 
@@ -56,6 +58,8 @@ describe("model-facing tool strings", () => {
     expect(collectDescriptions(abort.parameters).join(" ")).toContain("label");
     const setModel = tools().find((tool) => tool.name === "set_model")!;
     expect(collectDescriptions(setModel.parameters).join(" ")).toContain("label");
+    const extendTimeout = tools().find((tool) => tool.name === "extend_subagent_timeout")!;
+    expect(collectDescriptions(extendTimeout.parameters).join(" ")).toContain("label");
     expect(agent.description).toContain("terminal run");
   });
 

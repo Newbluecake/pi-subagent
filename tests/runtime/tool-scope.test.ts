@@ -29,6 +29,15 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     expect(policy.deny.has("Agent")).toBe(false);
     expect(policy.deny.has("get_subagent_result")).toBe(true);
   });
+  it("timeout-notify: extend_subagent_timeout is reserved and denied by default (host-only tool)", () => {
+    expect(RESERVED_TOOL_NAMES).toContain("extend_subagent_timeout");
+    expect(buildToolScopePolicy({}).deny.has("extend_subagent_timeout")).toBe(true);
+    // The carve-out exists for completeness (granted names survive), matching
+    // the set_model precedent — nothing grants it to child sessions today.
+    expect(buildToolScopePolicy({ granted: ["extend_subagent_timeout"] }).deny.has("extend_subagent_timeout")).toBe(
+      false,
+    );
+  });
   it("undefined tools means no allow-list restriction (legacy behavior preserved)", () => {
     const policy = buildToolScopePolicy({});
     expect(policy.allow).toBeUndefined();
