@@ -1,6 +1,6 @@
 # 超时宽限与续期（timeout grace & extension）技术架构
 
-> 状态：架构设计稿 **v2** —— 已按评审 v1 修订（`review.md`），可直接开工
+> 状态：架构设计稿 **v2** —— 已按评审 v1 修订（`review.md`），**已实施**（P0/Pkg A/B/C/P-final 全部落地）
 > 范围：`src/core` / `src/runtime` / `src/service` / `src/tools` / `src/delivery` / `src/ui` / `src/config`
 > 前置阅读：`AGENTS.md`、`docs/dev/timeout-notify/explore.md`、`docs/dev/timeout-notify/review.md`（本文所有代码引用均自行读码核对过；行号以符号引用为主，避免漂移）
 > 本文只描述设计，不含实现代码改动。

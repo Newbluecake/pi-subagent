@@ -221,6 +221,28 @@ describe("SpawnService", () => {
     }
   });
 
+  it("terminal rebuild preserves hardDeadlineAt and graceUntil from diag mirrors (BL-5)", async () => {
+    let finish!: (value: RunOutcome) => void;
+    const service = createSpawnService({
+      ...deps({ run: () => new Promise<RunOutcome>((resolve) => (finish = resolve)) }),
+    });
+    const started = await service.spawn({ type: "worker", prompt: "x" });
+    finish({
+      ...outcome,
+      runId: started.runId,
+      diag: {
+        ...outcome.diag,
+        deadlineAt: 100_000,
+        hardDeadlineAt: 200_000,
+        overtime: { graces: 1, grace: { startedAt: 100_000, until: 190_000 }, extensions: 0, grantedMs: 0 },
+      },
+    });
+    await vi.waitFor(() => expect(service.snapshots().find((s) => s.runId === started.runId)?.outcome).toBeDefined());
+    const snap = service.snapshots().find((s) => s.runId === started.runId)!;
+    expect(snap.deadlines.hardDeadlineAt).toBe(200_000);
+    expect(snap.deadlines.graceUntil).toBe(190_000);
+  });
+
   it("waitOutcome settles and cleans up its waiter", async () => {
     let finish!: (value: RunOutcome) => void;
     const service = createSpawnService({

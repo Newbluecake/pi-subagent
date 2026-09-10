@@ -129,6 +129,12 @@ describe("context receipt stack wiring", () => {
       message: { role: "custom", customType: "bash-job:notification", details: { runId: "r_other" } },
     });
     expect(stack.contextReceipt.receiptOf("r_other").kind).toBe("untracked");
+    // timeout-notify S11：宽限/延长通知（subagent:timeout）是独立通道，不得被 receipt 记账——
+    // 它不进 outbox、无 delivery 生命周期，记成 pending 会让 widget 一直挂"待处理"。
+    await harness.trigger("message_start", {
+      message: { role: "custom", customType: "subagent:timeout", details: { runId: "r_grace" } },
+    });
+    expect(stack.contextReceipt.receiptOf("r_grace").kind).toBe("untracked");
     // A missing stack (pre-session_start) must be a no-op, not a throw.
     const orphanHook = createNotificationReceiptHook({});
     expect(() =>

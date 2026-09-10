@@ -117,6 +117,13 @@ describe("SettingsEditorModel navigation", () => {
     // workflow.budget.* is unset in DEFAULT_SETTINGS but shows its effective default
     expect(byKey.get("workflow.budget.gateS")?.value).toBe(String(DEFAULT_WORKFLOW_BUDGET.gateMs / 1000));
     expect(byKey.get("workflow.journalDir")?.value).toBe("(unset)");
+    // timeout-notify: the new grace/extension knobs are visible with second-valued defaults
+    expect(byKey.get("budget.totalGraceS")?.value).toBe("90");
+    expect(byKey.get("budget.maxExtensions")?.value).toBe("3");
+    expect(byKey.get("budget.maxTotalFactor")?.value).toBe("2");
+    expect(byKey.get("extend.enabled")?.value).toBe("true");
+    expect(byKey.get("extend.notify")?.value).toBe("background");
+    expect(byKey.get("fleetDeadlineWarnS")?.value).toBe("60");
   });
 
   it("wraps with ↑↓, clamps page jumps, and honours home/end", () => {

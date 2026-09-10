@@ -101,4 +101,23 @@ describe("fleet widget session lifecycle (zombie-after-reload regression)", () =
     await new Promise((resolve) => setTimeout(resolve, 1_200));
     expect(calls.length).toBe(settled);
   });
+
+  it("a rebuild disposes the previous session's widget — old stack closures cannot push frames (R-13)", () => {
+    const { ui, calls } = recordingUi();
+    const stack1 = buildSessionStack(fakePi(), fakeCtx(ui), settings(true), types, []);
+    // /reload 等价物：第二个 buildSessionStack 在顶部 dispose 前一个 stack 的 widget
+    // （previousFleetWidget 交接）。timeout-notify 的 sendDeadlineNotice 同为
+    // buildSessionStack 闭包——这里钉死的是同一机制：旧 stack 的 UI 推送全部失能。
+    const stack2 = buildSessionStack(fakePi(), fakeCtx(ui), settings(true), types, []);
+    try {
+      const settled = calls.length;
+      stack1.fleetWidget!.refresh(); // disposed ⇒ inert no-op
+      expect(calls.length).toBe(settled);
+      stack2.fleetWidget!.refresh(); // alive ⇒ pushes a frame
+      expect(calls.length).toBeGreaterThan(settled);
+    } finally {
+      stack2.fleetWidget?.dispose();
+      stack2.bashJobs?.dispose();
+    }
+  });
 });

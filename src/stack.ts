@@ -31,7 +31,7 @@ import { previewCommand, type JobRecord } from "./bash/types.js";
 import { describeJobStatus } from "./tools/bash-job-tool.js";
 import { formatDuration } from "./ui/fleet-panel.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
+import type { DeadlineNotice, DeliveryPayload, SubagentExtensionPoints } from "./core/types.js";
 import { probeReadBackEntries } from "./adapters/pi-compat.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
 import { createPiOutboxStore, OUTBOX_CUSTOM_TYPE } from "./adapters/pi-outbox-store.js";
@@ -62,6 +62,13 @@ import {
 } from "./delivery/context-receipt.js";
 import { createCoalescer, isCoalescible, type Coalescer } from "./delivery/coalescer.js";
 import { formatDigest, formatSingle } from "./delivery/format.js";
+import {
+  deliveryOptionsFor,
+  formatDeadlineNotice,
+  overtimeTail,
+  shouldDeliverDeadlineNotice,
+  TIMEOUT_NOTICE_TYPE,
+} from "./delivery/deadline-notice.js";
 import { parseDeliveryKey } from "./core/delivery-key.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
@@ -763,10 +770,12 @@ export function buildSessionStack(
         ...(payload.failReason === undefined && fallbackReason !== undefined ? { failReason: fallbackReason } : {}),
       };
       const singleStats = stats[payload.key];
+      // timeout-notify：完成文案带宽限/延长审计尾巴（无 overtime 时为空串）。
+      const tail = payload.status === "completed" ? overtimeTail(snapshot?.diag) : "";
       pi.sendMessage(
         {
           customType: "subagent:notification",
-          content: formatSingle(presented, singleStats !== undefined ? { stats: singleStats } : undefined),
+          content: formatSingle(presented, singleStats !== undefined ? { stats: singleStats } : undefined) + tail,
           display: true,
           details: payload,
         },
@@ -784,6 +793,35 @@ export function buildSessionStack(
         details: { ...first, kind: "digest", items },
       },
       { triggerTurn: true },
+    );
+  };
+  /**
+   * timeout-notify（arch §5.2）：宽限/延长通知的独立通道——customType 是
+   * "subagent:timeout"（不进 outbox、不占 delivery key、不被 receipt hook 记账，
+   * D-4/P10 保持不变），经 pi.sendMessage 直注主会话上下文。投递策略由
+   * shouldDeliverDeadlineNotice 判定（settings.extend.notify + caller-ack 抑制）。
+   */
+  const sendDeadlineNotice = (notice: DeadlineNotice) => {
+    if (
+      !shouldDeliverDeadlineNotice(notice, {
+        policy: settings.extend.notify,
+        expectsAck: (id) => spawnRef.current?.expectsAck(id) === true,
+        autoBackgrounded: (id) => query.get(id)?.diag.autoBackgroundedAt !== undefined,
+      })
+    )
+      return;
+    const snapshot = query.get(notice.runId);
+    pi.sendMessage(
+      {
+        customType: TIMEOUT_NOTICE_TYPE,
+        content: formatDeadlineNotice(notice, {
+          now: systemClock.now(),
+          ...(snapshot === undefined ? {} : { snapshot }),
+        }),
+        display: true,
+        details: notice,
+      },
+      deliveryOptionsFor(notice),
     );
   };
   let notifier: Notifier;
@@ -882,6 +920,7 @@ export function buildSessionStack(
     onChildAbort: (parentRunId, cause) => void spawnRef.current?.abort(parentRunId, cause),
     resolveModelHint: models.resolveHint,
     availableModels: models.available,
+    onDeadlineNotice: sendDeadlineNotice,
   });
   runnerRef.current = runner; // M4: 接通 watchdog 的晚绑定
   const spawn = createSpawnService({
@@ -890,6 +929,8 @@ export function buildSessionStack(
     runner,
     budget: settings.budget,
     maxNestedDepth: settings.maxNestedDepth,
+    // D-16：extend.enabled=false 时合并后钳 maxExtensions=0，宽限/延长一并关闭
+    extensionsEnabled: settings.extend.enabled,
     runIdTaken: (id) => taken.has(id),
     // Fuzzy model-hint resolution is the shared Stack.models port (above);
     // spawn admission reuses it unchanged (plan §4.10). The same live list also
@@ -965,6 +1006,8 @@ export function buildSessionStack(
   // Static fallback for the dynamic per-run wait default (only reached when a
   // snapshot has no deadlineAt yet): the configured run budget + abort grace +
   // settlement headroom, so it tracks `/agent settings` budget changes.
+  // 宽限/延长可能让 run 活过此值；进过宽限（diag.overtime 存在）的 run 由
+  // wait() 的动态基准（hardDeadlineAt）接管（RK-5），此处数值不变。
   query = createQueryService({
     registry: createLiveRunRegistry(spawn, store),
     runner,
@@ -1002,6 +1045,7 @@ export function buildSessionStack(
       mentionNoteOf: (runId) => mentionNotes.get(runId),
       terminalLingerMs: settings.fleetTerminalLingerMs,
       awaitNotificationMs: settings.fleetAwaitNotificationMs,
+      deadlineWarnMs: settings.fleetDeadlineWarnMs,
       pruneReceipts: (keep, now) =>
         contextReceipt.prune(keep, now, {
           lingerMs: settings.fleetTerminalLingerMs,

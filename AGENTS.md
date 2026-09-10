@@ -78,7 +78,7 @@ Run all four locally before pushing. `fs.globSync` is used, so Node < 22 is unsu
   `@label` mentions, RPC, extension points (worktree isolation). RPC spawn success replies weakly carry `{ runId, label? }`; keep the schema result opaque.
 - `tests/` — mirrors `src/` plus `integration/` and `fixtures/`.
 - `docs/dev/` — per-feature design docs (auto-background, delivery v2, bash-auto-background,
-  subagent-push/fabric, compact-hint, ...); read the matching one before changing that subsystem.
+  subagent-push/fabric, compact-hint, timeout-notify (宽限+延长), ...); read the matching one before changing that subsystem.
 - `scripts/release/package.sh` — stage 9 of the git-release flow (zip + sha256 + notes).
 
 ## Conventions

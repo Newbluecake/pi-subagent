@@ -73,7 +73,12 @@ async function drain(clock: FakeClock, ticks: number, stepMs = 1) {
     await Promise.resolve();
   }
 }
-function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: SubagentExtensionPoints[] = []) {
+function buildFullStack(
+  clock: FakeClock,
+  driver: SessionDriver,
+  extensions: SubagentExtensionPoints[] = [],
+  budget?: Partial<typeof DEFAULT_BUDGET>,
+) {
   const pool = new SingleSlotPool(clock, 4);
   const store = new MemoryRunStore();
   const reaper = new EscalatingReaper(clock);
@@ -105,6 +110,7 @@ function buildFullStack(clock: FakeClock, driver: SessionDriver, extensions: Sub
     runner,
     now: () => clock.now(),
     onSnapshot: (s) => snapshots.push(s),
+    ...(budget === undefined ? {} : { budget }),
   });
   return { pool, store, svc, snapshots };
 }
@@ -401,5 +407,75 @@ describe("CC4/WC12c: an already-expired deadlineAt occupies zero resources at ea
     expect(outcome.error?.message).toContain("already expired");
     expect(acquireCalled).toBe(false);
     expect(createCalled).toBe(false);
+  });
+});
+
+describe("timeout-notify: hardDeadlineAt and explicit-budget hard caps (D-10)", () => {
+  it("an explicit budgetOverride.totalMs clamps the hard ceiling to the soft deadline (factor = 1)", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const { svc, snapshots } = buildFullStack(clock, driver);
+
+    const spawned = await svc.spawn({ type: "worker", prompt: "x", budgetOverride: { totalMs: 10_000 } });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await drain(clock, 40);
+
+    const terminal = snapshots.filter((s) => s.runId === spawned.runId && s.status === "completed").at(-1);
+    expect(terminal?.deadlines.deadlineAt).toBe(10_000);
+    // D-10: explicit totalMs ⇒ applyBudgetPolicy clamps maxTotalFactor to 1 ⇒ H = deadlineAt.
+    expect(terminal?.deadlines.hardDeadlineAt).toBe(10_000);
+  });
+
+  it("a SpawnRequest.deadlineAt cap between totalMs and factor*totalMs binds only the ceiling", async () => {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle(),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    // default budget totalMs = 30_000, factor = 2 ⇒ raw ceiling 60_000; cap 45_000 binds H only.
+    const { svc, snapshots } = buildFullStack(clock, driver, [], fastBudget(30_000));
+
+    const spawned = await svc.spawn({ type: "worker", prompt: "x", deadlineAt: 45_000 });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    await drain(clock, 40);
+
+    const terminal = snapshots.filter((s) => s.runId === spawned.runId && s.status === "completed").at(-1);
+    expect(terminal?.deadlines.deadlineAt).toBe(30_000);
+    expect(terminal?.deadlines.hardDeadlineAt).toBe(45_000);
+  });
+
+  it("an explicit-budget run gets NO grace window even when totalGraceMs is configured (D-10)", async () => {
+    const clock = new FakeClock();
+    let abortRequested = false;
+    const driver: SessionDriver = {
+      create: async () =>
+        handle({
+          prompt: () => new Promise(() => undefined), // never settles on its own
+          requestAbort: async () => {
+            abortRequested = true;
+          },
+        }),
+      bind: async () => undefined,
+      onLateArrival: () => undefined,
+    };
+    const graceBudget = { ...fastBudget(2_000), totalGraceMs: 60_000 };
+    const { svc, snapshots } = buildFullStack(clock, driver, [], graceBudget);
+
+    const spawned = await svc.spawn({ type: "worker", prompt: "x", budgetOverride: { totalMs: 2_000 } });
+    if ("error" in spawned) throw new Error(spawned.error.message);
+    // Past the total budget. A default-budget run would enter the grace window here;
+    // the explicit-budget run must go straight to the kill path.
+    await drain(clock, 100, 100);
+
+    const terminal = snapshots.filter((s) => s.runId === spawned.runId).at(-1);
+    expect(terminal?.status).toBe("timed_out");
+    expect(terminal?.deadlines.graceUntil).toBeUndefined();
+    expect(terminal?.diag.overtime).toBeUndefined();
+    expect(abortRequested).toBe(true);
   });
 });

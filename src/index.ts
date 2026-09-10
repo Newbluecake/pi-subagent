@@ -45,6 +45,7 @@ import { createResultTool } from "./tools/result-tool.js";
 import { createSteerTool } from "./tools/steer-tool.js";
 import { createSetModelTool } from "./tools/set-model-tool.js";
 import { createAbortTool } from "./tools/abort-tool.js";
+import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
 import { createCompactTool } from "./tools/compact-tool.js";
 import { createSetCompactThresholdTool } from "./tools/set-compact-threshold-tool.js";
 import { createBashTool } from "./tools/bash-tool.js";
@@ -233,6 +234,16 @@ export default function activate(pi: ExtensionAPI): void {
     }),
   );
   pi.registerTool(createAbortTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
+  // timeout-notify：extend.enabled=false 时工具不注册（spawn 侧同步钳 maxExtensions=0，D-16）。
+  if (settings.extend.enabled) {
+    pi.registerTool(
+      createExtendTimeoutTool({
+        query: forwardQuery(holder),
+        resolveRun: forwardResolveRun(holder),
+        now: () => systemClock.now(),
+      }),
+    );
+  }
   // HOST_KEY guard above means this registration is visible only in the main session.
   if (settings.compact.enabled) {
     pi.registerTool(createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text) }));

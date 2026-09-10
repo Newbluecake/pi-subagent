@@ -1,3 +1,4 @@
+import { applyBudgetPolicy } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
 import { deriveUniqueLabel, firstNonEmptyLine, sanitizeLabelBase } from "../core/labels.js";
@@ -79,6 +80,12 @@ export interface SpawnServiceDeps {
   resolveModelHint?: (hint: string) => { provider: string; id: string } | undefined;
   /** Optional live candidate list for self-correcting unknown-hint errors. */
   availableModels?: () => readonly ModelCandidate[];
+  /**
+   * timeout-notify 总开关（D-16，settings.extend.enabled）。false 时合并后钳
+   * maxExtensions = 0——宽限与延长一并关闭，agent-type / per-spawn 的覆盖都盖不回来
+   * （不注册工具就不发"请调用工具"的通知，保持一致性）。Default true。
+   */
+  extensionsEnabled?: boolean;
   runIdTaken?: (id: string) => boolean;
   /** Test seam for pre-populating the process-local label index. */
   labelIndex?: Map<string, SpawnLabelTarget>;
@@ -140,6 +147,9 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
             enqueuedAt: outcome.diag.enqueuedAt ?? outcome.diag.createdAt,
             deadlineAt: outcome.diag.deadlineAt,
             queueDeadlineAt: undefined,
+            // BL-5：终态重建从 diag 镜像恢复硬天花板与（宽限中结束的）宽限窗口
+            ...(outcome.diag.hardDeadlineAt !== undefined ? { hardDeadlineAt: outcome.diag.hardDeadlineAt } : {}),
+            ...(outcome.diag.overtime?.grace !== undefined ? { graceUntil: outcome.diag.overtime.grace.until } : {}),
           },
           diag: {
             ...outcome.diag,
@@ -391,7 +401,11 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         resolvedReq = { ...req, resumeFrom: resume.sessionFile };
         lockKeys = [targetId, resume.sessionFile];
       }
-      const budget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
+      const budget = applyBudgetPolicy(mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride), {
+        // D-10：per-spawn 显式 totalMs ⇒ 硬顶（maxTotalFactor = 1，无宽限无延长）
+        explicitTotal: req.budgetOverride?.totalMs !== undefined,
+        extensionsEnabled: deps.extensionsEnabled ?? true,
+      });
       const parent = req.parentRunId ?? "root";
       const target = { runId, type: req.type, parent };
       labels.set(effective, target);
