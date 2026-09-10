@@ -138,6 +138,13 @@ describe("parseConfig", () => {
     expect(parseConfig({ subagentForegroundSummary: true }, {}).subagentForegroundSummary).toBe(true);
   });
 
+  it("watchDefault defaults to false, true only when explicitly true", () => {
+    expect(parseConfig({}, {}).watchDefault).toBe(false);
+    expect(parseConfig({ watchDefault: true }, {}).watchDefault).toBe(true);
+    expect(parseConfig({ watchDefault: false }, {}).watchDefault).toBe(false);
+    expect(parseConfig({ watchDefault: 1 as never }, {}).watchDefault).toBe(false);
+  });
+
   it("parses the background gating settings and falls back for invalid values", () => {
     expect(
       parseConfig(

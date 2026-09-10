@@ -36,6 +36,8 @@ export interface Config {
   backgroundIdleRecheckMs?: number;
   /** defer 最长等待时间（毫秒），到期仍会补发并加注记。 */
   backgroundDeferCapMs?: number;
+  /** 新会话是否默认开启 /watch（会话级关注）。默认 false。 */
+  watchDefault?: boolean;
 }
 
 export const DEFAULT_WAIT_NOTIFY_TIMEOUT_SEC = 120;
@@ -78,6 +80,7 @@ export function parseConfig(fileConfig: Config, env: NodeJS.ProcessEnv): Config 
     requireBackgroundIdle: fileConfig.requireBackgroundIdle !== false,
     backgroundIdleRecheckMs: normalizeNumber(fileConfig.backgroundIdleRecheckMs, DEFAULT_BACKGROUND_IDLE_RECHECK_MS),
     backgroundDeferCapMs: normalizeNumber(fileConfig.backgroundDeferCapMs, DEFAULT_BACKGROUND_DEFER_CAP_MS),
+    watchDefault: fileConfig.watchDefault === true,
   };
 }
 

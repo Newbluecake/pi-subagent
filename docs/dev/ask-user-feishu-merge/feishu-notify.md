@@ -7,7 +7,8 @@
 ## 触发方式
 
 - 在任务输入中加入 `@notify` 或 `#notify`，只关注本次任务。
-- `/watch` 切换会话级关注。
+- `/watch` 切换会话级关注。在配置文件中设置 `"watchDefault": true`
+  可让每个新会话默认进入关注状态（进入会话后仍可用 `/watch` 临时关闭）。
 - 使用 `/feishu-test` 验证 webhook。
 
 通知均为被动触发，不再提供 AI 主动调用的 `feishu_notify` 工具。
@@ -29,6 +30,7 @@
 
 ```json
 {
+  "watchDefault": false,
   "requireBackgroundIdle": true,
   "backgroundIdleRecheckMs": 5000,
   "backgroundDeferCapMs": 600000

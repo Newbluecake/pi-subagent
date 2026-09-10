@@ -960,3 +960,52 @@ describe("26. baseline regression", () => {
     expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 27. watchDefault: new session starts watched
+// ---------------------------------------------------------------------------
+
+describe("27. watchDefault config", () => {
+  it("watchDefault:true -> session starts watched; result card sent without /watch and status shows watching", async () => {
+    writeTestConfigFile({ watchDefault: true });
+    const { fetchMock } = installFetchMock();
+    const { emit } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("feishu-notify", "✨ watching");
+
+    await emit("input", { type: "input", text: "plain task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].body).toContain("任务完成");
+  });
+
+  it("watchDefault:true -> /watch toggles the default-on watch off for the session", async () => {
+    writeTestConfigFile({ watchDefault: true });
+    const { fetchMock } = installFetchMock();
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    await commands.get("watch").handler("", ctx); // watched: true -> false
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("feishu-notify", "");
+
+    await emit("input", { type: "input", text: "plain task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("watchDefault absent -> session starts unwatched (unchanged default)", async () => {
+    const { fetchMock } = installFetchMock();
+    const { emit } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("feishu-notify", "");
+
+    await emit("input", { type: "input", text: "plain task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await emit("agent_settled", {}, ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

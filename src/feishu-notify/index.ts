@@ -9,7 +9,7 @@
  *
  * 两种开启方式（均为被动触发，不提供 AI 主动调用工具）：
  *   1. 任务描述里带 @notify 关键词
- *   2. /watch 命令（会话级关注）
+ *   2. /watch 命令（会话级关注；配置 watchDefault:true 可让新会话默认开启）
  *
  * 配置（二选一）：
  *   1. 配置文件 ~/.pi/agent/feishu-notify.json
@@ -490,7 +490,7 @@ export default function (pi: ExtensionAPI) {
       log("旧 pi-ask-user/feishu-notify detected; notifications disabled");
       if (ctx.hasUI) ctx.ui.notify("检测到旧版 pi-ask-user，请卸载旧包后再使用合并版", "warning");
     }
-    watched = false;
+    watched = config.watchDefault === true;
     notifyRequested = false;
     running = false;
     taskGate = false;
@@ -506,6 +506,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (!config.webhookUrl && ctx.hasUI) {
       ctx.ui.setStatus("feishu-notify", "飞书通知: 未配置 webhook");
+    } else if (ctx.hasUI) {
+      ctx.ui.setStatus("feishu-notify", watched ? "✨ watching" : "");
     }
   });
 
