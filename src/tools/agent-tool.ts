@@ -151,10 +151,13 @@ export const AgentToolParams = Type.Object({
         "Fails with a config error (no fallback) if worktree.enabled is off or the cwd is not a git repository.",
     }),
   ),
-  timeout_ms: Type.Optional(
-    Type.Number({
+  timeout_s: Type.Optional(
+    Type.Integer({
+      minimum: 1,
       description:
-        "Optional total wall-clock budget for this run in milliseconds (overrides the default 30min). The run always settles within this budget.",
+        "Optional total wall-clock budget for this run in seconds (overrides the default 30min). " +
+        "An explicit timeout is a hard cap: the run always settles within it — no grace window, no extension. " +
+        "Omit it to use the default budget, which gets a grace window at expiry and can be extended with extend_subagent_timeout.",
     }),
   ),
   run_in_background: Type.Optional(
@@ -264,7 +267,7 @@ export function createAgentTool(deps: {
         ...(deps.parentRunId ? { parentRunId: deps.parentRunId } : {}),
         ...(deps.forceSlotless ? { slotless: true } : {}),
         ...(params.resume ? { resumeFrom: params.resume } : {}),
-        ...(typeof params.timeout_ms === "number" ? { budgetOverride: { totalMs: params.timeout_ms } } : {}),
+        ...(typeof params.timeout_s === "number" ? { budgetOverride: { totalMs: params.timeout_s * 1000 } } : {}),
         ...(params.isolation ? { isolation: params.isolation } : {}),
         ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
       };

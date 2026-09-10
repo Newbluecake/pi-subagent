@@ -175,13 +175,13 @@ describe("tools/agent-tool: foreground failure diagnostics", () => {
   });
 });
 
-describe("tools/agent-tool: timeout_ms budget override", () => {
-  it("threads timeout_ms into budgetOverride.totalMs; omits it when absent", async () => {
+describe("tools/agent-tool: timeout_s budget override", () => {
+  it("threads timeout_s into budgetOverride.totalMs; omits it when absent", async () => {
     const port = fakePort();
     const tool = createAgentTool({ spawn: port });
     await tool.execute(
       "tc1",
-      { description: "d", prompt: "p", subagent_type: "worker", timeout_ms: 120_000 },
+      { description: "d", prompt: "p", subagent_type: "worker", timeout_s: 120 },
       undefined,
       undefined,
       {} as never,

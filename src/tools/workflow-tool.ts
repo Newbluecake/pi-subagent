@@ -99,9 +99,10 @@ export const WorkflowToolParams = Type.Object({
         "call changed the workspace the prompt implicitly depends on. A WARN is logged whenever content scope is used.",
     }),
   ),
-  timeout_ms: Type.Optional(
-    Type.Number({
-      description: "Total wall-clock budget for the whole workflow run, in milliseconds (overrides the default).",
+  timeout_s: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Total wall-clock budget for the whole workflow run, in seconds (overrides the default).",
     }),
   ),
 });
@@ -344,7 +345,7 @@ async function runWithBoundedToolCall(
  *    a script that calls it gets a clear rejection, not a silent no-op.
  *  - \u00a75.5: unlike the upstream plugin (which returns a task id immediately
  *    and runs in the background), this call BLOCKS until the workflow
- *    reaches a terminal state (bounded by its own timeout_ms plus a fixed
+ *    reaches a terminal state (bounded by its own timeout_s plus a fixed
  *    grace window) \u2014 a long workflow occupies this tool call for its
  *    whole duration.
  */
@@ -363,7 +364,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
       "logic directly). Use this only when a single Agent call's own multi-step reasoning is not enough and you " +
       "specifically need several independently-prompted subagents coordinated by real control flow.",
     promptSnippet:
-      "SubagentWorkflow(script, args?, journal?, noReplay?, replayScope?, timeout_ms?) - run a multi-agent orchestration script",
+      "SubagentWorkflow(script, args?, journal?, noReplay?, replayScope?, timeout_s?) - run a multi-agent orchestration script",
     parameters: WorkflowToolParams,
     /**
      * M10: without a renderCall the TUI falls back to the bare tool name for
@@ -379,7 +380,7 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
         args?.journal ? `journal: ${args.journal}` : undefined,
         args?.replayScope ? `replay: ${args.replayScope}` : undefined,
         args?.noReplay ? "no-replay" : undefined,
-        typeof args?.timeout_ms === "number" ? `timeout: ${formatDuration(args.timeout_ms)}` : undefined,
+        typeof args?.timeout_s === "number" ? `timeout: ${formatDuration(args.timeout_s * 1000)}` : undefined,
       ]
         .filter(Boolean)
         .join(" · ");
@@ -395,7 +396,10 @@ export function createWorkflowTool(deps: WorkflowToolDeps): ToolDefinition<typeo
         };
       }
       const workflowId: WorkflowId = `wf_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-      const budget = mergeBudget(deps.defaultBudget, params.timeout_ms);
+      const budget = mergeBudget(
+        deps.defaultBudget,
+        params.timeout_s === undefined ? undefined : params.timeout_s * 1000,
+      );
       const toolCallMs = computeToolCallMs(budget);
       const startedAt = systemClock.now();
       deps.activity.register(
