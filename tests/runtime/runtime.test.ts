@@ -6,7 +6,8 @@ import { SingleSlotPool } from "../../src/runtime/slot-pool.js";
 import { BasicEffectInterpreter, RuntimeRunner, type ResolvedSpawnRequest } from "../../src/runtime/runner.js";
 import type { DriverEvent, SessionDriver, SessionHandle } from "../../src/runtime/session-driver.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
-import type { Watchdog } from "../../src/runtime/watchdog.js";
+import { EventWatchdog, type Watchdog } from "../../src/runtime/watchdog.js";
+import type { RunInput } from "../../src/core/types.js";
 
 const never = <T>() => new Promise<T>(() => undefined);
 const request: ResolvedSpawnRequest = { runId: "r", prompt: "hello" };
@@ -435,5 +436,220 @@ describe("CC4: ResolvedSpawnRequest.deadlineAt threads through to the enqueued d
     const outcome = await new RuntimeRunner(d).run({ ...request, runId: "r-no-cap" }, budget);
     expect(outcome.status).toBe("completed");
     expect(outcome.diag.deadlineAt).toBe(30); // 0 (enqueue at) + budget.totalMs (30), unaffected by CC4
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * timeout-notify (arch §4.6 / §9.4): deadline-following prompt guard,
+ * synchronous extendDeadline, and the review-critical conditional cancel in
+ * fireDeadline. graceBudget: enqueued at 0 ⇒ deadlineAt=30, hardDeadlineAt=90,
+ * grace window 20ms. The module-level FakeWatchdog never dispatches, so grace
+ * entries are driven via runner.fireDeadline() (the watchdog's entry point).
+ * ------------------------------------------------------------------------- */
+describe("timeout grace & extendDeadline (runner)", () => {
+  const graceBudget = { ...budget, totalGraceMs: 20, maxExtensions: 2, maxTotalFactor: 3 };
+
+  /** Starts a run whose prompt hangs forever, parked at prompt_dispatch. */
+  async function startHanging(
+    runId: string,
+    b: typeof budget = graceBudget,
+    reqExtra: Partial<ResolvedSpawnRequest> = {},
+  ) {
+    const clock = new FakeClock();
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    const d = deps(clock, driver);
+    const runner = new RuntimeRunner(d);
+    const runPromise = runner.run({ ...request, runId, ...reqExtra }, b);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    return { clock, runner, runPromise, d };
+  }
+  const fireTotal = (at: number): Extract<RunInput, { kind: "deadline_fired" }> => ({
+    kind: "deadline_fired",
+    at,
+    timer: "total",
+    reason: "total",
+  });
+
+  it("guardUntil re-arms after an extension instead of timing out at the old deadline", async () => {
+    const { clock, runner, runPromise } = await startHanging("r-gu");
+    const out = runner.extendDeadline("r-gu", 50, { source: "tool" }); // 30 → 80 (ceiling 90)
+    expect(out).toMatchObject({
+      ok: true,
+      runId: "r-gu",
+      previousDeadlineAt: 30,
+      deadlineAt: 80,
+      requestedMs: 50,
+      grantedMs: 50,
+      clamped: false,
+      extensionsUsed: 1,
+      extensionsRemaining: 1,
+      hardDeadlineAt: 90,
+      rescuedFromGrace: false,
+    });
+    // Advancing past the OLD deadline must not settle the run: the guard timer
+    // fires at t=30, re-reads the live deadline (80) and re-arms.
+    clock.advance(31);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-gu")?.outcome).toBeUndefined();
+    expect(runner.getRunState("r-gu")?.status).toBe("starting");
+    expect(clock.pendingTimers).toBe(1); // exactly the re-armed guard timer — no new intervals (V14)
+    // Reaching the NEW deadline times the run out.
+    const outcome = await settle(runPromise, clock, 49); // now = 80
+    expect(outcome.status).toBe("timed_out");
+    expect(outcome.timeoutReason).toBe("total");
+  });
+
+  it("guardUntil with an absent deadline never arms a setTimer(0) fake timeout (D-11 defense) and reports uncapped", async () => {
+    // Directly-constructed zero budget: deadlineAt/hardDeadlineAt stay undefined.
+    const { clock, runner, runPromise } = await startHanging("r-uncapped", { ...budget, totalMs: 0 });
+    expect(runner.extendDeadline("r-uncapped", 1_000, { source: "tool" })).toEqual({ ok: false, reason: "uncapped" });
+    clock.advance(3_600_000); // a full hour passes
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-uncapped")?.status).toBe("starting"); // still parked, no fake timeout
+    expect(clock.pendingTimers).toBe(0); // guardUntil armed nothing at all
+    await runner.abortRun("r-uncapped", "user_stop"); // cleanup: settle the run
+    expect((await runPromise).status).toBe("aborted");
+  });
+
+  it("extendDeadline maps every reachable rejection reason", async () => {
+    // unknown_run — no such run at all
+    const idle = new RuntimeRunner(
+      deps(new FakeClock(), { create: async () => handle(), bind: async () => undefined }),
+    );
+    expect(idle.extendDeadline("nope", 1_000, { source: "tool" })).toEqual({ ok: false, reason: "unknown_run" });
+
+    // already_terminal — run settled, dispatcher torn down
+    const done = new RuntimeRunner(
+      deps(new FakeClock(), { create: async () => handle(), bind: async () => undefined, onLateArrival() {} }),
+    );
+    expect((await done.run({ ...request, runId: "r-done" }, budget)).status).toBe("completed");
+    expect(done.extendDeadline("r-done", 1_000, { source: "tool" })).toEqual({ ok: false, reason: "already_terminal" });
+
+    // stopping — run is inside abort_grace (grace disabled → total fire kills)
+    const stopping = await startHanging("r-stopping", budget);
+    stopping.runner.fireDeadline("r-stopping", 1, fireTotal(30));
+    expect(stopping.runner.getRunState("r-stopping")?.status).toBe("stopping");
+    expect(stopping.runner.extendDeadline("r-stopping", 1_000, { source: "tool" })).toEqual({
+      ok: false,
+      reason: "stopping",
+    });
+    await settle(stopping.runPromise, stopping.clock, 1); // cleanup (cancel already fired)
+
+    // not_started — queued behind an occupied single slot (D-14)
+    const clock = new FakeClock();
+    const d = deps(clock, {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    });
+    const runner = new RuntimeRunner(d);
+    const a = runner.run({ ...request, runId: "r-a" }, budget); // occupies the only slot
+    const b = runner.run({ ...request, runId: "r-b" }, budget); // waits in queue_wait
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-b")?.phase).toBe("queue_wait");
+    expect(runner.extendDeadline("r-b", 1_000, { source: "tool" })).toEqual({ ok: false, reason: "not_started" });
+    const outA = await settle(a, clock, 31); // A times out and releases the slot
+    expect(outA.status).toBe("timed_out");
+    expect((await settle(b, clock, 5)).status).toBe("failed"); // B's own queueWaitMs expired meanwhile
+
+    // limit_reached — both extension slots spent
+    const limited = await startHanging("r-limit");
+    expect(limited.runner.extendDeadline("r-limit", 50, { source: "tool" })).toMatchObject({ ok: true });
+    expect(limited.runner.extendDeadline("r-limit", 10, { source: "tool" })).toMatchObject({
+      ok: true,
+      deadlineAt: 90,
+    });
+    expect(limited.runner.extendDeadline("r-limit", 10, { source: "tool" })).toEqual({
+      ok: false,
+      reason: "limit_reached",
+    });
+    await settle(limited.runPromise, limited.clock, 91);
+
+    // no_headroom — explicit per-request deadline cap ⇒ ceiling == deadline (D-10 shape)
+    const capped = await startHanging("r-cap", graceBudget, { deadlineAt: 30 });
+    expect(capped.runner.extendDeadline("r-cap", 1_000, { source: "tool" })).toEqual({
+      ok: false,
+      reason: "no_headroom",
+    });
+    await settle(capped.runPromise, capped.clock, 31);
+  });
+
+  it("clamps an over-large extension at the hard ceiling", async () => {
+    const { clock, runner, runPromise } = await startHanging("r-clamp");
+    const out = runner.extendDeadline("r-clamp", 100, { source: "tool" }); // wants 30+100=130, ceiling 90
+    expect(out).toMatchObject({ ok: true, deadlineAt: 90, requestedMs: 100, grantedMs: 60, clamped: true });
+    // And once at the ceiling there is no headroom left.
+    expect(runner.extendDeadline("r-clamp", 10, { source: "tool" })).toEqual({ ok: false, reason: "no_headroom" });
+    await settle(runPromise, clock, 91);
+  });
+
+  it("fireDeadline entering grace does NOT cancel the run, and the guard kills it at graceUntil", async () => {
+    const { clock, runner, runPromise } = await startHanging("r-grace");
+    const timersBefore = clock.pendingTimers; // 1: the prompt guard
+    runner.fireDeadline("r-grace", 1, fireTotal(30));
+    const s = runner.getRunState("r-grace");
+    expect(s?.deadlines.graceUntil).toBe(50); // min(30+20, 90)
+    expect(s?.status).toBe("starting"); // unchanged — not stopping
+    expect(s?.phase).toBe("prompt_dispatch"); // unchanged
+    expect(s?.diag.stopCause).toBeUndefined(); // no cancel_signal ⇒ no stop_requested funnelled through
+    expect(clock.pendingTimers).toBe(timersBefore); // grace armed no new runner-side timers (V14)
+    // alive past the original deadline…
+    clock.advance(31);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(runner.getRunState("r-grace")?.outcome).toBeUndefined();
+    // …and killed when the grace window expires (guard follows effectiveDeadlineAt).
+    const outcome = await settle(runPromise, clock, 19); // now = 50
+    expect(outcome.status).toBe("timed_out");
+    expect(outcome.timeoutReason).toBe("total");
+  });
+
+  it("extension inside grace reports rescuedFromGrace and measures the grant from now", async () => {
+    const { clock, runner, runPromise } = await startHanging("r-rescue");
+    runner.fireDeadline("r-rescue", 1, fireTotal(30)); // enters grace (until 50)
+    expect(runner.getRunState("r-rescue")?.deadlines.graceUntil).toBe(50);
+    const out = runner.extendDeadline("r-rescue", 40, { source: "tool", reason: "needs the full test suite" });
+    expect(out).toMatchObject({
+      ok: true,
+      previousDeadlineAt: 30,
+      deadlineAt: 70,
+      grantedMs: 40,
+      clamped: false,
+      extensionsUsed: 1,
+      rescuedFromGrace: true,
+    });
+    const s = runner.getRunState("r-rescue");
+    expect(s?.deadlines.graceUntil).toBeUndefined(); // grace cleared
+    expect(s?.armedTimers).toContain("total");
+    expect(s?.armedTimers).not.toContain("total_grace");
+    expect(s?.diag.overtime).toMatchObject({ graces: 1, extensions: 1, lastReason: "needs the full test suite" });
+    const outcome = await settle(runPromise, clock, 70); // survives 30 and 50, dies at 70
+    expect(outcome.status).toBe("timed_out");
+  });
+
+  it("extension before the watchdog tick: the tick re-reads the live deadline and does not fire (arch §4.6)", async () => {
+    const { clock, runner, runPromise } = await startHanging("r-ext-first");
+    const dispatched: string[] = [];
+    const wd = new EventWatchdog({
+      clock,
+      budget: graceBudget,
+      getState: (id, gen) => runner.getRunState(id, gen),
+      dispatch: (id, gen, input) => {
+        dispatched.push(input.kind);
+        runner.fireDeadline(id, gen, input as Extract<RunInput, { kind: "deadline_fired" }>);
+      },
+      tickMs: 10,
+    });
+    runner.extendDeadline("r-ext-first", 40, { source: "tool" }); // 30 → 70
+    wd.arm("r-ext-first", 1);
+    wd.tick(30); // the OLD deadline instant — must not fire, deadlineAt is 70 now
+    expect(dispatched).toEqual([]);
+    expect(runner.getRunState("r-ext-first")?.deadlines.graceUntil).toBeUndefined();
+    wd.disarm("r-ext-first", 1);
+    const outcome = await settle(runPromise, clock, 70);
+    expect(outcome.status).toBe("timed_out");
   });
 });

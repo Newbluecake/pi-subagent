@@ -1,10 +1,14 @@
-import { DEFAULT_BUDGET, dueAtFor } from "./deadline.js";
+import { DEFAULT_BUDGET, dueAtFor, extendability, graceWindow, hardDeadlineAtFor } from "./deadline.js";
 import { deliveryKey } from "./delivery-key.js";
+import { isTerminalStatus } from "./status.js";
 import type {
   DeadlineBudget,
+  DeadlineNotice,
   EffectEnvelope,
   ErrorInfo,
   LifecycleEvent,
+  Millis,
+  RunDeadlines,
   RunDiagnostics,
   RunEffect,
   RunInput,
@@ -146,10 +150,11 @@ export const INPUT_KINDS: readonly RunInput["kind"][] = [
   "stop_requested",
   "escalation_done",
   "reap_finished",
+  "deadline_extended",
   "effect_failed",
 ];
-const terminal = (s: RunStatus): s is RunOutcome["status"] =>
-  s === "completed" || s === "failed" || s === "timed_out" || s === "aborted";
+// D-15: terminal status judgement lives in core/status.ts (single copy).
+const terminal = isTerminalStatus;
 const startingPhase = (p: RunPhase) => p === "session_create" || p === "extension_bind" || p === "prompt_dispatch";
 const phaseTimer = (p: RunPhase): TimerId | undefined =>
   ({
@@ -210,35 +215,61 @@ function emit(state: RunState, effects: RunEffect[]): { state: RunState; effects
   const wrapped = effects.map((e, i) => envelope(state, state.effectSeq + i, e));
   return { state: { ...state, effectSeq: state.effectSeq + wrapped.length }, effects: wrapped };
 }
+/**
+ * timeout-notify (arch §3.4): the single place that decides which total-class
+ * timer is armed. At most one of `total` / `total_grace` is ever armed — during
+ * a grace window `graceUntil` wins, so a leftover `total` can never keep firing
+ * `deadline_fired{total}` every watchdog tick (RK-1).
+ */
+function activeTotalTimer(d: RunDeadlines): { timer: TimerId; dueAt: Millis } | undefined {
+  if (d.graceUntil !== undefined) return { timer: "total_grace", dueAt: d.graceUntil };
+  if (d.deadlineAt !== undefined) return { timer: "total", dueAt: d.deadlineAt };
+  return undefined;
+}
+/**
+ * timeout-notify (arch §3.4): recompute armedTimers ONLY — never touches
+ * diag.phaseEnteredAt / lastEventAt (extending a deadline must not reset the
+ * phase clocks, or a stuck tool/idle would get a free lifetime refill).
+ * Note (RK-1): `arm_timer.dueAt` has no consumer (the watchdog recomputes due
+ * for non-total timers via dueAtFor and reads deadlines directly for total-class
+ * ones); the load-bearing part of this function is the *set of timer ids* in
+ * armedTimers. The dueAt upper bound via activeTotalTimer keeps the audit
+ * information self-consistent.
+ */
+function rearmTimers(state: RunState, budget: DeadlineBudget): { state: RunState; effects: RunEffect[] } {
+  const effects: RunEffect[] = state.armedTimers.map((timer) => ({ kind: "clear_timer" as const, timer }));
+  const timers: TimerId[] = [];
+  const total = activeTotalTimer(state.deadlines);
+  const phaseTimerId = phaseTimer(state.phase);
+  // M4：retry_backoff 不再特判——dueAtFor 已统一处理（内部走 idleDueAt），
+  // 进入该相位时调用处已通过 base 把 lastEventAt 刷为当前时刻，两者等价。
+  const phaseDue = phaseTimerId === undefined ? undefined : dueAtFor(state.phase, state.diag, budget);
+  if (phaseTimerId !== undefined && phaseDue !== undefined && budget.totalMs !== 0) {
+    timers.push(phaseTimerId);
+    effects.push({
+      kind: "arm_timer",
+      timer: phaseTimerId,
+      dueAt: total === undefined ? phaseDue : Math.min(phaseDue, total.dueAt),
+    });
+  }
+  if (total !== undefined && budget.totalMs !== 0) {
+    timers.push(total.timer);
+    effects.push({ kind: "arm_timer", timer: total.timer, dueAt: total.dueAt });
+  }
+  return { state: { ...state, armedTimers: timers }, effects };
+}
 function clearAndArm(
   state: RunState,
   phase: RunPhase,
   at: number,
   budget: DeadlineBudget,
 ): { state: RunState; effects: RunEffect[] } {
-  const effects: RunEffect[] = state.armedTimers.map((timer) => ({ kind: "clear_timer" as const, timer }));
-  const phaseTimerId = phaseTimer(phase);
-  const phaseDiag = { ...state.diag, phase, phaseEnteredAt: at };
-  // M4：retry_backoff 不再特判——dueAtFor 已统一处理（内部走 idleDueAt），
-  // 进入该相位时调用处已通过 base 把 lastEventAt 刷为当前时刻，两者等价。
-  const phaseDue = phaseTimerId === undefined ? undefined : dueAtFor(phase, phaseDiag, budget);
-  const timers: TimerId[] = [];
-  if (phaseTimerId !== undefined && phaseDue !== undefined && budget.totalMs !== 0) {
-    timers.push(phaseTimerId);
-    effects.push({
-      kind: "arm_timer",
-      timer: phaseTimerId,
-      dueAt: state.deadlines.deadlineAt === undefined ? phaseDue : Math.min(phaseDue, state.deadlines.deadlineAt),
-    });
-  }
-  if (state.deadlines.deadlineAt !== undefined && budget.totalMs !== 0) {
-    timers.push("total");
-    effects.push({ kind: "arm_timer", timer: "total", dueAt: state.deadlines.deadlineAt });
-  }
-  return {
-    state: { ...state, phase, diag: phaseDiag, armedTimers: timers },
-    effects,
-  };
+  // timeout-notify: write the phase (and its entry clock) first, then delegate
+  // the timer recompute to rearmTimers. With graceUntil undefined this is
+  // bit-for-bit equivalent to the pre-refactor body (the old 156-cell matrix
+  // staying unchanged is the equivalence proof).
+  const withPhase: RunState = { ...state, phase, diag: { ...state.diag, phase, phaseEnteredAt: at } };
+  return rearmTimers(withPhase, budget);
 }
 function enter(
   state: RunState,
@@ -316,6 +347,58 @@ function finish(
     },
   ] as RunEffect[];
   return emit({ ...next, outcome }, effects);
+}
+/** Display metadata folded into a DeadlineNotice (arch §5.3/S15): label/agentType/taskPreview from diag. */
+function noticeMeta(diag: RunDiagnostics): Pick<DeadlineNotice, "label" | "agentType" | "taskPreview"> {
+  const taskPreview = diag.taskPrompt?.replace(/\s+/g, " ").trim().slice(0, 120);
+  return {
+    ...(diag.label === undefined ? {} : { label: diag.label }),
+    ...(diag.agentType === undefined ? {} : { agentType: diag.agentType }),
+    ...(taskPreview === undefined || taskPreview === "" ? {} : { taskPreview }),
+  };
+}
+/** arch §3.5(b): pure-data assembly of the grace notice (core does no formatting — I1). */
+function buildGraceNotice(state: RunState, budget: DeadlineBudget, at: Millis, until: Millis): DeadlineNotice {
+  const deadlineAt = state.deadlines.deadlineAt!; // graceWindow ok ⇒ defined
+  const hardDeadlineAt = state.deadlines.hardDeadlineAt!;
+  return {
+    kind: "grace",
+    runId: state.runId,
+    generation: state.generation,
+    at,
+    phase: state.phase,
+    ...noticeMeta(state.diag),
+    deadlineAt,
+    graceUntil: until,
+    hardDeadlineAt,
+    extensionsUsed: state.diag.overtime?.extensions ?? 0,
+    maxExtensions: budget.maxExtensions,
+    // A directly copyable suggestion: one full budget, clamped by the remaining headroom.
+    suggestedExtendMs: Math.min(budget.totalMs, hardDeadlineAt - Math.max(at, deadlineAt)),
+  };
+}
+/** arch §3.5(c): pure-data assembly of the extended notice. */
+function buildExtendedNotice(
+  state: RunState,
+  budget: DeadlineBudget,
+  input: Extract<RunInput, { kind: "deadline_extended" }>,
+  grantedMs: Millis,
+): DeadlineNotice {
+  return {
+    kind: "extended",
+    runId: state.runId,
+    generation: state.generation,
+    at: input.at,
+    phase: state.phase,
+    ...noticeMeta(state.diag),
+    deadlineAt: state.deadlines.deadlineAt!,
+    hardDeadlineAt: state.deadlines.hardDeadlineAt!,
+    extensionsUsed: state.diag.overtime?.extensions ?? 0,
+    maxExtensions: budget.maxExtensions,
+    requestedMs: input.extendMs,
+    grantedMs,
+    source: input.source,
+  };
 }
 function illegal(state: RunState, input: RunInput): { state: RunState; effects: readonly EffectEnvelope[] } {
   const warning = `illegal:${input.kind}`;
@@ -429,6 +512,11 @@ export function reduce(
     // core B1 invariant — "algorithm decides once, never recomputes" — is
     // unaffected: what changed is *what* gets algorithm-decided, not *when*).
     const deadlineAt = cap === undefined ? raw : raw === undefined ? cap : Math.min(raw, cap);
+    // timeout-notify (D-2/R-8): the B1 invariant ("computed once, frozen") now
+    // protects hardDeadlineAt — the absolute ceiling that extensions can never
+    // cross. deadlineAt itself may only move monotonically forward via
+    // deadline_extended, always ≤ hardDeadlineAt.
+    const hardDeadlineAt = hardDeadlineAtFor(input.at, input.budget, input.deadlineCapAt);
     const queueDeadlineAt = input.budget.queueWaitMs === 0 ? undefined : input.at + input.budget.queueWaitMs;
     let armedTimers: TimerId[] = [];
     const effects: RunEffect[] = [];
@@ -442,11 +530,18 @@ export function reduce(
     }
     const next: RunState = {
       ...state,
-      deadlines: { enqueuedAt: input.at, deadlineAt, queueDeadlineAt },
+      deadlines: {
+        enqueuedAt: input.at,
+        deadlineAt,
+        queueDeadlineAt,
+        ...(hardDeadlineAt === undefined ? {} : { hardDeadlineAt }),
+      },
       diag: {
         ...state.diag,
         enqueuedAt: input.at,
         ...(deadlineAt === undefined ? {} : { deadlineAt }),
+        // BL-5: mirror so spawn-service terminal reconstruction can restore it.
+        ...(hardDeadlineAt === undefined ? {} : { hardDeadlineAt }),
         // M-A: display-only spawn metadata, set exactly once here.
         ...(input.meta?.model === undefined ? {} : { model: input.meta.model }),
         ...(input.meta?.label === undefined ? {} : { label: input.meta.label }),
@@ -672,8 +767,46 @@ export function reduce(
       ...(input.error?.kind === "timeout" ? { timeoutReason: state.diag.timeoutReason ?? ("total" as const) } : {}),
     });
   }
+  // timeout-notify (arch §3.5(c)): deadline extension. extendability() is the
+  // single verdict source shared with the runner/tool layer (which rejects
+  // first — this branch is defense in depth, including not_started).
+  if (input.kind === "deadline_extended") {
+    const verdict = extendability(state, budget, input.at);
+    if (!verdict.ok) return illegal(state, input);
+    const prev = state.deadlines.deadlineAt!; // extendability ok ⇒ defined
+    const hard = state.deadlines.hardDeadlineAt!;
+    // Base on max(now, prev): inside a grace window prev is already in the
+    // past, so "+60s" measured from prev could be a zero net gain.
+    const base = Math.max(input.at, prev);
+    const requested = Math.max(0, input.extendMs);
+    const nextDeadline = Math.min(base + requested, hard);
+    if (nextDeadline <= prev && nextDeadline <= input.at) return illegal(state, input); // zero net gain
+    const granted = nextDeadline - base;
+    const o = state.diag.overtime ?? { graces: 0, extensions: 0, grantedMs: 0 };
+    const { grace: _leaving, ...rest } = o; // leaving grace: drop overtime.grace
+    const overtime = {
+      ...rest,
+      extensions: o.extensions + 1,
+      grantedMs: o.grantedMs + granted,
+      ...(input.reason === undefined ? {} : { lastReason: input.reason.slice(0, 200) }),
+      lastSource: input.source,
+    };
+    const { graceUntil: _cleared, ...deadlines } = { ...state.deadlines, deadlineAt: nextDeadline };
+    // Three absolute bans (arch §3.5(c)): never touch diag.phaseEnteredAt,
+    // diag.lastEventAt, deadlines.enqueuedAt / hardDeadlineAt / queueDeadlineAt.
+    const next: RunState = { ...state, deadlines, diag: { ...state.diag, deadlineAt: nextDeadline, overtime } };
+    const armed = rearmTimers(next, budget); // drops total_grace (if any) → arms total@nextDeadline
+    return emit(armed.state, [
+      ...armed.effects,
+      { kind: "notify_deadline", notice: buildExtendedNotice(next, budget, input, granted) },
+    ]);
+  }
   if (input.kind === "deadline_fired") {
     if (!state.armedTimers.includes(input.timer)) return illegal(state, input);
+    // Defense (RK-1): while in grace, `total` cannot legitimately fire —
+    // rearmTimers unarmed it. If a bug left it in armedTimers, never let it
+    // re-enter grace / re-notify / take the kill path: rule it illegal.
+    if (input.timer === "total" && state.deadlines.graceUntil !== undefined) return illegal(state, input);
     const removed = { ...state, armedTimers: state.armedTimers.filter((t) => t !== input.timer) };
     if (state.phase === "resolve_config")
       return finish(removed, "failed", input.at, budget, { timeoutReason: input.reason });
@@ -688,6 +821,31 @@ export function reduce(
         { kind: "request_abort" },
         { kind: "dispose" },
       ]);
+    }
+    // timeout-notify (arch §3.5(b)): soft deadline reached in an overtime-eligible
+    // phase with a grace window available ⇒ enter grace, the run keeps going
+    // (phase/status unchanged). graceWindow() already embeds the D-6 (extension
+    // budget left), D-10 (explicit-budget runs never grace) and D-14 (overtime
+    // phases only) verdicts. total_grace expiry gets NO special case: it falls
+    // through to the generic kill path below (timerReason maps it to "total").
+    if (input.timer === "total") {
+      const until = graceWindow(state, budget, input.at);
+      if (until !== undefined) {
+        const o = state.diag.overtime ?? { graces: 0, extensions: 0, grantedMs: 0 };
+        const overtime = { ...o, graces: o.graces + 1, grace: { startedAt: input.at, until } };
+        const next: RunState = {
+          ...removed,
+          deadlines: { ...removed.deadlines, graceUntil: until },
+          diag: { ...removed.diag, overtime },
+        };
+        const armed = rearmTimers(next, budget); // arms total_grace; `total` was filtered out above
+        return emit(armed.state, [
+          ...armed.effects,
+          { kind: "notify_deadline", notice: buildGraceNotice(next, budget, input.at, until) },
+        ]);
+      }
+      // until === undefined ⇒ grace off / extension budget exhausted / at the
+      // hard ceiling / explicit-budget run ⇒ fall through to the kill path.
     }
     // M4 前这里忽略 retry_backoff+idle（配合 dueAtFor 无 retry_backoff 分支的盲区）：
     // pi 自动重试一旦卡住（backoff 结束后迟迟不来 retry_end），run 会无界地挂到总预算。

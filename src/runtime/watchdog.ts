@@ -23,6 +23,9 @@ const timerReason: Partial<Record<TimerId, Extract<RunInput, { kind: "deadline_f
   tool: "idle",
   compaction: "compaction",
   total: "total",
+  // timeout-notify: grace-window expiry keeps the exact original terminal
+  // semantics — timeoutReason stays "total" (arch §3.6).
+  total_grace: "total",
   abort_grace: "total",
   reap: "total",
 };
@@ -49,8 +52,14 @@ export class EventWatchdog implements Watchdog {
       const state = this.deps.getState(id, gen);
       if (!state) continue;
       for (const timer of state.armedTimers) {
+        // Total-class timers read the deadlines directly (never dueAtFor, never
+        // the arm_timer audit dueAt): total → soft deadline, total_grace → grace cutoff.
         const due =
-          timer === "total" ? state.deadlines.deadlineAt : dueAtFor(state.phase, state.diag, this.deps.budget);
+          timer === "total"
+            ? state.deadlines.deadlineAt
+            : timer === "total_grace"
+              ? state.deadlines.graceUntil
+              : dueAtFor(state.phase, state.diag, this.deps.budget);
         if (due !== undefined && now >= due) {
           this.deps.dispatch(id, gen, {
             kind: "deadline_fired",

@@ -8,7 +8,15 @@ import {
   reduce,
   THINKING_TEXT_CAP,
 } from "../../src/core/state-machine.js";
-import type { RunEffect, RunInput, RunPhase, RunState, RunStatus, TimerId } from "../../src/core/types.js";
+import type {
+  DeadlineBudget,
+  RunEffect,
+  RunInput,
+  RunPhase,
+  RunState,
+  RunStatus,
+  TimerId,
+} from "../../src/core/types.js";
 
 // S21 基线预置：totalGraceMs: 0 = 关闭宽限，保持"total 到点即杀"的既有语义。
 const budget = { ...DEFAULT_BUDGET, totalMs: 100, queueWaitMs: 20, totalGraceMs: 0 };
@@ -27,6 +35,7 @@ function input(kind: RunInput["kind"], at = 0): RunInput {
   if (kind === "stop_requested") return { kind, at, cause: "user_stop" };
   if (kind === "escalation_done") return { kind, at, level: "L0", ok: true };
   if (kind === "reap_finished") return { kind, at, disposed: true, orphaned: false };
+  if (kind === "deadline_extended") return { kind, at, extendMs: 1_000, source: "tool" };
   return { kind, at, effect: "dispose", error: { kind: "internal", message: "x", retryable: false } };
 }
 function enqueued(): RunState {
@@ -298,7 +307,8 @@ describe("transition contract", () => {
 describe("invariants", () => {
   it("holds under a deterministic pseudo-random input sequence", () => {
     let s = enqueued();
-    const deadline = s.deadlines.deadlineAt;
+    let prevDeadline = s.deadlines.deadlineAt;
+    const hard = s.deadlines.hardDeadlineAt;
     const ids = new Set<string>();
     let seed = 17;
     const events: RunInput[] = [
@@ -322,7 +332,14 @@ describe("invariants", () => {
         expect(ids.has(e.effectId)).toBe(false);
         ids.add(e.effectId);
       }
-      expect(r.state.deadlines.deadlineAt).toBe(deadline);
+      // B1 migration (D-2): deadlineAt may only move monotonically forward via
+      // deadline_extended, never past the frozen hardDeadlineAt; the ceiling
+      // itself never changes.
+      const d = r.state.deadlines.deadlineAt;
+      if (prevDeadline !== undefined && d !== undefined) expect(d).toBeGreaterThanOrEqual(prevDeadline);
+      if (d !== undefined && hard !== undefined) expect(d).toBeLessThanOrEqual(hard);
+      expect(r.state.deadlines.hardDeadlineAt).toBe(hard);
+      prevDeadline = d;
       expect(r.state.generation).toBe(1);
       if (["completed", "failed", "timed_out", "aborted"].includes(s.status)) expect(r.state.status).toBe(s.status);
       s = r.state;
@@ -543,7 +560,7 @@ describe("N6-1: reap/settled can never be entered via phase_entered", () => {
 /* ------------------------------------------------------------------------- *
  * Executable transition matrix for §4.4.1 of /tmp/subagent-tool-architecture.md.
  *
- * Every one of the 12 phases x 13 inputs = 156 keys below is a hand-derived,
+ * Every one of the 12 phases x 14 inputs = 168 keys below is a hand-derived,
  * independent expectation: either a full (status, phase, ordered effect kinds)
  * transition, an "illegal" (state must not move, no effects), or a "diag" cell
  * with a bespoke check function describing exactly which diagnostic fields
@@ -739,6 +756,10 @@ function buildInput(phase: RunPhase, kind: RunInput["kind"]): RunInput {
       return { kind, at, level: "L0", ok: true };
     case "reap_finished":
       return { kind, at, disposed: true, orphaned: false };
+    case "deadline_extended":
+      // 50ms on top of the matrix fixture's deadlineAt=100 (hard ceiling 200):
+      // a valid, non-clamped extension for every OVERTIME-phase cell.
+      return { kind, at, extendMs: 50, source: "tool", reason: "matrix probe" };
     case "effect_failed":
       return { kind, at, effect: "dispose", error: { kind: "internal", message: "x", retryable: false } };
   }
@@ -817,6 +838,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: illegalCell,
     reap_finished: illegalCell,
+    deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
   },
   resolve_config: {
@@ -861,6 +883,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
   },
   session_create: {
@@ -909,6 +932,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
   },
   extension_bind: {
@@ -954,6 +978,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: illegalCell, // not_started (D-14)
     effect_failed: diagEffectFailed,
   },
   prompt_dispatch: {
@@ -992,6 +1017,13 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: t("starting", "prompt_dispatch", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]),
     effect_failed: diagEffectFailed,
   },
   model_turn: {
@@ -1028,6 +1060,15 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    // NOTE: the model_turn fixture is parked via phase_entered, so its status
+    // is still "starting"; deadline_extended never changes status/phase.
+    deadline_extended: t("starting", "model_turn", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]),
     effect_failed: diagEffectFailed,
   },
   tool_exec: {
@@ -1066,6 +1107,13 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: t("running", "tool_exec", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]),
     effect_failed: diagEffectFailed,
   },
   retry_backoff: {
@@ -1104,6 +1152,13 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: t("running", "retry_backoff", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]),
     effect_failed: diagEffectFailed,
   },
   compaction: {
@@ -1140,6 +1195,13 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     ]),
     escalation_done: diagEscalation(false),
     reap_finished: illegalCell,
+    deadline_extended: t("running", "compaction", [
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]),
     effect_failed: diagEffectFailed,
   },
   abort_grace: {
@@ -1172,6 +1234,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     stop_requested: diagAbortGraceStopRequested,
     escalation_done: diagEscalation(true),
     reap_finished: diagReapFinished,
+    deadline_extended: illegalCell, // stopping (extendability → "stopping")
     effect_failed: diagEffectFailed,
   },
   reap: {
@@ -1187,6 +1250,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     stop_requested: diagTerminalNoop,
     escalation_done: diagEscalation(true),
     reap_finished: diagReapFinished,
+    deadline_extended: illegalCell, // terminalUpdate does not list it → illegal
     effect_failed: diagEffectFailed,
   },
   settled: {
@@ -1202,6 +1266,7 @@ const MATRIX: Record<RunPhase, Record<RunInput["kind"], Cell>> = {
     stop_requested: diagTerminalNoop,
     escalation_done: diagEscalation(true),
     reap_finished: diagReapFinished,
+    deadline_extended: illegalCell, // terminalUpdate does not list it → illegal
     effect_failed: diagEffectFailed,
   },
 };
@@ -1212,11 +1277,11 @@ const FLAT_MATRIX: FlatCase[] = RUN_PHASES.flatMap((phase) =>
 );
 
 describe("executable transition matrix (§4.4.1)", () => {
-  it("has an explicit oracle for all 12 phases x 13 inputs = 156 keys", () => {
+  it("has an explicit oracle for all 12 phases x 14 inputs = 168 keys", () => {
     expect(RUN_PHASES).toHaveLength(12);
-    expect(INPUT_KINDS).toHaveLength(13);
-    expect(FLAT_MATRIX).toHaveLength(156);
-    for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(13);
+    expect(INPUT_KINDS).toHaveLength(14);
+    expect(FLAT_MATRIX).toHaveLength(168);
+    for (const phase of RUN_PHASES) expect(Object.keys(MATRIX[phase])).toHaveLength(14);
   });
 
   it.each(FLAT_MATRIX.map((c) => [`${c.phase}/${c.kind}`, c] as const))(
@@ -1253,9 +1318,9 @@ describe("executable transition matrix (§4.4.1)", () => {
 });
 
 /* ------------------------------------------------------------------------- *
- * P1-P10: property-based invariants over random input sequences.
+ * P1-P14: property-based invariants over random input sequences.
  * ------------------------------------------------------------------------- */
-describe("P1-P10 property invariants", () => {
+describe("P1-P14 property invariants", () => {
   function random(seed: number): () => number {
     let value = seed >>> 0;
     return () => {
@@ -1276,9 +1341,12 @@ describe("P1-P10 property invariants", () => {
         kind: "deadline_fired",
         at,
         timer,
-        reason: timer === "queue" ? "queue_timeout" : timer === "total" ? "total" : "idle",
+        reason: timer === "queue" ? "queue_timeout" : timer === "total" || timer === "total_grace" ? "total" : "idle",
       };
     }
+    // timeout-notify: random extension attempts (1s..1h), tool source only (D-13).
+    if (next() < 0.15)
+      return { kind: "deadline_extended", at, extendMs: 1_000 + Math.floor(next() * 3_600_000), source: "tool" };
     if (next() < 0.2) return { kind: "stop_requested", at, cause: causes[Math.floor(next() * causes.length)] };
     if (next() < 0.2)
       return {
@@ -1308,18 +1376,32 @@ describe("P1-P10 property invariants", () => {
     ["P3 no timers after terminal", 3],
     ["P4 terminal effects empty", 4],
     ["P5 deterministic same input", 5],
-    ["P6 immutable deadline", 6],
+    ["P6 deadline monotonic and pinned by the frozen hardDeadlineAt", 6],
     ["P7 total-product no throw", 7],
     ["P9 effect ids unique", 9],
     ["P10 delivery key unique", 10],
+    ["P11 graceUntil never exceeds hardDeadlineAt", 11],
+    ["P12 deadline notices bounded by the extension budget (BL-3)", 12],
+    ["P13 deadline_extended never touches phase clocks or frozen deadlines", 13],
+    ["P14 entering grace emits no cancel_signal", 14],
   ])("%s, 1000 random sequences", (name, property) => {
     for (let seed = 1; seed <= 1000; seed++) {
       const next = random(seed + property * 10000);
-      let state = enqueued();
-      const deadline = state.deadlines.deadlineAt;
+      // P11-P14 exercise the grace machinery, which the shared baseline keeps
+      // off (totalGraceMs: 0); those four get a grace-enabled budget.
+      const propBudget: DeadlineBudget = property >= 11 ? { ...budget, totalGraceMs: 50 } : budget;
+      let state = reduce(
+        createInitialState("r", 1, 0),
+        { generation: 1, input: { kind: "enqueued", at: 0, budget: propBudget } },
+        propBudget,
+      ).state;
+      let prevDeadline = state.deadlines.deadlineAt;
+      const hard = state.deadlines.hardDeadlineAt;
       const ids = new Set<string>();
       const deliveries = new Set<string>();
       let releaseAttempts = 0;
+      let graceNotices = 0;
+      let extendedNotices = 0;
       for (let step = 0; step < 25; step++) {
         const event =
           property === 2 && step === 0
@@ -1329,9 +1411,9 @@ describe("P1-P10 property invariants", () => {
               : property === 2 && step === 2
                 ? ({ kind: "prompt_settled", at: step + 1 } as RunInput)
                 : randomInput(state, next);
-        const result = reduce(state, { generation: state.generation, input: event }, budget);
+        const result = reduce(state, { generation: state.generation, input: event }, propBudget);
         if (property === 5) {
-          const repeat = reduce(state, { generation: state.generation, input: event }, budget);
+          const repeat = reduce(state, { generation: state.generation, input: event }, propBudget);
           expect(repeat).toEqual(result);
         }
         for (const effect of result.effects) {
@@ -1343,14 +1425,51 @@ describe("P1-P10 property invariants", () => {
             if (property === 10) expect(deliveries.has(key)).toBe(false);
             deliveries.add(key);
           }
+          if (effect.effect.kind === "notify_deadline") {
+            if (effect.effect.notice.kind === "grace") graceNotices++;
+            else extendedNotices++;
+          }
         }
         if (property === 1) expect(releaseAttempts).toBeLessThanOrEqual(1);
         if (property === 3 && terminalStatuses.includes(result.state.status))
           expect(result.state.armedTimers).toEqual([]);
         if (property === 4 && terminalStatuses.includes(state.status) && event.kind !== "effect_failed")
           expect(result.effects).toEqual([]);
-        if (property === 6) expect(result.state.deadlines.deadlineAt).toBe(deadline);
+        if (property === 6) {
+          // B1 migration (D-2): monotone non-decreasing, ≤ the frozen ceiling.
+          const d = result.state.deadlines.deadlineAt;
+          if (prevDeadline !== undefined && d !== undefined) expect(d).toBeGreaterThanOrEqual(prevDeadline);
+          if (d !== undefined && hard !== undefined) expect(d).toBeLessThanOrEqual(hard);
+          expect(result.state.deadlines.hardDeadlineAt).toBe(hard);
+          prevDeadline = d;
+        }
+        if (property === 11) {
+          const g = result.state.deadlines.graceUntil;
+          if (g !== undefined) {
+            expect(result.state.deadlines.hardDeadlineAt).toBeDefined();
+            expect(g).toBeLessThanOrEqual(result.state.deadlines.hardDeadlineAt!);
+          }
+        }
+        if (property === 13 && event.kind === "deadline_extended") {
+          // The three bans of arch §3.5(c) as an executable proof.
+          expect(result.state.diag.phaseEnteredAt).toBe(state.diag.phaseEnteredAt);
+          expect(result.state.diag.lastEventAt).toBe(state.diag.lastEventAt);
+          expect(result.state.deadlines.enqueuedAt).toBe(state.deadlines.enqueuedAt);
+          expect(result.state.deadlines.hardDeadlineAt).toBe(state.deadlines.hardDeadlineAt);
+        }
+        if (
+          property === 14 &&
+          state.deadlines.graceUntil === undefined &&
+          result.state.deadlines.graceUntil !== undefined
+        )
+          expect(result.effects.some((e) => e.effect.kind === "cancel_signal")).toBe(false);
         state = result.state;
+      }
+      if (property === 12) {
+        const n = propBudget.maxExtensions;
+        expect(graceNotices).toBeLessThanOrEqual(n + 1);
+        expect(extendedNotices).toBeLessThanOrEqual(n);
+        expect(graceNotices + extendedNotices).toBeLessThanOrEqual(2 * n + 1);
       }
       if (property === 2) expect(terminalStatuses).toContain(state.status);
       if (property === 7) {
@@ -1359,7 +1478,7 @@ describe("P1-P10 property invariants", () => {
         const sampled = reduce(
           fixture(sample.phase),
           { generation: 1, input: buildInput(sample.phase, sample.kind) },
-          budget,
+          propBudget,
         );
         expect(Array.isArray(sampled.effects)).toBe(true);
         expect(sampled.effects).toEqual([]);
@@ -1494,6 +1613,12 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
         return {
           kind,
           at,
+          // "total" is deliberately excluded: entering abort_grace RE-ARMS it
+          // (past-due), so a duplicated total fire legitimately advances the run
+          // stopping → timed_out (that second fire is exactly how production
+          // settles, S22) — it is not a no-op and therefore cannot participate
+          // in P8's duplication invariant. Single total fires are covered by the
+          // matrix, the grace suites, and the P1-P14 generator.
           timer: pick([
             "queue",
             "startup",
@@ -1503,7 +1628,6 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
             "tool",
             "compaction",
             "abort_grace",
-            "total",
           ] as const),
           reason: pick([
             "queue_timeout",
@@ -1521,6 +1645,14 @@ describe("P8 duplication, reordering and stale-generation robustness", () => {
         return { kind, at, level: pick(["L0", "L1", "L2", "L3", "L3p"] as const), ok: next() < 0.7 };
       case "reap_finished":
         return { kind, at, disposed: next() < 0.8, orphaned: next() < 0.2 };
+      case "deadline_extended":
+        return {
+          kind,
+          at,
+          extendMs: 1_000 + Math.floor(next() * 3_600_000), // 1s..1h
+          source: "tool",
+          ...(next() < 0.5 ? { reason: "r" } : {}),
+        };
       case "effect_failed":
         return {
           kind,
@@ -1646,7 +1778,7 @@ describe("seeded property invariants", () => {
     };
   }
   it.each([
-    ["budget and deadline are immutable", 0],
+    ["deadlineAt monotonic and pinned by the frozen hardDeadlineAt (B1 migration)", 0],
     ["generation never decreases", 1],
     ["terminal status is irreversible", 2],
     ["effect ids are globally unique", 3],
@@ -1655,7 +1787,8 @@ describe("seeded property invariants", () => {
     for (let seed = 1; seed <= 200; seed++) {
       const random = mulberry32(seed + offset * 1000);
       let state = enqueued();
-      const deadline = state.deadlines.deadlineAt;
+      let prevDeadline = state.deadlines.deadlineAt;
+      const hard = state.deadlines.hardDeadlineAt;
       const ids = new Set<string>();
       let previousStatus = state.status;
       for (let n = 0; n < 40; n++) {
@@ -1669,7 +1802,13 @@ describe("seeded property invariants", () => {
           expect(ids.has(effect.effectId)).toBe(false);
           ids.add(effect.effectId);
         }
-        expect(result.state.deadlines.deadlineAt).toBe(deadline);
+        // B1 migration (D-2): deadlineAt monotone non-decreasing, ≤ hardDeadlineAt;
+        // the hard ceiling itself is constant for the whole sequence.
+        const d = result.state.deadlines.deadlineAt;
+        if (prevDeadline !== undefined && d !== undefined) expect(d).toBeGreaterThanOrEqual(prevDeadline);
+        if (d !== undefined && hard !== undefined) expect(d).toBeLessThanOrEqual(hard);
+        expect(result.state.deadlines.hardDeadlineAt).toBe(hard);
+        prevDeadline = d;
         expect(result.state.generation).toBeGreaterThanOrEqual(state.generation);
         if (["completed", "failed", "timed_out", "aborted"].includes(previousStatus))
           expect(result.state.status).toBe(previousStatus);
@@ -1863,5 +2002,353 @@ describe("thinking stream (thinking_delta → diag.thinkingText)", () => {
     expect(s.phase).toBe("abort_grace");
     const r = apply(s, { kind: "session_event", event: { t: "thinking_delta", delta: "late" } });
     expect(r.state.diag.thinkingText).toBe("late");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * timeout-notify: grace window & deadline extension (arch §3.5/§3.6, plan §3.11 A⑧).
+ * The matrix above keeps grace off (totalGraceMs: 0) so its 168 cells stay
+ * bit-stable; everything below is driven by an explicit grace-enabled budget:
+ * enqueued at 0 ⇒ deadlineAt = 1000, hardDeadlineAt = 2000, grace window 500.
+ * ------------------------------------------------------------------------- */
+describe("timeout grace", () => {
+  const graceBudget: DeadlineBudget = {
+    ...DEFAULT_BUDGET,
+    totalMs: 1_000,
+    queueWaitMs: 20,
+    totalGraceMs: 500,
+    maxExtensions: 3,
+    maxTotalFactor: 2,
+  };
+  function gEnqueue(b: DeadlineBudget): RunState {
+    return reduce(createInitialState("r", 1, 0), { generation: 1, input: { kind: "enqueued", at: 0, budget: b } }, b)
+      .state;
+  }
+  function gApply(s: RunState, i: RunInput, b: DeadlineBudget = graceBudget) {
+    return reduce(s, { generation: s.generation, input: i }, b);
+  }
+  /** Parks a run at an OVERTIME phase via genuine reduce() transitions only. */
+  function graceFixture(phase: RunPhase, b: DeadlineBudget = graceBudget): RunState {
+    let s = gEnqueue(b);
+    s = gApply(s, { kind: "slot_acquired", at: 1 }, b).state;
+    if (phase === "prompt_dispatch")
+      return gApply(s, { kind: "phase_entered", at: 2, phase: "prompt_dispatch" }, b).state;
+    s = gApply(s, { kind: "phase_entered", at: 2, phase: "model_turn" }, b).state;
+    if (phase === "model_turn") return s;
+    if (phase === "tool_exec")
+      return gApply(
+        s,
+        { kind: "session_event", at: 3, event: { t: "tool_start", toolCallId: "a", toolName: "bash" } },
+        b,
+      ).state;
+    if (phase === "retry_backoff")
+      return gApply(
+        s,
+        { kind: "session_event", at: 3, event: { t: "retry_start", attempt: 1, maxAttempts: 2, delayMs: 5 } },
+        b,
+      ).state;
+    if (phase === "compaction")
+      return gApply(s, { kind: "session_event", at: 3, event: { t: "compaction_start", reason: "ctx" } }, b).state;
+    throw new Error(`not an overtime phase: ${phase}`);
+  }
+  const fireTotal = (at: number): RunInput => ({ kind: "deadline_fired", at, timer: "total", reason: "total" });
+
+  // 5 OVERTIME phases × 6 verdict conditions = 30 assertions (arch §9.1).
+  const OVERTIME = ["prompt_dispatch", "model_turn", "tool_exec", "retry_backoff", "compaction"] as const;
+  interface GraceCase {
+    name: string;
+    budget?: DeadlineBudget;
+    prep?: (s: RunState) => RunState;
+    fireAt: number;
+    expectGrace: boolean;
+  }
+  const graceCases: GraceCase[] = [
+    { name: "grace available", fireAt: 1_000, expectGrace: true },
+    {
+      name: "grace disabled (totalGraceMs: 0)",
+      budget: { ...graceBudget, totalGraceMs: 0 },
+      fireAt: 1_000,
+      expectGrace: false,
+    },
+    {
+      name: "extensions disabled (maxExtensions: 0, D-6)",
+      budget: { ...graceBudget, maxExtensions: 0 },
+      fireAt: 1_000,
+      expectGrace: false,
+    },
+    {
+      name: "extension budget already exhausted",
+      prep: (s) => ({
+        ...s,
+        diag: { ...s.diag, overtime: { graces: 0, extensions: 3, grantedMs: 900 } },
+      }),
+      fireAt: 1_000,
+      expectGrace: false,
+    },
+    {
+      name: "hard ceiling reached by a prior extension",
+      prep: (s) => gApply(s, { kind: "deadline_extended", at: 500, extendMs: 1_500, source: "tool" }).state,
+      fireAt: 2_000,
+      expectGrace: false,
+    },
+    {
+      name: "explicit-budget shape (maxTotalFactor: 1, D-10)",
+      budget: { ...graceBudget, maxTotalFactor: 1 },
+      fireAt: 1_000,
+      expectGrace: false,
+    },
+  ];
+  for (const phase of OVERTIME) {
+    for (const c of graceCases) {
+      it(`${phase}: ${c.name}`, () => {
+        const b = c.budget ?? graceBudget;
+        let s = graceFixture(phase, b);
+        if (c.prep) s = c.prep(s);
+        const r = gApply(s, fireTotal(c.fireAt), b);
+        if (c.expectGrace) {
+          // Run keeps going: status/phase unchanged, graceUntil set, total_grace armed.
+          expect(r.state.status).toBe(s.status);
+          expect(r.state.phase).toBe(phase);
+          expect(r.state.deadlines.graceUntil).toBe(1_500);
+          expect(r.state.deadlines.deadlineAt).toBe(1_000); // the soft deadline itself does not move
+          expect(r.state.diag.overtime).toEqual({
+            graces: 1,
+            grace: { startedAt: c.fireAt, until: 1_500 },
+            extensions: 0,
+            grantedMs: 0,
+          });
+          expect(r.state.armedTimers).toContain("total_grace");
+          expect(r.state.armedTimers).not.toContain("total");
+          const notice = r.effects.find((e) => e.effect.kind === "notify_deadline")?.effect;
+          expect(notice).toMatchObject({
+            kind: "notify_deadline",
+            notice: {
+              kind: "grace",
+              phase,
+              deadlineAt: 1_000,
+              graceUntil: 1_500,
+              hardDeadlineAt: 2_000,
+              extensionsUsed: 0,
+              maxExtensions: 3,
+              suggestedExtendMs: 1_000, // min(totalMs, headroom = 2000-1000)
+            },
+          });
+          // P14 (directed): entering grace must not cancel anything.
+          expect(r.effects.some((e) => e.effect.kind === "cancel_signal")).toBe(false);
+        } else {
+          // Legacy kill path, unchanged from before the feature.
+          expect(r.state.status).toBe("stopping");
+          expect(r.state.phase).toBe("abort_grace");
+          expect(r.state.diag.timeoutReason).toBe("total");
+          expect(r.state.diag.stopCause).toBe("timeout");
+          expect(r.state.deadlines.graceUntil).toBeUndefined();
+          expect(r.effects.some((e) => e.effect.kind === "cancel_signal")).toBe(true);
+          expect(r.effects.some((e) => e.effect.kind === "notify_deadline")).toBe(false);
+        }
+      });
+    }
+  }
+
+  it("total_grace expiry matches the legacy total kill path effect-for-effect (RK-2)", () => {
+    // Legacy path (grace off): total fires at t=1500 from model_turn.
+    const legacyBudget: DeadlineBudget = { ...graceBudget, totalGraceMs: 0 };
+    const legacy = gApply(graceFixture("model_turn", legacyBudget), fireTotal(1_500), legacyBudget);
+    // Grace path: enter grace at t=1000 (until 1500), then total_grace expires at t=1500.
+    const inGrace = gApply(graceFixture("model_turn", graceBudget), fireTotal(1_000), graceBudget).state;
+    expect(inGrace.deadlines.graceUntil).toBe(1_500);
+    const expired = gApply(
+      inGrace,
+      { kind: "deadline_fired", at: 1_500, timer: "total_grace", reason: "total" },
+      graceBudget,
+    );
+    expect(expired.state.status).toBe(legacy.state.status);
+    expect(expired.state.phase).toBe(legacy.state.phase);
+    expect(expired.state.diag.timeoutReason).toBe("total");
+    expect(expired.state.diag.stopCause).toBe(legacy.state.diag.stopCause);
+    // Identical effect sequences except the total-class timer id (total ↔
+    // total_grace) and anything derived from its dueAt (the arm_timer audit
+    // dueAt is min(phaseDue, totalDue), so a clamped abort_grace arm differs
+    // too — RK-1: nothing consumes arm_timer.dueAt).
+    const normalize = (effects: readonly { effect: RunEffect }[], totalDue: number) =>
+      effects.map((e) => {
+        const f = e.effect;
+        if (f.kind === "clear_timer" && (f.timer === "total" || f.timer === "total_grace"))
+          return { kind: f.kind, timer: "total-class" };
+        if (f.kind === "arm_timer") {
+          const isTotalClass = f.timer === "total" || f.timer === "total_grace";
+          return {
+            kind: f.kind,
+            timer: isTotalClass ? "total-class" : f.timer,
+            dueAt: isTotalClass || f.dueAt === totalDue ? "<dueAt>" : f.dueAt,
+          };
+        }
+        return f;
+      });
+    expect(normalize(expired.effects, 1_500)).toEqual(normalize(legacy.effects, 1_000));
+  });
+
+  it("keeps total_grace (and never total) armed across phase transitions inside grace (RK-1 oracle)", () => {
+    let s = gApply(graceFixture("model_turn"), fireTotal(1_000)).state;
+    expect(s.armedTimers).toEqual(["idle", "total_grace"]);
+    s = gApply(s, {
+      kind: "session_event",
+      at: 1_100,
+      event: { t: "tool_start", toolCallId: "a", toolName: "bash" },
+    }).state;
+    expect(s.phase).toBe("tool_exec");
+    expect(s.armedTimers).toContain("total_grace");
+    expect(s.armedTimers).not.toContain("total");
+    s = gApply(s, {
+      kind: "session_event",
+      at: 1_200,
+      event: { t: "tool_end", toolCallId: "a", toolName: "bash", isError: false },
+    }).state;
+    expect(s.phase).toBe("model_turn");
+    expect(s.armedTimers).toContain("total_grace");
+    expect(s.armedTimers).not.toContain("total");
+    s = gApply(s, { kind: "phase_entered", at: 1_300, phase: "compaction" }).state;
+    expect(s.phase).toBe("compaction");
+    expect(s.armedTimers).toContain("total_grace");
+    expect(s.armedTimers).not.toContain("total");
+  });
+
+  it("rules a leftover total timer firing during grace illegal (RK-1 defense)", () => {
+    const inGrace = gApply(graceFixture("model_turn"), fireTotal(1_000)).state;
+    // Simulate the bug: a residual `total` survives in armedTimers during grace.
+    const poisoned: RunState = { ...inGrace, armedTimers: [...inGrace.armedTimers, "total"] };
+    const r = gApply(poisoned, fireTotal(1_200));
+    expect(r.effects).toEqual([]);
+    expect(r.state.diag.lastWarn).toBe("illegal:deadline_fired");
+    expect(r.state.diag.overtime?.graces).toBe(1); // no double grace
+    expect(r.state.deadlines.graceUntil).toBe(1_500);
+    expect(r.state.status).toBe(poisoned.status); // untouched (still running the phase)
+  });
+
+  it("stop_requested during grace settles aborted regardless of which timer fires first (RK-12c / V22)", () => {
+    for (const first of ["total_grace", "abort_grace"] as const) {
+      let s = gApply(graceFixture("model_turn"), fireTotal(1_000)).state; // grace until 1500
+      s = gApply(s, { kind: "stop_requested", at: 1_100, cause: "user_stop" }).state;
+      expect(s.phase).toBe("abort_grace");
+      // Both timers stay armed: abort_grace (1100 + abortGraceMs) and
+      // total_grace (1500) — whichever comes first kills, terminal is always aborted.
+      expect(s.armedTimers).toContain("abort_grace");
+      expect(s.armedTimers).toContain("total_grace");
+      const order =
+        first === "total_grace" ? (["total_grace", "abort_grace"] as const) : (["abort_grace", "total_grace"] as const);
+      for (const timer of order) s = gApply(s, { kind: "deadline_fired", at: 1_200, timer, reason: "total" }).state;
+      expect(s.status).toBe("aborted");
+      expect(s.diag.stopCause).toBe("user_stop");
+    }
+  });
+
+  it("deadline_extended never touches the phase clocks or frozen deadline fields (P13 directed)", () => {
+    let s = graceFixture("model_turn");
+    s = gApply(s, { kind: "session_event", at: 100, event: { t: "text_delta", delta: "x" } }).state; // sets lastEventAt
+    const before = s;
+    const r = gApply(s, {
+      kind: "deadline_extended",
+      at: 200,
+      extendMs: 300,
+      source: "tool",
+      reason: "need more time",
+    });
+    s = r.state;
+    expect(s.deadlines.deadlineAt).toBe(1_300); // base = max(200, 1000)
+    expect(s.diag.deadlineAt).toBe(1_300); // mirror
+    expect(s.diag.phaseEnteredAt).toBe(before.diag.phaseEnteredAt);
+    expect(s.diag.lastEventAt).toBe(before.diag.lastEventAt);
+    expect(s.deadlines.enqueuedAt).toBe(before.deadlines.enqueuedAt);
+    expect(s.deadlines.hardDeadlineAt).toBe(before.deadlines.hardDeadlineAt);
+    expect(s.diag.overtime).toMatchObject({
+      extensions: 1,
+      grantedMs: 300,
+      lastReason: "need more time",
+      lastSource: "tool",
+    });
+    expect(r.effects.map((e) => e.effect.kind)).toEqual([
+      "clear_timer",
+      "clear_timer",
+      "arm_timer",
+      "arm_timer",
+      "notify_deadline",
+    ]);
+    const notice = r.effects.find((e) => e.effect.kind === "notify_deadline")?.effect;
+    expect(notice).toMatchObject({
+      kind: "notify_deadline",
+      notice: {
+        kind: "extended",
+        requestedMs: 300,
+        grantedMs: 300,
+        source: "tool",
+        extensionsUsed: 1,
+        deadlineAt: 1_300,
+        hardDeadlineAt: 2_000,
+      },
+    });
+  });
+
+  it("truncates an over-long extension reason to 200 chars", () => {
+    const r = gApply(graceFixture("model_turn"), {
+      kind: "deadline_extended",
+      at: 200,
+      extendMs: 300,
+      source: "tool",
+      reason: "x".repeat(500),
+    });
+    expect(r.state.diag.overtime?.lastReason).toHaveLength(200);
+  });
+
+  it("extension during grace clears graceUntil, rearms total and counts the rescue", () => {
+    let s = gApply(graceFixture("model_turn"), fireTotal(1_000)).state;
+    expect(s.deadlines.graceUntil).toBe(1_500);
+    const r = gApply(s, { kind: "deadline_extended", at: 1_200, extendMs: 400, source: "tool" });
+    // base = max(now=1200, prev=1000): measured from NOW, not the expired deadline.
+    expect(r.state.deadlines.deadlineAt).toBe(1_600);
+    expect(r.state.deadlines.graceUntil).toBeUndefined();
+    expect(r.state.diag.overtime?.grace).toBeUndefined();
+    expect(r.state.diag.overtime?.graces).toBe(1);
+    expect(r.state.diag.overtime?.extensions).toBe(1);
+    expect(r.state.diag.overtime?.grantedMs).toBe(400);
+    expect(r.state.armedTimers).toContain("total");
+    expect(r.state.armedTimers).not.toContain("total_grace");
+  });
+
+  it("rules a zero-gain extension illegal once the ceiling is reached (budget not consumed)", () => {
+    let s = graceFixture("model_turn");
+    s = gApply(s, { kind: "deadline_extended", at: 500, extendMs: 1_500, source: "tool" }).state;
+    expect(s.deadlines.deadlineAt).toBe(2_000); // clamped to the ceiling
+    const r = gApply(s, { kind: "deadline_extended", at: 600, extendMs: 100, source: "tool" });
+    expect(r.effects).toEqual([]);
+    expect(r.state.diag.lastWarn).toBe("illegal:deadline_extended");
+    expect(r.state.diag.overtime?.extensions).toBe(1);
+    expect(r.state.deadlines.deadlineAt).toBe(2_000);
+  });
+
+  it("N=3 worst-case sequence produces exactly 3 grace + 3 extended notices, then kills (BL-3)", () => {
+    let s = graceFixture("model_turn");
+    const notices: string[] = [];
+    const step = (r: ReturnType<typeof reduce>): RunState => {
+      for (const e of r.effects) if (e.effect.kind === "notify_deadline") notices.push(e.effect.notice.kind);
+      return r.state;
+    };
+    // grace #1 at 1000 (until 1500) → rescue +400 → deadline 1400
+    s = step(gApply(s, fireTotal(1_000)));
+    s = step(gApply(s, { kind: "deadline_extended", at: 1_000, extendMs: 400, source: "tool" }));
+    expect(s.deadlines.deadlineAt).toBe(1_400);
+    // grace #2 at 1400 (until min(1900, 2000)) → rescue +400 → deadline 1800
+    s = step(gApply(s, fireTotal(1_400)));
+    s = step(gApply(s, { kind: "deadline_extended", at: 1_400, extendMs: 400, source: "tool" }));
+    expect(s.deadlines.deadlineAt).toBe(1_800);
+    // grace #3 at 1800 (until 2000) → rescue clamped: +400 → 2000 (granted 200)
+    s = step(gApply(s, fireTotal(1_800)));
+    s = step(gApply(s, { kind: "deadline_extended", at: 1_800, extendMs: 400, source: "tool" }));
+    expect(s.deadlines.deadlineAt).toBe(2_000);
+    expect(s.diag.overtime?.extensions).toBe(3);
+    // 4th arrival at the ceiling: no budget and no headroom left → killed, no notice.
+    const final = gApply(s, fireTotal(2_000));
+    expect(final.state.status).toBe("stopping");
+    expect(final.state.phase).toBe("abort_grace");
+    expect(final.effects.some((e) => e.effect.kind === "notify_deadline")).toBe(false);
+    expect(notices).toEqual(["grace", "extended", "grace", "extended", "grace", "extended"]);
   });
 });

@@ -1,4 +1,10 @@
-import { remainingFor, withDeadline, SET_MODEL_TIMEOUT_MS } from "../core/deadline.js";
+import {
+  effectiveDeadlineAt,
+  extendability,
+  remainingFor,
+  withDeadline,
+  SET_MODEL_TIMEOUT_MS,
+} from "../core/deadline.js";
 import type { Clock } from "../core/clock.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
 import { isTerminalStatus } from "../core/status.js";
@@ -235,13 +241,53 @@ export class RuntimeRunner implements Runner {
     return generation === undefined || s?.generation === generation ? s : undefined;
   }
   /**
-   * P0 存根（timeout-notify）：Pkg A 填充真正实现。同步、零 await（D-9）。
+   * timeout-notify (arch §4.6 / D-9): extend a running run's soft deadline.
+   * Fully synchronous — check → dispatch → read-back with zero `await` in
+   * between, so there is no TOCTOU window against the watchdog tick on the
+   * single JS event loop. The reducer re-validates (defense in depth) and is
+   * the one that actually moves deadlineAt; we only translate the outcome.
    */
   extendDeadline(runId: string, extendMs: number, opts: { source: ExtendSource; reason?: string }): ExtendOutcome {
-    void runId;
-    void extendMs;
-    void opts;
-    return { ok: false, reason: "unsupported" };
+    const state = this.states.get(runId);
+    if (!state) return { ok: false, reason: "unknown_run" };
+    const entry = this.dispatchers.get(runId);
+    // Dispatcher gone (run hit its finally) or generation superseded ⇒ the run
+    // is finished even if a terminal snapshot still lingers in this.states.
+    if (!entry || entry.gen !== state.generation) return { ok: false, reason: "already_terminal" };
+    const now = this.d.clock.now();
+    const verdict = extendability(state, entry.budget, now);
+    if (!verdict.ok) return { ok: false, reason: verdict.reason };
+    const prev = state.deadlines.deadlineAt!; // extendability ok ⇒ defined
+    const hard = state.deadlines.hardDeadlineAt!;
+    const wasInGrace = state.deadlines.graceUntil !== undefined;
+    entry.fn({
+      kind: "deadline_extended",
+      at: now,
+      extendMs,
+      source: opts.source,
+      ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+    });
+    const after = this.states.get(runId);
+    const next = after?.deadlines.deadlineAt;
+    // The reducer refused (e.g. zero net gain inside the grace window) even
+    // though the pre-check passed — surface it as no_headroom.
+    if (next === undefined || next === prev) return { ok: false, reason: "no_headroom" };
+    const requestedMs = Math.max(0, extendMs);
+    const grantedMs = next - Math.max(now, prev);
+    const extensionsUsed = after?.diag.overtime?.extensions ?? 0;
+    return {
+      ok: true,
+      runId,
+      previousDeadlineAt: prev,
+      deadlineAt: next,
+      requestedMs,
+      grantedMs,
+      clamped: grantedMs < requestedMs,
+      extensionsUsed,
+      extensionsRemaining: entry.budget.maxExtensions - extensionsUsed,
+      hardDeadlineAt: after?.deadlines.hardDeadlineAt ?? hard,
+      rescuedFromGrace: wasInGrace,
+    };
   }
   /** Feed a failed effect back into the state machine (5.6.1 R9 compensation / persist retry loop). */
   notifyEffectFailed(runId: string, generation: number, effect: RunEffect["kind"], err: Error): void {
@@ -325,6 +371,14 @@ export class RuntimeRunner implements Runner {
     const state = this.states.get(runId);
     if (!state || state.generation !== generation || isTerminalStatus(state.status)) return;
     this.dispatchExternal(runId, generation, input);
+    // timeout-notify (arch §3.5, review-critical): re-read the state AFTER the
+    // dispatch. If the run just entered a timeout grace window it is still
+    // running normally — cancelling here would kill it at the exact moment the
+    // grace was granted, silently nullifying the whole feature. Only a run that
+    // actually transitioned to stopping (or terminal) gets its prompt guard
+    // cancelled.
+    const after = this.states.get(runId);
+    if (!after || (after.status !== "stopping" && !isTerminalStatus(after.status))) return;
     const entry = this.activeCancels.get(runId);
     if (entry && entry.gen === generation) entry.cancel.cancel("timeout");
   }
@@ -464,8 +518,17 @@ export class RuntimeRunner implements Runner {
       // extension_bind，watchdog 接线后会以 bindMs 误报 "extension_bind" 超时。
       // 迁入后由 firstEventMs 约束，语义为 no_first_event。
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "prompt_dispatch" });
-      const promptBudget = remainingFor(budget.totalMs, this.d.clock.now(), state.deadlines);
-      const prompted = await this.guard(handle.prompt(req.prompt), promptBudget.ms, cancel, "prompt");
+      // timeout-notify (arch §4.6 ③): the prompt guard must follow the *live*
+      // effective deadline (graceUntil ?? deadlineAt), not a millisecond count
+      // frozen at dispatch time — otherwise a deadline_extended would silently
+      // fail and the run would still die at the old instant. queue/create/bind
+      // guards above stay one-shot: those phases never grace nor extend (D-14).
+      const prompted = await this.guardUntil(
+        handle.prompt(req.prompt),
+        () => effectiveDeadlineAt(state.deadlines),
+        cancel,
+        "prompt",
+      );
       const finalText = prompted.ok ? handle.getLastAssistantText() : undefined;
       // pi resolves prompt() even when the final turn errored (stopReason
       // "error" surfaces only on the message). Without this, a provider
@@ -553,6 +616,61 @@ export class RuntimeRunner implements Runner {
           reject(e instanceof Error ? e : new Error(String(e)));
         },
       );
+    });
+  }
+  /**
+   * timeout-notify (arch §4.6 ③): deadline-following guard. When the timer
+   * fires it does NOT immediately conclude timeout — it re-reads deadlineOf():
+   *   - undefined → do not re-arm (defense only: D-11 forbids totalMs ≤ 0 at
+   *     the config layer, so the normal path always has a deadline; this branch
+   *     exists so directly-constructed RunDeadlines never cause setTimer(0)
+   *     fake timeouts),
+   *   - due > now → re-arm for due - now (the deadline was extended),
+   *   - due <= now → genuine timeout.
+   * Rearming reuses the same Clock port and finish() clears the pending timer,
+   * so no long-lived timer is added (pi -p print mode unaffected, R-12).
+   */
+  private async guardUntil<T>(
+    p: Promise<T>,
+    deadlineOf: () => Millis | undefined,
+    cancel: CancelHandle,
+    label: string,
+  ): Promise<{ ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }> {
+    let timer: ReturnType<Clock["setTimer"]> | undefined;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (r: { ok: true; value: T } | { ok: false; reason: "timeout" | "cancelled" }) => {
+        if (done) return;
+        done = true;
+        if (timer) {
+          this.d.clock.clearTimer(timer);
+          timer = undefined;
+        }
+        cancel.signal.removeEventListener("abort", onAbort);
+        resolve(r);
+      };
+      const onAbort = () => finish({ ok: false, reason: "cancelled" });
+      const arm = () => {
+        const due = deadlineOf();
+        if (due === undefined) return; // defense branch (D-11) — never setTimer(0)
+        const delay = due - this.d.clock.now();
+        if (delay <= 0) {
+          finish({ ok: false, reason: "timeout" });
+          return;
+        }
+        timer = this.d.clock.setTimer(delay, onTimer);
+      };
+      const onTimer = () => {
+        timer = undefined;
+        arm();
+      };
+      if (cancel.signal.aborted) return onAbort();
+      arm();
+      cancel.signal.addEventListener("abort", onAbort, { once: true });
+      p.then(
+        (value) => finish({ ok: true, value }),
+        () => finish({ ok: false, reason: "cancelled" }),
+      ).catch(() => undefined);
     });
   }
   private async guard<T>(
