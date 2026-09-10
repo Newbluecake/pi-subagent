@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createStatusCommand, renderRunDetail, renderStatus } from "../../src/commands/status.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
@@ -214,6 +214,90 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
   });
 });
 
+describe("renderRunDetail deadline & overtime rows (timeout grace & extension)", () => {
+  const NOW = 1_800_000_000_000;
+
+  function withFrozenNow<T>(fn: () => T): T {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(NOW);
+      return fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("renders the deadline row (relative remaining, grace left, ceiling) and the overtime row", () => {
+    withFrozenNow(() => {
+      const run = snapshot({
+        status: "running",
+        phase: "model_turn",
+        deadlines: {
+          enqueuedAt: 0,
+          deadlineAt: NOW + 252_000, // in 4m12s
+          queueDeadlineAt: undefined,
+          graceUntil: NOW + 58_000,
+          hardDeadlineAt: NOW + 1_800_000, // ceiling +30m00s
+        },
+        diag: {
+          ...snapshot().diag,
+          phase: "model_turn",
+          overtime: {
+            graces: 1,
+            grace: { startedAt: NOW - 32_000, until: NOW + 58_000 },
+            extensions: 1,
+            grantedMs: 600_000,
+            lastReason: "需要跑完全量测试",
+          },
+        },
+      });
+      const text = renderRunDetail(deps([run]).query as never, "r1");
+      expect(text).toContain("Deadline:");
+      expect(text).toContain(new Date(NOW + 252_000).toISOString());
+      expect(text).toContain("(in 4m12s)");
+      expect(text).toContain("[grace: 58s left]");
+      expect(text).toContain("ceiling +30m00s");
+      expect(text).toContain('Overtime: graces=1 extensions=1 granted=10m00s reason="需要跑完全量测试"');
+    });
+  });
+
+  it("omits both rows when the run has no deadline and no overtime", () => {
+    const text = renderRunDetail(deps([snapshot()]).query as never, "r1");
+    expect(text).not.toContain("Deadline:");
+    expect(text).not.toContain("Overtime:");
+  });
+
+  it("renders only the present segments; the ceiling falls back to the diag.hardDeadlineAt mirror (BL-5)", () => {
+    withFrozenNow(() => {
+      const run = snapshot({
+        // Terminal snapshot rebuilt by spawn-service: deadlines carries no hardDeadlineAt,
+        // the diag mirror does.
+        deadlines: { enqueuedAt: 0, deadlineAt: NOW - 60_000, queueDeadlineAt: undefined },
+        diag: { ...snapshot().diag, hardDeadlineAt: NOW + 60_000 },
+      });
+      const text = renderRunDetail(deps([run]).query as never, "r1");
+      expect(text).toContain("Deadline:");
+      expect(text).toContain("(1m00s ago)");
+      expect(text).not.toContain("[grace:");
+      expect(text).toContain("ceiling +1m00s");
+      expect(text).not.toContain("Overtime:");
+    });
+  });
+
+  it("renders the overtime row without a reason when none was given", () => {
+    const run = snapshot({
+      diag: {
+        ...snapshot().diag,
+        overtime: { graces: 2, extensions: 1, grantedMs: 90_000 },
+      },
+    });
+    const text = renderRunDetail(deps([run]).query as never, "r1");
+    expect(text).toContain("Overtime: graces=2 extensions=1 granted=1m30s");
+    expect(text).not.toContain("reason=");
+    expect(text).not.toContain("Deadline:");
+  });
+});
+
 describe("M7 renderCosts", () => {
   it("lists runs cost-descending with status marks and a grand total", async () => {
     const { renderCosts } = await import("../../src/commands/status.js");
@@ -292,6 +376,13 @@ describe("/agent settings subcommand", () => {
     // workflow.budget.* is now editable and shows its effective default
     expect(out).toContain("workflow.budget.gateS");
     expect(out).toContain("Durations are seconds");
+  });
+
+  it("budget usage text no longer advertises totalS: 0 as 'no overall cap' (D-11: 0 falls back to the default)", () => {
+    const { d } = settingsDeps();
+    const out = run(d, "budget list");
+    expect(out).toContain("0 disables a phase timeout");
+    expect(out).not.toContain("0 = no overall cap");
   });
 
   it("18: exposes both coalescing settings through the whitelist and validates values", () => {

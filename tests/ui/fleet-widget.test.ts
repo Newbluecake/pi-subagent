@@ -264,6 +264,99 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
     expect(buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]).toContain("⇣后台");
   });
 
+  describe("deadline field (timeout grace & extension)", () => {
+    const liveDiag = (overrides: Partial<RunDiagnostics> = {}): RunDiagnostics =>
+      diag({ createdAt: 9_000, phaseEnteredAt: 9_000, lastEventAt: 9_900, ...overrides });
+
+    it("renders ⏳<remaining> right after the phase for a run with a deadline", () => {
+      const run = snapshot({
+        deadlines: { enqueuedAt: 0, deadlineAt: NOW + 65_000, queueDeadlineAt: undefined },
+        diag: liveDiag(),
+      });
+      const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).toContain("⏳1m05s");
+      // Sits with the phase (health info), before the resource stats.
+      expect(line.indexOf("⏳1m05s")).toBeGreaterThan(line.indexOf("🤔 1s"));
+    });
+
+    it("appends +N when extensions were granted", () => {
+      const run = snapshot({
+        deadlines: { enqueuedAt: 0, deadlineAt: NOW + 65_000, queueDeadlineAt: undefined },
+        diag: liveDiag({ overtime: { graces: 1, extensions: 2, grantedMs: 1_200_000 } }),
+      });
+      const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).toContain("⏳1m05s+2");
+    });
+
+    it("renders ⏳宽限<remaining> while inside the grace window", () => {
+      const run = snapshot({
+        deadlines: { enqueuedAt: 0, deadlineAt: 5_000, queueDeadlineAt: undefined, graceUntil: NOW + 58_000 },
+        diag: liveDiag(),
+      });
+      const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).toContain("⏳宽限58s");
+    });
+
+    it("no deadline (and terminal rows) render no deadline field", () => {
+      const run = snapshot({ diag: liveDiag() });
+      const line = buildFleetWidgetLines(buildFleetViewModel([run], OPTS), { width: 120 })![1]!;
+      expect(line).not.toContain("⏳");
+    });
+
+    it("drops fields by priority: deadline goes LAST (after Σ total)", () => {
+      const run = snapshot({
+        deadlines: { enqueuedAt: 0, deadlineAt: NOW + 65_000, queueDeadlineAt: undefined },
+        diag: liveDiag({
+          label: "任务标签",
+          agentType: "architect",
+          model: { provider: "droid-completion", id: "long-model-name" },
+          contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
+          usage: usage(1.05),
+          autoBackgroundedAt: 9_000,
+        }),
+      });
+      const model = buildFleetViewModel([run], OPTS);
+      const at = (width: number) => buildFleetWidgetLines(model, { width })![1]!;
+      expect(at(120)).toContain("⏳1m05s");
+      const widths = [120, 80, 60, 50, 40, 30, 26, 24, 20];
+      // Whenever Σ survived, the deadline must still be there (it drops later).
+      for (const w of widths) {
+        const line = at(w);
+        if (line.includes("Σ")) expect(line).toContain("⏳1m05s");
+        expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+      }
+      // …and there is a width where Σ is already gone but the deadline remains.
+      expect(widths.some((w) => !at(w).includes("Σ") && at(w).includes("⏳1m05s"))).toBe(true);
+      // Non-grace deadline IS eventually droppable; label and phase never are.
+      expect(at(20)).not.toContain("⏳");
+      expect(at(20)).toContain("任务标签");
+      expect(at(20)).toMatch(/🤔 1s/);
+    });
+
+    it("inGrace: the deadline field is NEVER dropped — the label truncates first", () => {
+      const run = snapshot({
+        deadlines: { enqueuedAt: 0, deadlineAt: 5_000, queueDeadlineAt: undefined, graceUntil: NOW + 58_000 },
+        diag: liveDiag({
+          label: "这是一个非常非常长的任务标签名",
+          agentType: "architect",
+          model: { provider: "droid-completion", id: "long-model-name" },
+          contextUsage: { tokens: 32_000, contextWindow: 262_144, percent: 12.3 },
+          usage: usage(1.05),
+          autoBackgroundedAt: 9_000,
+        }),
+      });
+      const model = buildFleetViewModel([run], OPTS);
+      const at = (width: number) => buildFleetWidgetLines(model, { width })![1]!;
+      for (const w of [120, 80, 60, 40, 30, 20]) {
+        const line = at(w);
+        expect(line).toContain("⏳宽限58s");
+        expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+      }
+      // At the narrowest width the label gave way, not the grace countdown.
+      expect(at(20)).not.toContain("这是一个非常非常长的任务标签名");
+    });
+  });
+
   it("tool trail: own continuation line; prefers diag.toolHistory trail; falls back to ▸currentTool", () => {
     const withHistory = snapshot({
       diag: diag({

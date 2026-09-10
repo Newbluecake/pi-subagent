@@ -88,6 +88,12 @@ export interface FleetRow {
   settledAgoMs: Millis | undefined;
   /** Settlement timestamp, used to calculate receipt-based linger. */
   settledAt: Millis | undefined;
+  /** Distance to the effective deadline (graceUntil while in grace, else deadlineAt); undefined for terminal runs. */
+  remainingMs: Millis | undefined;
+  /** Run has passed its total budget and is inside the grace window (graceUntil set, non-terminal). */
+  inGrace: boolean;
+  /** Approved deadline extensions so far (0 = never extended). */
+  extensions: number;
   highlight: FleetHighlight;
 }
 
@@ -104,6 +110,8 @@ export interface FleetViewOptions {
   now: Millis;
   /** Idle budget (settings.budget.idleMs): an active run idling past HALF of it is warn-highlighted. */
   idleBudgetMs?: Millis;
+  /** Deadline early warning (settings.fleetDeadlineWarnMs): an active run within this of its effective deadline is warn-highlighted. 0/undefined disables the layer. */
+  deadlineWarnMs?: Millis;
   /** Cap on active rows shown (overflow is reported as "+N more"). Default 12. */
   maxActiveRows?: number;
   /** How many recently-finished runs to list below the active ones (dimmed). Default 3. */
@@ -183,14 +191,30 @@ export function idleOf(snapshot: RunSnapshot, now: Millis): Millis {
  * Highlight rules (the anti-"stuck and invisible" core of the panel):
  *  - terminal runs are never highlighted (they're history, shown dimmed);
  *  - "stopping" is crit (red): an escalation is in flight, the run may be hanging on teardown;
+ *  - inside the grace window (deadlines.graceUntil set) is crit: the run is past its total budget
+ *    and dies within seconds unless extended — the loudest signal there is;
  *  - past the total deadline (deadlines.deadlineAt) is crit: the watchdog should have fired already;
- *  - idle past HALF the idle budget is warn (yellow): the run is suspiciously quiet but not yet doomed.
+ *  - idle past HALF the idle budget is warn (yellow): the run is suspiciously quiet but not yet doomed;
+ *  - within deadlineWarnMs of the effective deadline (graceUntil ?? deadlineAt) is warn: the
+ *    timeout is about to happen — no longer a surprise (0/undefined disables this layer).
  */
-export function highlightOf(snapshot: RunSnapshot, opts: { now: Millis; idleBudgetMs?: Millis }): FleetHighlight {
+export function highlightOf(
+  snapshot: RunSnapshot,
+  opts: { now: Millis; idleBudgetMs?: Millis; deadlineWarnMs?: Millis },
+): FleetHighlight {
   if (isTerminalStatus(snapshot.status)) return "none";
   if (snapshot.status === "stopping") return "crit";
+  if (snapshot.deadlines.graceUntil !== undefined) return "crit";
   if (snapshot.deadlines.deadlineAt !== undefined && opts.now > snapshot.deadlines.deadlineAt) return "crit";
   if (opts.idleBudgetMs !== undefined && idleOf(snapshot, opts.now) * 2 > opts.idleBudgetMs) return "warn";
+  const eff = snapshot.deadlines.graceUntil ?? snapshot.deadlines.deadlineAt;
+  if (
+    opts.deadlineWarnMs !== undefined &&
+    opts.deadlineWarnMs > 0 &&
+    eff !== undefined &&
+    eff - opts.now <= opts.deadlineWarnMs
+  )
+    return "warn";
   return "none";
 }
 
@@ -332,6 +356,8 @@ function sumUsage(items: readonly (UsageDelta | undefined)[]): UsageDelta | unde
 function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
   const esc = escalationSummary(snapshot.diag);
   const terminal = isTerminalStatus(snapshot.status);
+  // Effective deadline: the grace window replaces the soft deadline while it lasts.
+  const eff = snapshot.deadlines.graceUntil ?? snapshot.deadlines.deadlineAt;
   return {
     runId: snapshot.runId,
     shortRunId: snapshot.runId.slice(0, 8),
@@ -372,6 +398,9 @@ function toRow(snapshot: RunSnapshot, opts: FleetViewOptions): FleetRow {
     terminal,
     settledAgoMs: terminal ? Math.max(0, opts.now - snapshot.updatedAt) : undefined,
     settledAt: terminal ? snapshot.updatedAt : undefined,
+    remainingMs: terminal || eff === undefined ? undefined : Math.max(0, eff - opts.now),
+    inGrace: !terminal && snapshot.deadlines.graceUntil !== undefined,
+    extensions: snapshot.diag.overtime?.extensions ?? 0,
     highlight: highlightOf(snapshot, opts),
   };
 }

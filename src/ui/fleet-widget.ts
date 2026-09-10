@@ -145,7 +145,7 @@ export interface WorkflowGroupInput {
 }
 
 /** M-C: one run's main tree-row line. M10: segment-colored when a colorizer is
- *  provided — label plain (the eye-catcher), type/model/phase/phase-age/Σ-total/cost
+ *  provided — label plain (the eye-catcher), type/model/phase/phase-age/deadline/Σ-total/cost
  *  muted — so rows have visual depth instead of a uniform white line.
  *  warn/crit rows pass the identity colorizer here and get whole-line tone
  *  coloring from the caller instead (nesting SGR sequences would reset the
@@ -170,6 +170,14 @@ export function compactPhaseLabel(label: string): string {
   return emoji;
 }
 
+/** The run's distance to its effective deadline: `⏳12m` (with `+N` when
+ *  extensions were granted), `⏳宽限58s` while inside the grace window. */
+function deadlineField(row: FleetRow): string {
+  const t = formatDuration(row.remainingMs!);
+  const ext = row.extensions > 0 ? `+${row.extensions}` : "";
+  return row.inGrace ? `⏳宽限${t}` : `⏳${t}${ext}`;
+}
+
 function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t, s) => s): string {
   const modelFull = row.model;
   const modelBase = modelFull?.slice(modelFull.lastIndexOf("/") + 1);
@@ -179,6 +187,9 @@ function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t,
     { name: "type", value: row.type ?? "·" },
     ...(modelFull ? [{ name: "model", value: modelFull }] : []),
     { name: "phase", value: fixed },
+    // deadline sits with phase ("is this run healthy?"), ahead of the resource
+    // stats (context/cost/total).
+    ...(row.remainingMs === undefined ? [] : [{ name: "deadline", value: deadlineField(row) }]),
     { name: "context", value: row.contextUsage ? formatContextUsage(row.contextUsage) : "" },
     ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd) }] : []),
     { name: "total", value: `Σ${formatDuration(row.elapsedMs)}` },
@@ -204,6 +215,10 @@ function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t,
     if (!fits()) drop("cost");
     if (!fits()) drop("background");
     if (!fits()) drop("total");
+    // deadline is the LAST droppable field ("how long is left" beats "how long
+    // it has run" at narrow widths), and while in grace it is NEVER dropped —
+    // that is a sub-90s must-see signal; truncate the label instead.
+    if (!fits() && !row.inGrace) drop("deadline");
   }
   // compose("") already contains the label↔fields separator (its leading
   // empty element contributes exactly one space), so no extra column reserve.
@@ -553,6 +568,8 @@ export interface FleetWidgetDeps {
   refreshMs?: Millis;
   /** settings.budget.idleMs — same half-idle warn semantics as the panel. */
   idleBudgetMs?: Millis;
+  /** settings.fleetDeadlineWarnMs — runs within this of their deadline turn warn. 0/undefined disables. */
+  deadlineWarnMs?: Millis;
   /** Line budget for run lines below the header. Default WIDGET_DEFAULT_ROWS (6); hard cap WIDGET_MAX_ROWS (8). */
   maxRows?: number;
   /** M9: in-flight workflow snapshots (WorkflowActivityRegistry.list) for ⚙ group headers. */
@@ -663,6 +680,7 @@ export class FleetWidgetController {
       recentTerminal: 3, // M6: feed just-finished runs so the builder can linger them briefly
       maxActiveRows: Math.min(WIDGET_MAX_ROWS, Math.max(1, this.deps.maxRows ?? WIDGET_DEFAULT_ROWS)),
       ...(this.deps.idleBudgetMs !== undefined ? { idleBudgetMs: this.deps.idleBudgetMs } : {}),
+      ...(this.deps.deadlineWarnMs !== undefined ? { deadlineWarnMs: this.deps.deadlineWarnMs } : {}),
       ...(this.deps.typeOf ? { typeOf: this.deps.typeOf } : {}),
       ...(this.deps.receiptOf
         ? {

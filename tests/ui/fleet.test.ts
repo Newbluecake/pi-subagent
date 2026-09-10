@@ -114,6 +114,42 @@ describe("view-model: highlightOf boundary rules", () => {
     const s = snapshot({ diag: diag({ lastEventAt: 0 }) });
     expect(highlightOf(s, { now: 10_000 })).toBe("none");
   });
+
+  it("inside the grace window is crit (past its total budget, dies within seconds unless extended)", () => {
+    const s = snapshot({
+      deadlines: { enqueuedAt: 0, deadlineAt: 5_000, queueDeadlineAt: undefined, graceUntil: 60_000 },
+      diag: diag({ lastEventAt: 10_000 }), // fresh: no idle-warn to confuse the signal
+    });
+    expect(highlightOf(s, { now: 10_000 })).toBe("crit");
+  });
+
+  it("deadlineWarnMs: exactly at the threshold is warn; 1ms more headroom is not", () => {
+    // eff - now = 70_000 - 10_000 = 60_000
+    const s = snapshot({
+      deadlines: { enqueuedAt: 0, deadlineAt: 70_000, queueDeadlineAt: undefined },
+      diag: diag({ lastEventAt: 10_000 }),
+    });
+    expect(highlightOf(s, { now: 10_000, deadlineWarnMs: 60_000 })).toBe("warn");
+    expect(highlightOf(s, { now: 10_000, deadlineWarnMs: 59_999 })).toBe("none");
+  });
+
+  it("deadlineWarnMs measures the EFFECTIVE deadline (graceUntil wins over deadlineAt)", () => {
+    const s = snapshot({
+      deadlines: { enqueuedAt: 0, deadlineAt: 70_000, queueDeadlineAt: undefined, graceUntil: 40_000 },
+      diag: diag({ lastEventAt: 10_000 }),
+    });
+    // graceUntil is set ⇒ crit (grace layer), not the deadline-warn layer.
+    expect(highlightOf(s, { now: 10_000, deadlineWarnMs: 60_000 })).toBe("crit");
+  });
+
+  it("deadlineWarnMs 0 or absent disables the deadline-warn layer", () => {
+    const s = snapshot({
+      deadlines: { enqueuedAt: 0, deadlineAt: 10_001, queueDeadlineAt: undefined },
+      diag: diag({ lastEventAt: 10_000 }),
+    });
+    expect(highlightOf(s, { now: 10_000, deadlineWarnMs: 0 })).toBe("none");
+    expect(highlightOf(s, { now: 10_000 })).toBe("none");
+  });
 });
 
 describe("view-model: animated thinking label (emoji frame cycle)", () => {
@@ -226,6 +262,57 @@ describe("view-model: buildFleetViewModel", () => {
     expect(row.type).toBe("worker");
     expect(row.elapsedMs).toBe(1_000);
     expect(row.idleMs).toBe(100);
+  });
+
+  it("toRow carries remainingMs / inGrace / extensions (graceUntil wins; terminal rows freeze)", () => {
+    const plain = snapshot({
+      runId: "plain-000",
+      deadlines: { enqueuedAt: 0, deadlineAt: 70_000, queueDeadlineAt: undefined },
+    });
+    const plainRow = buildFleetViewModel([plain], opts).rows[0]!;
+    expect(plainRow.remainingMs).toBe(60_000); // 70_000 - now(10_000)
+    expect(plainRow.inGrace).toBe(false);
+    expect(plainRow.extensions).toBe(0);
+
+    const grace = snapshot({
+      runId: "grace-000",
+      deadlines: { enqueuedAt: 0, deadlineAt: 9_000, queueDeadlineAt: undefined, graceUntil: 68_000 },
+    });
+    const graceRow = buildFleetViewModel([grace], opts).rows[0]!;
+    expect(graceRow.remainingMs).toBe(58_000); // graceUntil, not the (past) deadlineAt
+    expect(graceRow.inGrace).toBe(true);
+    expect(graceRow.highlight).toBe("crit");
+
+    const extended = snapshot({
+      runId: "ext-0000",
+      deadlines: { enqueuedAt: 0, deadlineAt: 70_000, queueDeadlineAt: undefined },
+      diag: diag({ overtime: { graces: 1, extensions: 2, grantedMs: 600_000 } }),
+    });
+    expect(buildFleetViewModel([extended], opts).rows[0]!.extensions).toBe(2);
+
+    // Terminal rows freeze: no countdown, no grace flag, even when the audit
+    // fields (graceUntil/overtime) remain on the snapshot.
+    const done = snapshot({
+      runId: "done-0000",
+      status: "completed",
+      phase: "settled",
+      deadlines: { enqueuedAt: 0, deadlineAt: 9_000, queueDeadlineAt: undefined, graceUntil: 68_000 },
+      diag: diag({ overtime: { graces: 1, extensions: 1, grantedMs: 60_000 } }),
+    });
+    const doneRow = buildFleetViewModel([done], { ...opts, recentTerminal: 1 }).rows[0]!;
+    expect(doneRow.remainingMs).toBeUndefined();
+    expect(doneRow.inGrace).toBe(false);
+    expect(doneRow.extensions).toBe(1);
+
+    // No deadline configured → no countdown.
+    const uncapped = buildFleetViewModel([snapshot({ runId: "uncapped" })], opts).rows[0]!;
+    expect(uncapped.remainingMs).toBeUndefined();
+  });
+
+  it("toRow clamps a past effective deadline to 0 (never negative)", () => {
+    // A past deadlineAt without grace is crit-but-still-listed until the watchdog lands.
+    const s = snapshot({ deadlines: { enqueuedAt: 0, deadlineAt: 9_000, queueDeadlineAt: undefined } });
+    expect(buildFleetViewModel([s], opts).rows[0]!.remainingMs).toBe(0);
   });
 
   it("sums usage across ALL runs (active + terminal) for the footer total", () => {

@@ -133,7 +133,7 @@ function renderSettings(store: SettingsStore, budgetOnly: boolean): string {
     return `  ${k.padEnd(width)}  ${formatSettingValue(currentOf(store.current, spec))}${mark}`;
   });
   const usage = budgetOnly
-    ? "`/agent budget` opens the interactive editor; `/agent budget set <key> <value>` / `reset <key>` (budget.* keys) stay scriptable. Durations are seconds. Applies to new runs immediately; in-flight runs keep the budget armed at their start. 0 disables a phase timeout (budget.totalS: 0 = no overall cap)."
+    ? "`/agent budget` opens the interactive editor; `/agent budget set <key> <value>` / `reset <key>` (budget.* keys) stay scriptable. Durations are seconds. Applies to new runs immediately; in-flight runs keep the budget armed at their start. 0 disables a phase timeout."
     : "`/agent settings` opens the interactive editor; `set <key> <value>` / `reset <key>` / `list` stay scriptable. Durations are seconds (keys end in `S`). budget.* applies to new runs immediately; every other key is persisted but takes effect after /reload. All changes persist to the settings file.";
   return [`Extension settings — ${store.path}:`, ...lines, "", usage].join("\n");
 }
@@ -247,6 +247,30 @@ export function renderRunDetail(
     if (counts) lines.push(`  Tools: ${counts}`);
   } else {
     lines.push("  Timeline: (no tool calls observed)");
+  }
+  // Timeout grace & extension: raw deadline facts (no emoji — this is the
+  // diagnostic surface). Each segment appears only when its field exists.
+  const now = Date.now();
+  const deadlineParts: string[] = [];
+  if (s.deadlines.deadlineAt !== undefined) {
+    const at = s.deadlines.deadlineAt;
+    deadlineParts.push(
+      `${new Date(at).toISOString()} (${at >= now ? `in ${formatDuration(at - now)}` : `${formatDuration(now - at)} ago`})`,
+    );
+  }
+  if (s.deadlines.graceUntil !== undefined)
+    deadlineParts.push(`[grace: ${formatDuration(Math.max(0, s.deadlines.graceUntil - now))} left]`);
+  // The ceiling mirrors to diag for terminal snapshots rebuilt by spawn-service (BL-5).
+  const hardDeadlineAt = s.deadlines.hardDeadlineAt ?? d.hardDeadlineAt;
+  if (hardDeadlineAt !== undefined)
+    deadlineParts.push(`ceiling ${hardDeadlineAt >= now ? "+" : "-"}${formatDuration(Math.abs(hardDeadlineAt - now))}`);
+  if (deadlineParts.length) lines.push(`  Deadline: ${deadlineParts.join("  ")}`);
+  if (d.overtime) {
+    const ot = d.overtime;
+    lines.push(
+      `  Overtime: graces=${ot.graces} extensions=${ot.extensions} granted=${formatDuration(ot.grantedMs)}` +
+        (ot.lastReason ? ` reason="${ot.lastReason}"` : ""),
+    );
   }
   if (d.usage) lines.push(`  Usage:${formatUsage(d.usage)}`);
   if (d.error) lines.push(`  Error: [${d.error.kind}] ${d.error.message.slice(0, 300)}`);
