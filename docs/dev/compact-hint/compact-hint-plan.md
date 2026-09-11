@@ -437,23 +437,28 @@ pi 撞墙线（contextWindow − reserveTokens）        → 兜底不变
 footer 只有用户可见，`set_compact_threshold()` 无参查询虽返回当前用量但需要模型"想起去查"
 （不知道自己不知道）。模型因此无法做"阶段刚完成、用量已 60%，主动压一波再开新阶段"的规划决策。
 
-### 12.1 语义
+### 12.1 语义（v3.4 修订：取消 30% 地板，全区间逐阶梯通报，用户拍板）
 
 ```
-percent < 30（USAGE_TICK_FLOOR_PERCENT）        → 不通报（早期用量无信息量）
+percent < step（首个阶梯以下）                  → 不通报
 percent 跨过 step 网格（usageTickStepPercent，默认 10）→ 一行通报，不催促
-percent ≥ L1 阈值 / L2 强制线                    → L1/L2 机制接管，tick 止步
+percent ≥ L1 阈值但 < L2 强制线                  → L1 警告照发一次；tick 继续逐阶梯通报
+                                                  （文案改为“已超过提醒阈值 Y%”）
+percent ≥ L2 强制线                              → L2 强制压缩接管，tick 止步
 ```
 
 - 通报文案（`buildUsageTickText`，customType `subagent:usage-tick`，display:false + triggerTurn:false，
-  与 L1 同通道）：
-  `[pi-subagent 上下文通报] 上下文已使用约 X%。达到 Y% 时会再提醒你考虑 compact_context；现在无需操作。`
+  与 L1 同通道）：低于 L1 阈值时
+  `[pi-subagent 上下文通报] 上下文已使用约 X%。达到 Y% 时会再提醒你考虑 compact_context；现在无需操作。`；
+  已达/超过 L1 阈值时改为 `已超过提醒阈值 Y%；如果你正在收尾一个子任务，请尽快调用 compact_context。`
 - **闩锁**：`CompactHintState.lastTickStep` 记录已通报的最高阶梯，同阶梯不重复。
 - **滞回复位**：percent 回落至 `lastTickStep − 5`（USAGE_TICK_HYSTERESIS_PERCENT）以下才重新武装——
   区分真实压缩（掉几十个点）与边界抖动（±1–2 点），后者绝不重报。
-- **天花板**：`ceiling = effective(L1) || effectiveForce || 100`；threshold=0（L1 关闭）时 tick 可在
+- **天花板**：`ceiling = effectiveForce || 100`（v3.4：原为 L1 阈值）；threshold=0（L1 关闭）时 tick 可在
   force 线以下继续工作（纯通报模式）；三者全 0 时 hook 整体短路（原早退条件扩展）。
 - 发送失败不落闩锁，下个 turn_end 重试（与 L1 一致）。
+- **同 turn 去重**：某一 turn 同时满足“新 tick 阶梯”与“L1 警告发送”时只发 L1（其文案本身携带当前
+  百分比），并将 `lastTickStep` 吸收到该阶梯，不当 turn 双注入。
 
 ### 12.2 配套：主动查询引导（方案 B）
 
@@ -468,8 +473,9 @@ percent ≥ L1 阈值 / L2 强制线                    → L1/L2 机制接管�
 
 ### 12.4 测试增量
 
-- 纯函数：usageTickStep 地板/天花板/自定义步长/0 关闭；buildUsageTickText 有无 ceiling 两形态。
-- wiring：30% 起逐阶梯通报且消息契约精确（customType/display:false/triggerTurn:false/details.tickStep）/
-  同阶梯不重复 / 边界抖动不重报、真实回落（压缩级）后重新武装 / 75% 处 L1 接管（customType 切换）/
+- 纯函数：usageTickStep 首阶梯以下/天花板/自定义步长/0 关闭；buildUsageTickText 低于/超过/无 ceiling 三形态。
+- wiring：10% 起逐阶梯通报且消息契约精确（customType/display:false/triggerTurn:false/details.tickStep）/
+  同阶梯不重复 / 边界抖动不重报、真实回落（压缩级）后重新武装 / 75% 处 L1 接管（customType 切换）、
+  L1 区域 tick 继续通报（80% 阶梯、超阈值文案）/
   threshold=0 时 tick 续命至 force 线 / tickStepPercent=0 全静默。
 - settings：usageTickStepPercent 解析（0、15、非法值回落默认）。

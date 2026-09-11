@@ -419,8 +419,8 @@ export interface CompactHintState {
   reserveTokens: number;
   lastHintAt: number;
   hintedAt: { effectivePercent: number; contextWindow: number } | undefined;
-  /** Step (percent points) between lightweight usage-tick reports below the
-   *  hint threshold; 0 disables ticks. */
+  /** Step (percent points) between lightweight usage-tick reports; ticks cover
+   *  the whole range below the force ceiling. 0 disables ticks. */
   tickStepPercent: number;
   /** Highest tick step already reported (0 = none). Re-armed downward only by
    *  a real drop larger than USAGE_TICK_HYSTERESIS_PERCENT (e.g. compaction),
@@ -550,39 +550,49 @@ export function createCompactHintHook(
       }
       return;
     }
+    // Usage ticks: lightweight stepped reports at every step so the model
+    // stays aware of context usage across the whole range — including the L1
+    // hint zone (the hint fires only once, ticks keep the visibility alive);
+    // the force zone (L2) owns the range at/above its ceiling. Latched per
+    // step; re-armed only by a real drop larger than the hysteresis (e.g.
+    // compaction), never by boundary wobble.
+    const tickCeiling = effectiveForce > 0 ? effectiveForce : 100;
+    const tick = usageTickStep(percent, state.tickStepPercent, tickCeiling);
+    if (tick < state.lastTickStep && percent <= state.lastTickStep - USAGE_TICK_HYSTERESIS_PERCENT) {
+      state.lastTickStep = tick;
+    }
+    const trySendTick = () => {
+      if (tick <= state.lastTickStep) return;
+      try {
+        deps.sendMessage(
+          {
+            customType: USAGE_TICK_CUSTOM_TYPE,
+            content: buildUsageTickText(percent, effective > 0 ? effective : 0),
+            display: false,
+            details: { percent, tickStep: tick },
+          },
+          { triggerTurn: false },
+        );
+        state.lastTickStep = tick;
+        if (debug) console.warn(`[pi-subagent] usage-tick sent percent=${percent} step=${tick} ceiling=${tickCeiling}`);
+      } catch (error) {
+        console.warn(`[pi-subagent] usage-tick send failed: ${String(error)}`);
+      }
+    };
     if (effective <= 0 || percent < effective) {
       state.hintedAt = undefined;
-      // Usage ticks: lightweight stepped reports so the model stays aware of
-      // context usage below the hint threshold (L1/L2 own the zone at/above
-      // the ceiling). Latched per step; re-armed only by a real drop larger
-      // than the hysteresis (e.g. compaction), never by boundary wobble.
-      const ceiling = effective > 0 ? effective : effectiveForce > 0 ? effectiveForce : 100;
-      const tick = usageTickStep(percent, state.tickStepPercent, ceiling);
-      if (tick < state.lastTickStep && percent <= state.lastTickStep - USAGE_TICK_HYSTERESIS_PERCENT) {
-        state.lastTickStep = tick;
-      }
-      if (tick > state.lastTickStep) {
-        try {
-          deps.sendMessage(
-            {
-              customType: USAGE_TICK_CUSTOM_TYPE,
-              content: buildUsageTickText(percent, effective > 0 ? effective : 0),
-              display: false,
-              details: { percent, tickStep: tick },
-            },
-            { triggerTurn: false },
-          );
-          state.lastTickStep = tick;
-          if (debug) console.warn(`[pi-subagent] usage-tick sent percent=${percent} step=${tick} ceiling=${ceiling}`);
-        } catch (error) {
-          console.warn(`[pi-subagent] usage-tick send failed: ${String(error)}`);
-        }
-      }
+      trySendTick();
       return;
     }
-    if (state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow) return;
+    if (state.hintedAt?.effectivePercent === effective && state.hintedAt.contextWindow === usage.contextWindow) {
+      trySendTick();
+      return;
+    }
     const timestamp = now();
-    if (state.lastHintAt > 0 && timestamp - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) return;
+    if (state.lastHintAt > 0 && timestamp - state.lastHintAt < COMPACT_HINT_COOLDOWN_MS) {
+      trySendTick();
+      return;
+    }
     try {
       deps.sendMessage(
         {
@@ -599,6 +609,9 @@ export function createCompactHintHook(
     }
     state.hintedAt = { effectivePercent: effective, contextWindow: usage.contextWindow };
     state.lastHintAt = timestamp;
+    // The hint already reports the current percent — absorb any pending tick
+    // step so we don't double-inject usage info in the same turn.
+    if (tick > state.lastTickStep) state.lastTickStep = tick;
     if (debug)
       console.warn(
         `[pi-subagent] compact-hint sent percent=${percent} effective=${effective} contextWindow=${usage.contextWindow}`,

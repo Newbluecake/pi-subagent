@@ -361,22 +361,22 @@ describe("compact hint turn_end wiring", () => {
     expect(state.hintedAt).toEqual({ effectivePercent: 75, contextWindow: 200000 });
   });
 
-  it("reports usage ticks at each 10% step from 30% with the exact message contract", () => {
+  it("reports usage ticks at each 10% step from 10% with the exact message contract", () => {
     const h = harness({ tickStepPercent: 10 });
-    h.hook({}, ctx(25));
-    expect(h.sent).toHaveLength(0); // below the 30% floor
-    h.hook({}, ctx(32));
+    h.hook({}, ctx(5));
+    expect(h.sent).toHaveLength(0); // below the first step
+    h.hook({}, ctx(12));
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]).toMatchObject({
-      message: { customType: "subagent:usage-tick", display: false, details: { tickStep: 30 } },
+      message: { customType: "subagent:usage-tick", display: false, details: { tickStep: 10 } },
       options: { triggerTurn: false },
     });
     expect((h.sent[0]?.message.content as string) ?? "").toContain("无需操作");
-    h.hook({}, ctx(38)); // same step, latched
+    h.hook({}, ctx(18)); // same step, latched
     expect(h.sent).toHaveLength(1);
-    h.hook({}, ctx(41));
+    h.hook({}, ctx(21));
     expect(h.sent).toHaveLength(2);
-    expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 40 });
+    expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 20 });
   });
 
   it("does not re-notify on boundary wobble but re-arms after a real drop", () => {
@@ -387,13 +387,13 @@ describe("compact hint turn_end wiring", () => {
     h.hook({}, ctx(60.4));
     expect(h.sent).toHaveLength(1);
     h.hook({}, ctx(25)); // compaction-scale drop re-arms the latch
-    expect(h.state.lastTickStep).toBe(0);
+    expect(h.state.lastTickStep).toBe(20); // re-armed to the current step (no floor)
     h.hook({}, ctx(31));
     expect(h.sent).toHaveLength(2);
     expect(h.sent[1]?.message.details).toMatchObject({ tickStep: 30 });
   });
 
-  it("hands ticks over to the L1 hint at the threshold and skips the covered step", () => {
+  it("keeps ticking in the L1 hint zone so usage stays visible up to the force ceiling", () => {
     const h = harness({ tickStepPercent: 10 });
     h.hook({}, ctx(70));
     expect(h.sent).toHaveLength(1);
@@ -401,6 +401,13 @@ describe("compact hint turn_end wiring", () => {
     h.hook({}, ctx(75));
     expect(h.sent).toHaveLength(2);
     expect(h.sent[1]?.message.customType).toBe("subagent:compact-hint"); // L1, not a tick
+    // The L1 hint fires only once; ticks keep reporting each new step in the
+    // hint zone (up to the 88% force ceiling) with the over-threshold wording.
+    h.hook({}, ctx(80));
+    expect(h.sent).toHaveLength(3);
+    expect(h.sent[2]?.message.customType).toBe("subagent:usage-tick");
+    expect(h.sent[2]?.message.details).toMatchObject({ tickStep: 80 });
+    expect((h.sent[2]?.message.content as string) ?? "").toContain("已超过提醒阈值 75%");
   });
 
   it("keeps ticking when the hint threshold is disabled and stops at the force ceiling", () => {

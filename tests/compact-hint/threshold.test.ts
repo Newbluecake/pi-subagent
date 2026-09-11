@@ -40,20 +40,23 @@ describe("compact hint thresholds", () => {
     expect(buildCompactHintText(80, 75, 0)).not.toContain("强制压缩");
   });
 
-  it("computes usage tick steps with floor and ceiling", () => {
-    expect(usageTickStep(25, 10, 75)).toBe(0); // below the 30% floor
+  it("computes usage tick steps from the first step up to the ceiling", () => {
+    expect(usageTickStep(5, 10, 75)).toBe(0); // below the first step
+    expect(usageTickStep(25, 10, 75)).toBe(20); // no floor: ticks start at 10%
     expect(usageTickStep(30, 10, 75)).toBe(30);
     expect(usageTickStep(39.9, 10, 75)).toBe(30);
     expect(usageTickStep(70, 10, 75)).toBe(70);
-    expect(usageTickStep(75, 10, 75)).toBe(0); // at/above the L1 ceiling
+    expect(usageTickStep(75, 10, 75)).toBe(0); // at/above the ceiling (force zone)
     expect(usageTickStep(45, 15, 75)).toBe(45); // custom step grid
     expect(usageTickStep(50, 0, 75)).toBe(0); // disabled
   });
 
-  it("builds the usage tick text with and without a hint ceiling", () => {
+  it("builds the usage tick text below, at/above the hint ceiling, and without one", () => {
     expect(buildUsageTickText(42, 75)).toContain("42%");
     expect(buildUsageTickText(42, 75)).toContain("75%");
     expect(buildUsageTickText(42, 75)).toContain("无需操作");
+    expect(buildUsageTickText(80, 75)).toContain("已超过提醒阈值 75%");
+    expect(buildUsageTickText(80, 75)).toContain("compact_context");
     expect(buildUsageTickText(42, 0)).not.toContain("compact_context");
   });
 });

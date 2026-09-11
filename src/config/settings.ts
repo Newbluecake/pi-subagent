@@ -86,9 +86,9 @@ export interface CompactSettings {
   enabled: boolean;
   hintThresholdPercent: number;
   forceAtPercent: number;
-  /** Step (percent points) between lightweight usage-tick reports below the
-   *  hint threshold; 0 disables ticks. Keeps the model aware of context usage
-   *  before the reminder fires. */
+  /** Step (percent points) between lightweight usage-tick reports; ticks cover
+   *  the whole range below the force ceiling. 0 disables ticks. Keeps the model
+   *  aware of context usage before the reminder fires. */
   usageTickStepPercent: number;
   assumedReserveTokens?: number;
 }

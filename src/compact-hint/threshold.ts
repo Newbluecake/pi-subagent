@@ -12,24 +12,24 @@ export const DEFAULT_FORCE_THRESHOLD_PERCENT = 88;
 export const USAGE_TICK_CUSTOM_TYPE = "subagent:usage-tick";
 /** Default step between usage-tick reports. 0 disables ticks. */
 export const DEFAULT_USAGE_TICK_STEP_PERCENT = 10;
-/** Lowest percent at which usage ticks start reporting. */
-export const USAGE_TICK_FLOOR_PERCENT = 30;
 /** Drop (in percent points) below the last tick step that re-arms the latch.
  *  Distinguishes a real context drop (compaction) from boundary wobble. */
 export const USAGE_TICK_HYSTERESIS_PERCENT = 5;
 
-/** Current tick step for a usage percent: multiples of `step` at or above the
- *  floor, 0 below it. Ticks never fire at/above `ceiling` (the L1 hint / force
- *  zone takes over there). */
+/** Current tick step for a usage percent: multiples of `step` (0 below the
+ *  first step, so ticks start at `step`% itself). Ticks never fire at/above
+ *  `ceiling` — the force-compaction zone owns that range. */
 export function usageTickStep(percent: number, step: number, ceiling: number): number {
-  if (step <= 0 || percent < USAGE_TICK_FLOOR_PERCENT || percent >= ceiling) return 0;
+  if (step <= 0 || percent >= ceiling) return 0;
   return Math.floor(percent / step) * step;
 }
 
-export function buildUsageTickText(percent: number, ceiling: number): string {
+export function buildUsageTickText(percent: number, hintCeiling: number): string {
   const hintLine =
-    ceiling > 0 && ceiling <= 100
-      ? `达到 ${ceiling}% 时会再提醒你考虑 compact_context；现在无需操作。`
+    hintCeiling > 0 && hintCeiling <= 100
+      ? percent >= hintCeiling
+        ? `已超过提醒阈值 ${hintCeiling}%；如果你正在收尾一个子任务，请尽快调用 compact_context。`
+        : `达到 ${hintCeiling}% 时会再提醒你考虑 compact_context；现在无需操作。`
       : "现在无需操作。";
   return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}`;
 }
