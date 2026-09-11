@@ -598,11 +598,34 @@ describe("view-model: buildFleetWidgetLines (agent tree)", () => {
       },
     })!;
     expect(tones).toContainEqual(["crit", "●"]);
-    expect(lines[1]).toContain("[crit]✗ stuck-00");
-    // calm row: segment-colored (muted meta), never whole-line tone-wrapped
+    // crit row: mark + label tone-tinted, meta segments keep the calm palette
+    expect(lines[1]).toContain("[crit]✗");
+    expect(lines[1]).toContain("[crit]stuck-00");
+    expect(lines[1]).toContain("[muted]");
+    // calm row: segment-colored (muted meta), label untinted
     expect(lines[2]).toContain("calm-000");
     expect(lines[2]).toContain("[muted]🤔");
     expect(lines[2]).not.toContain("[crit]");
+  });
+
+  it("warn row: mark and label take the warn tone, meta stays muted, activity keeps its normal colors", () => {
+    const idle = snapshot({
+      runId: "idle-0000",
+      diag: diag({
+        createdAt: 8_000,
+        lastEventAt: 9_000, // idle 1000 > 500 = warn
+        toolHistory: [{ name: "bash", toolCallId: "b", startedAt: 9_000, argsPreview: "go test" }],
+      }),
+    });
+    const lines = buildFleetWidgetLines(buildFleetViewModel([idle], OPTS), {
+      color: (tone, text) => `[${tone}]${text}`,
+    })!;
+    expect(lines[1]).toContain("[warn]!");
+    expect(lines[1]).toContain("[warn]idle-000");
+    expect(lines[1]).toContain("[muted]"); // meta segments keep the calm palette
+    // activity line: normal segment colors, no warn wash
+    expect(lines[2]).toContain("[header]▸bash go test");
+    expect(lines[2]).not.toContain("[warn]");
   });
 
   it("boundary: a calm run's activity line is muted except the in-flight ▸ segment (main rows stay the anchors)", () => {

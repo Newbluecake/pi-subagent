@@ -144,13 +144,13 @@ export interface WorkflowGroupInput {
   elapsedMs: number;
 }
 
-/** M-C: one run's main tree-row line. M10: segment-colored when a colorizer is
- *  provided — label plain (the eye-catcher), type/model/phase/phase-age/deadline/Σ-total/cost
- *  muted — so rows have visual depth instead of a uniform white line.
- *  warn/crit rows pass the identity colorizer here and get whole-line tone
- *  coloring from the caller instead (nesting SGR sequences would reset the
- *  outer color mid-line). Live activity (tool trail / thinking stream) is NOT
- *  on this line — see widgetRowActivity. */
+/** M-C: one run's main tree-row line. M10: segment-colored — label is the eye-catcher
+ *  (plain on calm rows, tone-tinted via `labelTone` on warn/crit rows),
+ *  type/model/phase/phase-age/deadline/Σ-total/cost muted — so rows have visual
+ *  depth instead of a uniform white line. Highlighted rows are NOT whole-line
+ *  tone-wrapped anymore (that erased the segment colors of healthy-but-quiet
+ *  runs; see renderRunLines). Live activity (tool trail / thinking stream) is
+ *  NOT on this line — see widgetRowActivity. */
 /** Exported for unit tests (VS16-bearing inputs are unreachable via FleetRow). */
 export function compactPhaseLabel(label: string): string {
   // Codepoint-aware first cluster (keeps a trailing U+FE0F variation
@@ -178,7 +178,12 @@ function deadlineField(row: FleetRow): string {
   return row.inGrace ? `⏳宽限${t}` : `⏳${t}${ext}`;
 }
 
-function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t, s) => s): string {
+function widgetRowMain(
+  row: FleetRow,
+  width: number,
+  color: FleetColorize = (_t, s) => s,
+  labelTone?: "warn" | "crit",
+): string {
   const modelFull = row.model;
   const modelBase = modelFull?.slice(modelFull.lastIndexOf("/") + 1);
   const fixed = `${compactPhaseLabel(row.phaseLabel)} ${formatDuration(row.phaseMs)}`;
@@ -226,7 +231,11 @@ function widgetRowMain(row: FleetRow, width: number, color: FleetColorize = (_t,
   const labelWidth = Math.max(1, width - nonLabelWidth);
   const finalLabel = visibleWidth(compose(label)) <= width ? label : truncateToWidth(label, labelWidth);
   const values = [finalLabel, ...fields.map((field) => shown.get(field.name)).filter((value) => value)];
-  return values.map((value, index) => (index === 0 ? value : color("muted", value!))).join(" ");
+  return values
+    .map((value, index) =>
+      index === 0 ? (labelTone === undefined ? value : color(labelTone, value!)) : color("muted", value!),
+    )
+    .join(" ");
 }
 
 /** The run's live-activity line (rendered on its own indented continuation
@@ -289,23 +298,25 @@ export function treeOrder(rows: readonly FleetRow[]): Array<{ row: FleetRow; dep
   return out;
 }
 
-/** M10: warn/crit rows → whole-line tone color (visibility beats prettiness); calm rows → segment colors.
- *  Returns 1–2 lines: the main row plus, when the run is mid-tool / mid-thought, an indented
+/** M10 (revised): warn/crit rows tint ONLY the mark (`!`/`✗`) and the label with the
+ *  tone color; every other segment keeps the calm-row palette (meta muted, in-flight ▸
+ *  accent). The previous whole-line tone wrap ("visibility beats prettiness") was
+ *  dropped: half-idle warn fires on healthy-but-quiet runs (a minutes-long silent
+ *  bash), and the whole-line yellow erased all segment colors, making a routine
+ *  state look like an alarm. mark+label remain the loudest elements on the line,
+ *  so the highlight stays unmissable without any SGR nesting. Returns 1–2 lines:
+ *  the main row plus, when the run is mid-tool / mid-thought, an indented
  *  activity continuation hung on a ╰ hook under the row's label (↳ replaced by space). */
 function renderRunLines(row: FleetRow, indent: string, color: FleetColorize, width: number): string[] {
   // ╰ hook sits directly under the row's label (mark column + space + indent),
   // so the continuation reads as hanging from the task name itself — without
   // it a bright trail line reads as the next agent's row.
   const pad = `  ${indent.replace(/↳/g, " ")}╰ `;
-  if (row.highlight !== "none") {
-    const main = color(
-      row.highlight,
-      `${WIDGET_MARK[row.highlight]} ${indent}${widgetRowMain(row, Math.max(1, width - visibleWidth(`${WIDGET_MARK[row.highlight]} ${indent}`)))}`,
-    );
-    const activity = widgetRowActivity(row);
-    return activity ? [main, color(row.highlight, `${pad}${activity}`)] : [main];
-  }
-  const main = `${WIDGET_MARK.none} ${indent}${widgetRowMain(row, Math.max(1, width - visibleWidth(`${WIDGET_MARK.none} ${indent}`)), color)}`;
+  const mark = WIDGET_MARK[row.highlight];
+  const markText = row.highlight === "none" ? mark : color(row.highlight, mark);
+  const prefixWidth = visibleWidth(`${mark} ${indent}`);
+  const labelTone = row.highlight === "none" ? undefined : row.highlight;
+  const main = `${markText} ${indent}${widgetRowMain(row, Math.max(1, width - prefixWidth), color, labelTone)}`;
   const activity = widgetRowActivity(row, color);
   return activity ? [main, `${pad}${activity}`] : [main];
 }

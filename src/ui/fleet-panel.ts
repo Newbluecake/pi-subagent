@@ -322,9 +322,9 @@ export function toolTrailOf(
  * Segment coloring for a toolTrailOf trail (the reference style: green ✓):
  * `✓` success, `✗` crit, tool names / counts / separators muted, and the
  * in-flight `▸` segment whole-segment accent so the live call stays the
- * eye-catcher. Pass the identity colorizer on warn/crit rows — the caller
- * wraps those whole lines in the highlight tone and nested SGR resets would
- * reset the outer color mid-line.
+ * eye-catcher. Safe to pass the real colorizer on warn/crit rows too — the
+ * widget no longer whole-line tone-wraps highlighted rows (mark + label carry
+ * the tone instead), so there is no outer SGR for these nested codes to reset.
  */
 export function colorizeToolTrail(trail: string, color: FleetColorize): string {
   return trail
