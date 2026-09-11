@@ -94,6 +94,28 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
     expect(port.seen?.slotless).toBeUndefined();
   });
 
+  it("run_in_background spawns carry detachSignalOnStart (host-turn abort must not cancel them); foreground spawnAndWait keeps full-turn linkage", async () => {
+    const bgPort = fakePort();
+    await createAgentTool({ spawn: bgPort }).execute(
+      "tc-bg",
+      { description: "d", prompt: "p", subagent_type: "worker", run_in_background: true },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(bgPort.seen?.detachSignalOnStart).toBe(true);
+
+    const fgPort = fakePort();
+    await createAgentTool({ spawn: fgPort }).execute(
+      "tc-fg",
+      { description: "d", prompt: "p", subagent_type: "worker" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(fgPort.seen?.detachSignalOnStart).toBeUndefined();
+  });
+
   it("forwards an optional schema through to the spawn request", async () => {
     const port = fakePort();
     const tool = createAgentTool({ spawn: port });

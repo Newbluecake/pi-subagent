@@ -272,7 +272,15 @@ export function createAgentTool(deps: {
         ...(params.schema !== undefined ? { schema: params.schema as Record<string, unknown> } : {}),
       };
       if (params.run_in_background) {
-        const spawned = await deps.spawn.spawn({ ...baseRequest, ...(signal ? { signal } : {}) });
+        // detachSignalOnStart: background runs are fire-and-forget — the
+        // external turn signal only gates admission; once started, aborting
+        // this host turn (Esc / compact_context / compact-hint) must not
+        // cancel the run.
+        const spawned = await deps.spawn.spawn({
+          ...baseRequest,
+          detachSignalOnStart: true,
+          ...(signal ? { signal } : {}),
+        });
         if ("error" in spawned) throw new Error(spawned.error.message);
         const effectiveLabel = spawned.label ?? params.description;
         return {

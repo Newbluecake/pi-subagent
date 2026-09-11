@@ -22,6 +22,11 @@ import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding
  *   follow-up user message after completion so the model resumes its task
  *   with the fresh summarized context (`resume` param, default true).
  *
+ * - Background subagents are NOT collateral damage: they spawn with
+ *   detachSignalOnStart and thus leave this turn's signal at start, so the
+ *   compaction abort only stops the turn's still-executing foreground tool
+ *   calls, never running background runs.
+ *
  * Loop safety: an in-flight guard plus a cooldown window refuse back-to-back
  * triggers, and the resume message tells the model not to compact again
  * unless the context grows large again.

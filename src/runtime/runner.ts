@@ -38,6 +38,15 @@ export interface ResolvedSpawnRequest extends SessionSpec {
   runId: string;
   prompt: string;
   signal?: AbortSignal;
+  /**
+   * Background-spawn semantics ("detached from the parent turn"): the
+   * external `signal` linkage is narrowed to the admission window — the
+   * runner detaches the external listener right after the cancel handle is
+   * created. An already-aborted signal still cancels immediately inside
+   * createCancelHandle (detach happens after handle creation). See
+   * SpawnRequest.detachSignalOnStart (core/types.ts).
+   */
+  detachSignalOnStart?: boolean;
   slotless?: boolean;
   /** X3: propagated through so RunState/RunSnapshot.parentRunId (core §5.1) is actually populated for nested runs — previously always undefined because nothing threaded it past RunnerSpec.request. */
   parentRunId?: string;
@@ -402,6 +411,7 @@ export class RuntimeRunner implements Runner {
       this.d.onChildAbort?.(req.runId, "parent_abort");
     });
     this.activeCancels.set(req.runId, { gen, cancel });
+    if (req.detachSignalOnStart) cancel.detach();
     let ticket: SlotTicket | undefined;
     let handle: SessionHandle | undefined;
     let createP: Promise<SessionHandle> | undefined;

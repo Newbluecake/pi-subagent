@@ -234,4 +234,65 @@ describe("RuntimeRunner: X3 onChildAbort cascade funnel point", () => {
     await p;
     expect(cascaded).toEqual([{ runId: "parent", cause: "parent_abort" }]);
   });
+
+  it("detachSignalOnStart: an external-signal abort after start does NOT cancel the run (background-spawn semantics)", async () => {
+    const clock = new FakeClock();
+    let releasePrompt!: () => void;
+    const driver: SessionDriver = {
+      create: async () =>
+        handle({
+          prompt: () =>
+            new Promise<void>((resolve) => {
+              releasePrompt = resolve;
+            }),
+        }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    const cascaded: Array<{ runId: string; cause: string }> = [];
+    const runner = new RuntimeRunner({
+      ...deps(clock, driver),
+      onChildAbort: (runId, cause) => cascaded.push({ runId, cause }),
+    });
+    const controller = new AbortController();
+    const req: ResolvedSpawnRequest = {
+      runId: "bg",
+      prompt: "hi",
+      signal: controller.signal,
+      detachSignalOnStart: true,
+    };
+    const p = runner.run(req, budget);
+    await drain(clock, 3);
+    // Host turn aborted (Esc / compact_context / compact-hint force) — with
+    // the external listener detached at start, none of this reaches the run.
+    controller.abort();
+    await drain(clock, 5);
+    expect(cascaded).toEqual([]);
+    releasePrompt();
+    const result = await p;
+    expect(result.status).toBe("completed");
+  });
+
+  it("detachSignalOnStart: an already-aborted external signal still cancels at admission (detach happens after handle creation)", async () => {
+    const clock = new FakeClock();
+    const never = <T>() => new Promise<T>(() => undefined);
+    const driver: SessionDriver = {
+      create: async () => handle({ prompt: () => never() }),
+      bind: async () => undefined,
+      onLateArrival() {},
+    };
+    const runner = new RuntimeRunner(deps(clock, driver));
+    const controller = new AbortController();
+    controller.abort();
+    const req: ResolvedSpawnRequest = {
+      runId: "bg-preaborted",
+      prompt: "hi",
+      signal: controller.signal,
+      detachSignalOnStart: true,
+    };
+    const p = runner.run(req, budget);
+    await drain(clock, 10);
+    const result = await p;
+    expect(result.status).toBe("aborted");
+  });
 });

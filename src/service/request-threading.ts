@@ -23,7 +23,7 @@ import type { ResolvedSpawnRequest } from "../runtime/runner.js";
  */
 
 /** Fields threaded verbatim into `ResolvedSpawnRequest` (same name, same meaning). */
-const THREADED = ["signal", "slotless", "resumeFrom", "parentRunId", "deadlineAt"] as const;
+const THREADED = ["signal", "detachSignalOnStart", "slotless", "resumeFrom", "parentRunId", "deadlineAt"] as const;
 
 /**
  * Fields deliberately NOT threaded verbatim, with the reason each is excluded

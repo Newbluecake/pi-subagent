@@ -173,6 +173,19 @@ export interface SpawnRequest {
    */
   isolation?: "worktree";
   signal?: AbortSignal;
+  /**
+   * When true, the external `signal` only takes effect during spawn
+   * admission (the existing `external?.aborted` immediate-cancel check in
+   * createCancelHandle is unaffected); once the run starts, the runner
+   * detaches the external listener so an abort of the caller's turn (Esc /
+   * compact_context / compact-hint forced compaction) no longer cancels
+   * this run. Only for fire-and-forget background spawns — foreground
+   * spawnAndWait keeps full-turn linkage on purpose (Esc killing a
+   * foreground run is a feature). Cancellation paths that go through
+   * activeCancels (abort_subagent, watchdog timeout, ...) are unaffected
+   * because detach only removes the external listener.
+   */
+  detachSignalOnStart?: boolean;
   /** Resume a terminal run by run id or directly by its persisted session file. */
   resumeFrom?: string;
   /**
