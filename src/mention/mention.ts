@@ -1,4 +1,5 @@
 import type { ExtensionAPI, InputEvent, InputEventResult } from "@earendil-works/pi-coding-agent";
+import type { Millis } from "../core/types.js";
 import type { SpawnRequest } from "../core/types.js";
 import type { QueryService } from "../service/query-service.js";
 import type { SpawnService } from "../service/spawn-service.js";
@@ -52,7 +53,7 @@ export async function routeMention(
     /** When true, wrap the user message with the message_agent reply hint (fabric on ⇒ targets own the tool). */
     fabricEnabled?: () => boolean;
     /** Optional sink recording the user's RAW @ message per target run, so the fleet widget can show it under the run. */
-    noteMention?: (runId: string, message: string) => void;
+    noteMention?: (runId: string, message: string, pendingSince?: Millis) => void;
     reportError?: (message: string) => void;
   },
 ): Promise<MentionRouteResult> {
@@ -65,7 +66,12 @@ export async function routeMention(
   if (snapshot?.status === "running") {
     const result = await deps.query.steer(target.runId, message);
     if (result.ok) {
-      deps.noteMention?.(target.runId, parsed.message);
+      // Pending note: baseline = the target's lastEventAt AFTER the steer landed.
+      // The note self-clears at the next turn_start past it (agent picked the
+      // message up); without this the @ text would hang under the row for the
+      // rest of a long run. A missing diag degrades to 0 (first turn clears).
+      const baseline = deps.query.get(target.runId)?.diag.lastEventAt ?? 0;
+      deps.noteMention?.(target.runId, parsed.message, baseline);
       return { handled: true, action: "steer", runId: target.runId };
     }
     const error = `cannot steer @${parsed.label}: ${result.detail ?? result.reason}`;
@@ -80,6 +86,8 @@ export async function routeMention(
       resumeFrom: target.runId,
     } satisfies SpawnRequest);
     if ("runId" in result) {
+      // Pinned note (no baseline): the @ message IS the resumed run's task
+      // description and later its awaiting-pickup preview.
       deps.noteMention?.(result.runId, parsed.message);
       return { handled: true, action: "resume", runId: result.runId };
     }

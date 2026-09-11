@@ -73,6 +73,8 @@ import { parseDeliveryKey } from "./core/delivery-key.js";
 import { UsageBroadcaster } from "./delivery/usage-broadcast.js";
 import { formatOutcomeSummary } from "./tools/agent-tool.js";
 import { createMentionRegistry, type MentionRegistry } from "./mention/registry.js";
+import { createMentionNotes, type MentionNotes } from "./mention/notes.js";
+export type { MentionNotes };
 import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
 import { PiSessionDriver } from "./runtime/session-driver.js";
 import { SingleSlotPool } from "./runtime/slot-pool.js";
@@ -405,12 +407,6 @@ export interface WorkflowSupport {
    * that anchor (the same X3 pattern nested `Agent` delegation already uses).
    */
   createOrchestrator(workflowId: WorkflowId): Orchestrator;
-}
-
-/** X6b: latest raw user @ message per run (session-scoped), surfaced by the fleet widget. */
-export interface MentionNotes {
-  set(runId: string, message: string): void;
-  get(runId: string): string | undefined;
 }
 
 export interface CompactHintState {
@@ -747,15 +743,10 @@ export function buildSessionStack(
   }
   const spawnRef: { current?: SpawnService } = {};
   const mention = createMentionRegistry();
-  // X6b: session-scoped, capped FIFO — notes are one-line previews, never read back into context.
-  const mentionNotesMap = new Map<string, string>();
-  const mentionNotes: MentionNotes = {
-    set(runId, message) {
-      if (mentionNotesMap.size >= 200) mentionNotesMap.delete(mentionNotesMap.keys().next().value!);
-      mentionNotesMap.set(runId, message);
-    },
-    get: (runId) => mentionNotesMap.get(runId),
-  };
+  // X6b: session-scoped, capped FIFO — notes are one-line previews, never read
+  // back into context. Pending (steer-path) notes self-clear once the target run
+  // starts a fresh model turn past the recorded baseline (see mention/notes.ts).
+  const mentionNotes = createMentionNotes({ diagOf: (runId) => store.get(runId)?.diag });
   const mentionRef = { current: mention };
   let query: QueryService;
   const fabric = settings.fabric.enabled

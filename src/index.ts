@@ -357,7 +357,7 @@ export default function activate(pi: ExtensionAPI): void {
     // message_agent reply hint only when fabric is on (subagents own the tool then)
     fabricEnabled: () => holder.current?.fabric != null,
     // X6b: surface the user's raw @ message in the fleet widget under the target run
-    noteMention: (runId, message) => holder.current?.mentionNotes.set(runId, message),
+    noteMention: (runId, message, pendingSince) => holder.current?.mentionNotes.set(runId, message, pendingSince),
   });
 
   pi.on("session_start", async (_event, ctx) => {

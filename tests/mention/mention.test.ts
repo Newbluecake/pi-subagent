@@ -119,27 +119,45 @@ describe("X6 @handle mention", () => {
   it("records the raw user message via noteMention on both steer and resume paths", async () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: "run-1", type: "worker" });
-    const notes: [string, string][] = [];
-    const noteMention = (runId: string, message: string) => notes.push([runId, message]);
-    // steer path: noted against the running target, raw (unframed) message
+    const notes: [string, string, number | undefined][] = [];
+    const noteMention = (runId: string, message: string, pendingSince?: number) =>
+      notes.push([runId, message, pendingSince]);
+    // steer path: noted against the running target, raw (unframed) message, with a
+    // pending baseline taken from the target's post-steer lastEventAt
+    const steered = snapshot("run-1", "running");
+    steered.diag.lastEventAt = 42;
+    steered.diag.lastEventType = "tool_end";
     await routeMention("@builder 进展如何", {
       registry,
-      query: { get: () => snapshot("run-1", "running"), steer: async () => ({ ok: true as const }) },
+      query: { get: () => steered, steer: async () => ({ ok: true as const }) },
       spawn: { spawn: async () => ({ runId: "unexpected" }) },
       fabricEnabled: () => true,
       noteMention,
     });
-    expect(notes).toEqual([["run-1", "进展如何"]]);
-    // resume path: noted against the NEW run id
-    const notes2: [string, string][] = [];
+    expect(notes).toEqual([["run-1", "进展如何", 42]]);
+    // resume path: noted against the NEW run id, pinned (no baseline)
+    const notes2: [string, string, number | undefined][] = [];
     await routeMention("@builder 继续", {
       registry,
       query: { get: () => snapshot("run-1", "completed"), steer: async () => undefined },
       spawn: { spawn: async () => ({ runId: "run-2" }) },
       fabricEnabled: () => true,
-      noteMention: (runId, message) => notes2.push([runId, message]),
+      noteMention: (runId, message, pendingSince) => notes2.push([runId, message, pendingSince]),
     });
-    expect(notes2).toEqual([["run-2", "继续"]]);
+    expect(notes2).toEqual([["run-2", "继续", undefined]]);
+  });
+
+  it("degrades the steer baseline to 0 when the target diag has no events yet", async () => {
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    const notes: [string, string, number | undefined][] = [];
+    await routeMention("@builder 在吗", {
+      registry,
+      query: { get: () => snapshot("run-1", "running"), steer: async () => ({ ok: true as const }) },
+      spawn: { spawn: async () => ({ runId: "unexpected" }) },
+      noteMention: (runId, message, pendingSince) => notes.push([runId, message, pendingSince]),
+    });
+    expect(notes).toEqual([["run-1", "在吗", 0]]);
   });
 
   it("sends the raw message when fabric is disabled", async () => {
