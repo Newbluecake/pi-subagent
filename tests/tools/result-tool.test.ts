@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createResultTool } from "../../src/tools/result-tool.js";
+import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { CappedBody, createResultTool } from "../../src/tools/result-tool.js";
 import type { QueryService } from "../../src/service/query-service.js";
 import type { RunSnapshot, UsageDelta } from "../../src/core/types.js";
 
@@ -649,5 +650,103 @@ describe("renderResult (notification-style card)", () => {
     expect(rendered).toContain("⏳ header");
     expect(rendered).toContain("✗ oops");
     expect(rendered).not.toContain("more lines");
+  });
+
+  // Identity-styled MarkdownTheme: formatting functions pass text through, so
+  // rendered output differs from the source only in markdown structure (e.g.
+  // the leading "# " of a heading is consumed by the parser).
+  const fakeMdTheme: MarkdownTheme = {
+    heading: (s) => s,
+    link: (s) => s,
+    linkUrl: (s) => s,
+    code: (s) => s,
+    codeBlock: (s) => s,
+    codeBlockBorder: (s) => s,
+    quote: (s) => s,
+    quoteBorder: (s) => s,
+    hr: (s) => s,
+    listBullet: (s) => s,
+    bold: (s) => s,
+    italic: (s) => s,
+    strikethrough: (s) => s,
+    underline: (s) => s,
+  };
+
+  it("renders the body with the Markdown component when a markdownTheme is injected", () => {
+    const tool = createResultTool({
+      query: queryForSnapshot(completedSnapshot()),
+      markdownTheme: () => fakeMdTheme,
+    });
+    const component = tool.renderResult!(
+      {
+        content: [{ type: "text", text: "# 标题\n\nbody text" }],
+        details: { runId: "r1", status: "completed", summary: "1 turn" },
+      } as never,
+      { isPartial: false, expanded: true } as never,
+      theme,
+      ctx,
+    );
+    expect(component).toBeInstanceOf(Container);
+    expect((component as Container).children.some((c) => c instanceof Markdown)).toBe(true);
+    const rendered = componentText(component);
+    expect(rendered).toContain("✓ ");
+    expect(rendered).toContain("标题");
+    expect(rendered).not.toMatch(/^# /m); // heading marker consumed by the parser
+  });
+
+  it("caps rendered markdown lines (not source lines) and expands fully", () => {
+    // >6 source lines including a code fence: cutting the *source* at 6 lines
+    // would split the fence; the cap applies to rendered output instead.
+    const body = [
+      "# Report",
+      "",
+      "```ts",
+      "const a = 1;",
+      "const b = 2;",
+      "const c = 3;",
+      "const d = 4;",
+      "```",
+      "",
+      "tail-line",
+    ].join("\n");
+    const tool = createResultTool({
+      query: queryForSnapshot(completedSnapshot()),
+      markdownTheme: () => fakeMdTheme,
+    });
+    const result = {
+      content: [{ type: "text", text: body }],
+      details: { runId: "r1", status: "completed" },
+    } as never;
+    const collapsedComponent = tool.renderResult!(result, { isPartial: false, expanded: false } as never, theme, ctx);
+    const collapsedBody = (collapsedComponent as Container).children[0];
+    expect(collapsedBody).toBeInstanceOf(CappedBody);
+    expect((collapsedBody as CappedBody).inner).toBeInstanceOf(Markdown);
+    const collapsed = collapsedComponent.render(100);
+    expect(collapsed.length).toBeLessThanOrEqual(7); // 6 rendered lines + overflow marker
+    expect(collapsed.join("\n")).toMatch(/… \+\d+ more lines/);
+    const expanded = componentText(
+      tool.renderResult!(result, { isPartial: false, expanded: true } as never, theme, ctx),
+    );
+    expect(expanded).toContain("tail-line");
+    expect(expanded).not.toContain("more lines");
+  });
+
+  it("is byte-identical to the legacy plain-text card when markdownTheme resolves to undefined", () => {
+    const body = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n");
+    const result = {
+      content: [{ type: "text", text: body }],
+      details: { runId: "r1", status: "completed", label: "demo", summary: "1 turn" },
+    } as never;
+    const legacy = createResultTool({ query: queryForSnapshot(completedSnapshot()) });
+    const explicit = createResultTool({
+      query: queryForSnapshot(completedSnapshot()),
+      markdownTheme: () => undefined,
+    });
+    for (const expanded of [false, true]) {
+      const options = { isPartial: false, expanded } as never;
+      expect(componentText(explicit.renderResult!(result, options, theme, ctx))).toBe(
+        componentText(legacy.renderResult!(result, options, theme, ctx)),
+      );
+    }
   });
 });

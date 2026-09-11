@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, Text, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
@@ -60,6 +60,31 @@ export type { PollGuardOptions } from "./poll-guard.js";
 /** Default blocking-wait budget for get_subagent_result when wait:true and no explicit wait_ms (5 minutes). */
 export const DEFAULT_WAIT_MS = 300_000;
 
+/** Collapsed body line budget, shared by the plain-text fallback and the markdown render paths. */
+const COLLAPSED_BODY_LINES = 6;
+
+/**
+ * Caps a component's *rendered* output to `cap` lines, appending an overflow
+ * marker line. Truncating rendered lines rather than the markdown source
+ * keeps code fences and tables structurally intact — cutting the source
+ * could split a fence and corrupt everything after it.
+ */
+export class CappedBody implements Component {
+  constructor(
+    readonly inner: Component,
+    private readonly cap: number,
+    private readonly overflowLine: (hidden: number) => string,
+  ) {}
+  render(width: number): string[] {
+    const lines = this.inner.render(width);
+    if (lines.length <= this.cap) return lines;
+    return [...lines.slice(0, this.cap), this.overflowLine(lines.length - this.cap)];
+  }
+  invalidate(): void {
+    this.inner.invalidate();
+  }
+}
+
 /** Partial-update / final-result details consumed by renderResult (mirrors AgentToolDetails in agent-tool.ts). */
 export interface ResultToolDetails {
   runId?: string;
@@ -82,6 +107,13 @@ export function createResultTool(deps: {
   pollGuard?: PollGuardOptions;
   timeoutStreak?: TimeoutStreakOptions;
   resultMaxChars?: () => number;
+  /**
+   * Resolves the host's MarkdownTheme for rendering the result body with the
+   * Markdown component. Optional and lazy: hosts without an initialized theme
+   * subsystem (headless runs, tests) return undefined and get the legacy
+   * plain-text card instead.
+   */
+  markdownTheme?: () => MarkdownTheme | undefined;
 }): ToolDefinition<typeof ResultToolParams> {
   const pollGuard = createPollGuard(deps.pollGuard);
   const waitStreak = createTimeoutStreak(deps.timeoutStreak);
@@ -165,15 +197,40 @@ export function createResultTool(deps: {
         text.setText(rendered);
         return text;
       }
+      const summaryLine = details.summary
+        ? theme.fg(
+            details.status === "completed" ? "muted" : "error",
+            `${details.status === "completed" ? "✓" : "✗"} ${details.label ? `"${details.label}" · ` : ""}${details.summary}`,
+          )
+        : undefined;
+      // Rich path: render the body as Markdown when the host provides a theme.
+      // Fresh components per call are safe here — pi's ToolExecutionComponent
+      // re-invokes renderResult on every setExpanded()/updateDisplay(); only
+      // the streaming partial path above relies on context.lastComponent reuse.
+      const mdTheme = deps.markdownTheme?.();
+      if (mdTheme !== undefined && (summaryLine !== undefined || body)) {
+        const container = new Container();
+        if (summaryLine !== undefined) container.addChild(new Text(summaryLine, 0, 0));
+        if (body) {
+          // padding 0/0: the tool card's outer Box already supplies padding.
+          const markdown = new Markdown(body, 0, 0, mdTheme);
+          container.addChild(
+            options.expanded
+              ? markdown
+              : new CappedBody(markdown, COLLAPSED_BODY_LINES, (hidden) =>
+                  theme.fg("muted", `… +${hidden} more lines`),
+                ),
+          );
+        }
+        return container;
+      }
       const parts: string[] = [];
-      if (details.summary) {
-        const ok = details.status === "completed";
-        const who = details.label ? `"${details.label}" · ` : "";
-        parts.push(theme.fg(ok ? "muted" : "error", `${ok ? "✓" : "✗"} ${who}${details.summary}`));
+      if (summaryLine !== undefined) {
+        parts.push(summaryLine);
       }
       if (body) {
         const lines = body.split("\n");
-        const cap = 6;
+        const cap = COLLAPSED_BODY_LINES;
         if (!options.expanded && lines.length > cap) {
           parts.push(lines.slice(0, cap).join("\n"));
           parts.push(theme.fg("muted", `… +${lines.length - cap} more lines`));

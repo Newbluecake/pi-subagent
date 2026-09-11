@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
@@ -207,6 +208,17 @@ export default function activate(pi: ExtensionAPI): void {
       resolveRun: forwardResolveRun(holder),
       notifier: forwardNotifier(holder),
       resultMaxChars: () => settings.resultMaxChars,
+      // Markdown body rendering for the result card. getMarkdownTheme() reads
+      // pi's global theme, which throws before the interactive theme subsystem
+      // is initialized (headless/print mode, tests) — fall back to the legacy
+      // plain-text card in that case.
+      markdownTheme: () => {
+        try {
+          return getMarkdownTheme();
+        } catch {
+          return undefined;
+        }
+      },
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
