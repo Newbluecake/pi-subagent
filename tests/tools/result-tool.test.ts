@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { CappedBody, createResultTool } from "../../src/tools/result-tool.js";
+import { createResultTool } from "../../src/tools/result-tool.js";
+import { CappedBody } from "../../src/ui/capped-body.js";
 import type { QueryService } from "../../src/service/query-service.js";
 import type { RunSnapshot, UsageDelta } from "../../src/core/types.js";
 

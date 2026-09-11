@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { createAgentTool, type NestedSpawnPort } from "../../src/tools/agent-tool.js";
+import { CappedBody } from "../../src/ui/capped-body.js";
 import type { RunDiagnostics, RunOutcome, SpawnRequest } from "../../src/core/types.js";
 
 function outcome(
@@ -381,5 +382,116 @@ describe("tools/agent-tool: thinking parameter passthrough", () => {
       {} as never,
     );
     expect(port.seen && "thinkingOverride" in port.seen).toBe(false);
+  });
+});
+
+describe("tools/agent-tool: renderResult (markdown body)", () => {
+  const theme = { fg: (_color: string, t: string) => t, bold: (t: string) => t };
+  const ctx = (lastComponent?: unknown) => ({ lastComponent, state: {} });
+  const componentText = (c: unknown) => (c as { render(width: number): string[] }).render(100).join("\n");
+  const renderFinal = (tool: ReturnType<typeof createAgentTool>, body: string, expanded: boolean) =>
+    tool.renderResult!(
+      {
+        content: [{ type: "text", text: body }],
+        details: { runId: "r1", status: "completed", summary: "1 turn" },
+      } as never,
+      { isPartial: false, expanded } as never,
+      theme as never,
+      ctx() as never,
+    );
+
+  // Identity-styled MarkdownTheme: formatting functions pass text through, so
+  // rendered output differs from the source only in markdown structure (e.g.
+  // the leading "# " of a heading is consumed by the parser).
+  const fakeMdTheme: MarkdownTheme = {
+    heading: (s) => s,
+    link: (s) => s,
+    linkUrl: (s) => s,
+    code: (s) => s,
+    codeBlock: (s) => s,
+    codeBlockBorder: (s) => s,
+    quote: (s) => s,
+    quoteBorder: (s) => s,
+    hr: (s) => s,
+    listBullet: (s) => s,
+    bold: (s) => s,
+    italic: (s) => s,
+    strikethrough: (s) => s,
+    underline: (s) => s,
+  };
+
+  it("renders the body with the Markdown component when a markdownTheme is injected", () => {
+    const tool = createAgentTool({ spawn: fakePort(), markdownTheme: () => fakeMdTheme });
+    const component = renderFinal(tool, "# 标题\n\nbody text", true);
+    expect(component).toBeInstanceOf(Container);
+    expect((component as Container).children.some((c) => c instanceof Markdown)).toBe(true);
+    const rendered = componentText(component);
+    expect(rendered).toContain("✓ ");
+    expect(rendered).toContain("标题");
+    expect(rendered).not.toMatch(/^# /m); // heading marker consumed by the parser
+  });
+
+  it("caps rendered markdown lines (not source lines) and expands fully", () => {
+    // >6 source lines including a code fence: cutting the *source* at 6 lines
+    // would split the fence; the cap applies to rendered output instead.
+    const body = [
+      "# Report",
+      "",
+      "```ts",
+      "const a = 1;",
+      "const b = 2;",
+      "const c = 3;",
+      "const d = 4;",
+      "```",
+      "",
+      "tail-line",
+    ].join("\n");
+    const tool = createAgentTool({ spawn: fakePort(), markdownTheme: () => fakeMdTheme });
+    const result = {
+      content: [{ type: "text", text: body }],
+      details: { runId: "r1", status: "completed" },
+    } as never;
+    const collapsedComponent = tool.renderResult!(
+      result,
+      { isPartial: false, expanded: false } as never,
+      theme as never,
+      ctx() as never,
+    );
+    const collapsedBody = (collapsedComponent as Container).children[0];
+    expect(collapsedBody).toBeInstanceOf(CappedBody);
+    expect((collapsedBody as CappedBody).inner).toBeInstanceOf(Markdown);
+    const collapsed = collapsedComponent.render(100);
+    expect(collapsed.length).toBeLessThanOrEqual(7); // 6 rendered lines + overflow marker
+    expect(collapsed.join("\n")).toMatch(/… \+\d+ more lines/);
+    const expanded = componentText(
+      tool.renderResult!(result, { isPartial: false, expanded: true } as never, theme as never, ctx() as never),
+    );
+    expect(expanded).toContain("tail-line");
+    expect(expanded).not.toContain("more lines");
+  });
+
+  it("is byte-identical to the legacy plain-text card when markdownTheme resolves to undefined", () => {
+    const body = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n");
+    const legacy = createAgentTool({ spawn: fakePort() });
+    const explicit = createAgentTool({ spawn: fakePort(), markdownTheme: () => undefined });
+    for (const expanded of [false, true]) {
+      expect(componentText(renderFinal(explicit, body, expanded))).toBe(
+        componentText(renderFinal(legacy, body, expanded)),
+      );
+    }
+  });
+
+  it("keeps the streaming partial path on the reused Text component", () => {
+    const tool = createAgentTool({ spawn: fakePort(), markdownTheme: () => fakeMdTheme });
+    const partial = {
+      content: [{ type: "text", text: "⏳ working" }],
+      details: { runId: "r1", progress: ["⏳ header", "✓ done", "✗ oops"] },
+    } as never;
+    const options = { isPartial: true } as never;
+    const first = tool.renderResult!(partial, options, theme as never, ctx() as never);
+    expect(first).toBeInstanceOf(Text);
+    const second = tool.renderResult!(partial, options, theme as never, ctx(first) as never);
+    expect(second).toBe(first); // lastComponent reuse preserved
+    expect(componentText(second)).toContain("✗ oops");
   });
 });

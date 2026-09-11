@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import { Container, Markdown, Text, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { QueryService } from "../service/query-service.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
@@ -15,6 +15,7 @@ import {
   type TimeoutStreakResult,
 } from "./poll-guard.js";
 import { toPiToolUsage } from "./usage.js";
+import { COLLAPSED_BODY_LINES, CappedBody } from "../ui/capped-body.js";
 import { truncateResultText } from "./result-text.js";
 
 /**
@@ -59,31 +60,6 @@ export type { PollGuardOptions } from "./poll-guard.js";
 
 /** Default blocking-wait budget for get_subagent_result when wait:true and no explicit wait_ms (5 minutes). */
 export const DEFAULT_WAIT_MS = 300_000;
-
-/** Collapsed body line budget, shared by the plain-text fallback and the markdown render paths. */
-const COLLAPSED_BODY_LINES = 6;
-
-/**
- * Caps a component's *rendered* output to `cap` lines, appending an overflow
- * marker line. Truncating rendered lines rather than the markdown source
- * keeps code fences and tables structurally intact — cutting the source
- * could split a fence and corrupt everything after it.
- */
-export class CappedBody implements Component {
-  constructor(
-    readonly inner: Component,
-    private readonly cap: number,
-    private readonly overflowLine: (hidden: number) => string,
-  ) {}
-  render(width: number): string[] {
-    const lines = this.inner.render(width);
-    if (lines.length <= this.cap) return lines;
-    return [...lines.slice(0, this.cap), this.overflowLine(lines.length - this.cap)];
-  }
-  invalidate(): void {
-    this.inner.invalidate();
-  }
-}
 
 /** Partial-update / final-result details consumed by renderResult (mirrors AgentToolDetails in agent-tool.ts). */
 export interface ResultToolDetails {

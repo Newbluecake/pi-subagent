@@ -187,6 +187,17 @@ export default function activate(pi: ExtensionAPI): void {
   } else {
     console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
   }
+  // Markdown body rendering for the Agent / get_subagent_result cards.
+  // getMarkdownTheme() reads pi's global theme, which throws before the
+  // interactive theme subsystem is initialized (headless/print mode, tests)
+  // — the tools fall back to their legacy plain-text cards in that case.
+  const resolveMarkdownTheme = () => {
+    try {
+      return getMarkdownTheme();
+    } catch {
+      return undefined;
+    }
+  };
   pi.registerTool(
     createAgentTool({
       spawn: forwardSpawn(holder),
@@ -200,6 +211,7 @@ export default function activate(pi: ExtensionAPI): void {
         waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
         markAutoBackgrounded: (runId) => requireStack(holder).spawn.markAutoBackgrounded(runId),
       },
+      markdownTheme: resolveMarkdownTheme,
     }),
   );
   pi.registerTool(
@@ -208,17 +220,7 @@ export default function activate(pi: ExtensionAPI): void {
       resolveRun: forwardResolveRun(holder),
       notifier: forwardNotifier(holder),
       resultMaxChars: () => settings.resultMaxChars,
-      // Markdown body rendering for the result card. getMarkdownTheme() reads
-      // pi's global theme, which throws before the interactive theme subsystem
-      // is initialized (headless/print mode, tests) — fall back to the legacy
-      // plain-text card in that case.
-      markdownTheme: () => {
-        try {
-          return getMarkdownTheme();
-        } catch {
-          return undefined;
-        }
-      },
+      markdownTheme: resolveMarkdownTheme,
     }),
   );
   pi.registerTool(createSteerTool({ query: forwardQuery(holder), resolveRun: forwardResolveRun(holder) }));
